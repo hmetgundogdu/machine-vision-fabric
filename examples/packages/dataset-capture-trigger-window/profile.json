@@ -1,0 +1,26 @@
+{
+  "name": "dataset-capture-trigger-window",
+  "mode": "dataset-collection-profile",
+  "description": "Trigger-window capture profile using a sequenced simulated gate.",
+  "capabilities": [
+    "dataset-capture",
+    "trigger-window-capture",
+    "simulator-source"
+  ],
+  "source": {
+    "mode": "module",
+    "moduleId": "mvf.folder-source",
+    "config": {
+      "sourceFolder": "..\\dataset-capture-starter\\assets\\images",
+      "loop": true,
+      "frameIntervalMs": 100,
+      "parallelCameraCount": 1
+    }
+  },
+  "simulatorSource": {
+    "sourceFolder": "..\\dataset-capture-starter\\assets\\images",
+    "loop": true,
+    "frameIntervalMs": 100,
+    "parallelCameraCount": 1
+  }
+}

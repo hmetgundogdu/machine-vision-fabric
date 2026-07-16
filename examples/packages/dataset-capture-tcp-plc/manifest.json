@@ -1,0 +1,33 @@
+{
+  "name": "dataset-capture-tcp-plc",
+  "version": "0.1.0",
+  "entryProfile": "profile.json",
+  "scenario": "dataset-capture",
+  "capturePolicy": {
+    "enabled": true,
+    "requireProductPresent": true,
+    "maxFramesPerCamera": 2,
+    "includeSourcePathInMetadata": true,
+    "mode": "built-in"
+  },
+  "productPresenceGate": {
+    "mode": "module",
+    "moduleId": "mvf.tcp-plc-gate",
+    "config": {
+      "host": "127.0.0.1",
+      "port": 15020,
+      "requestPayload": "READ product.present",
+      "productPresentValue": "1",
+      "productAbsentValue": "0",
+      "connectTimeoutMs": 1500,
+      "readTimeoutMs": 1500,
+      "sourceName": "tcp-plc-gate",
+      "stationId": "station-1"
+    }
+  },
+  "requiredDirectories": [
+    "assets",
+    "assets/images",
+    "assets/configs"
+  ]
+}

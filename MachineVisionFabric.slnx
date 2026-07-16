@@ -1,0 +1,34 @@
+<Solution>
+  <Folder Name="/examples/integrations/">
+    <Project Path="examples/integrations/MachineVisionFabric.Integrations.FolderSource/MachineVisionFabric.Integrations.FolderSource.csproj" />
+    <Project Path="examples/integrations/MachineVisionFabric.Integrations.ResidentCameraStub/MachineVisionFabric.Integrations.ResidentCameraStub.csproj" />
+    <Project Path="examples/integrations/MachineVisionFabric.Integrations.S7GatewayGate/MachineVisionFabric.Integrations.S7GatewayGate.csproj" />
+    <Project Path="examples/integrations/MachineVisionFabric.Integrations.SimulatedGate/MachineVisionFabric.Integrations.SimulatedGate.csproj" />
+    <Project Path="examples/integrations/MachineVisionFabric.Integrations.TcpPlcGate/MachineVisionFabric.Integrations.TcpPlcGate.csproj" />
+  </Folder>
+  <Folder Name="/examples/sources/">
+    <Project Path="examples/sources/MachineVisionFabric.Sources.Simulators/MachineVisionFabric.Sources.Simulators.csproj" />
+  </Folder>
+  <Folder Name="/examples/tools/">
+    <Project Path="examples/tools/MachineVisionFabric.TcpSignalSimulator/MachineVisionFabric.TcpSignalSimulator.csproj" />
+    <Project Path="examples/tools/MachineVisionFabric.SyntheticConveyorSimulator/MachineVisionFabric.SyntheticConveyorSimulator.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/MachineVisionFabric.Cli/MachineVisionFabric.Cli.csproj" />
+    <Project Path="src/MachineVisionFabric.Contracts/MachineVisionFabric.Contracts.csproj" />
+    <Project Path="src/MachineVisionFabric.Core/MachineVisionFabric.Core.csproj" />
+    <Project Path="src/MachineVisionFabric.Host/MachineVisionFabric.Host.csproj" />
+    <Project Path="src/MachineVisionFabric.Runtime/MachineVisionFabric.Runtime.csproj" />
+    <Project Path="src/MachineVisionFabric.Sdk/MachineVisionFabric.Sdk.csproj" />
+    <Project Path="src/MachineVisionFabric.Storage/MachineVisionFabric.Storage.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MachineVisionFabric.Runtime.Tests/MachineVisionFabric.Runtime.Tests.csproj" />
+  </Folder>
+  <Folder Name="/real-world-projects/integrations/">
+    <Project Path="real-world-projects/integrations/MachineVisionFabric.Integrations.CameraDatasetStarter/MachineVisionFabric.Integrations.CameraDatasetStarter.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/MachineVisionFabric.SchemaExporter/MachineVisionFabric.SchemaExporter.csproj" />
+  </Folder>
+</Solution>

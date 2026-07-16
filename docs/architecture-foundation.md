@@ -582,7 +582,7 @@ Bu yüzden önerilen model:
 
 ```text
 pipeline-package/
-├─ pipeline.json
+├─ profile.json
 ├─ assets/
 │  ├─ models/
 │  ├─ scripts/
@@ -645,3 +645,24 @@ Node lifecycle tarafında net varsayılan:
 - `ai-model`: resident + preload
 - `short helper process`: on-demand
 - `heavy external process`: varsayılan resident, override edilebilir
+
+## 14. Headless Dataset-First MVP Alignment
+
+The current MVP direction is intentionally narrower than the long-term platform vision.
+
+For the first working version:
+
+- prioritize dataset collection
+- prioritize headless execution
+- prioritize package, simulator, and storage foundations
+- defer UI and advanced inference flows
+
+Recommended first working flow:
+
+`simulated source -> dataset capture output`
+
+Recommended second working flow:
+
+`PLC gate -> simulated source -> dataset capture output`
+
+This approach keeps the early runtime grounded in real operational value while preserving the future typed graph model.

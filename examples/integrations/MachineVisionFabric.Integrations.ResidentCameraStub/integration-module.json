@@ -1,0 +1,15 @@
+{
+  "moduleId": "mvf.resident-camera-stub",
+  "displayName": "Resident Camera Stub",
+  "version": "0.1.0",
+  "entryAssembly": "MachineVisionFabric.Integrations.ResidentCameraStub.dll",
+  "entryType": "MachineVisionFabric.Integrations.ResidentCameraStub.ResidentCameraStubIntegrationModule",
+  "capabilities": [
+    {
+      "name": "resident-camera-source",
+      "kind": 0,
+      "schemaType": "MachineVisionFabric.Integrations.ResidentCameraStub.ResidentCameraStubOptions",
+      "description": "Streams frames from a resident, channel-backed camera stub session."
+    }
+  ]
+}

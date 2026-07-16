@@ -1,0 +1,38 @@
+{
+  "name": "dataset-capture-cognex-hmi-trigger-window",
+  "mode": "dataset-collection-profile",
+  "description": "Manual-trigger Cognex HMI profile for pipeline-level trigger-window validation.",
+  "capabilities": [
+    "dataset-capture",
+    "cognex-camera-source",
+    "trigger-window"
+  ],
+  "source": {
+    "mode": "module",
+    "moduleId": "mvf.realworld-cognex-camera",
+    "config": {
+      "ipAddress": "10.159.131.19",
+      "cameraId": "cognex-cam-1",
+      "username": "admin",
+      "password": "",
+      "hmiPort": 8087,
+      "hmiWebSocketPath": "/ws",
+      "hmiUseTls": false,
+      "responseTimeoutMs": 1500,
+      "boundedCapacity": 8,
+      "maxFrames": 6,
+      "acquisitionMode": "manual-trigger-loop",
+      "manualTriggerIntervalMs": 600,
+      "reopenSessionBeforeManualTrigger": true,
+      "manualTriggerRetryCount": 3,
+      "startupDelayMs": 0,
+      "hmiImageQuery": ""
+    }
+  },
+  "simulatorSource": {
+    "sourceFolder": ".\\assets",
+    "loop": false,
+    "frameIntervalMs": 100,
+    "parallelCameraCount": 1
+  }
+}

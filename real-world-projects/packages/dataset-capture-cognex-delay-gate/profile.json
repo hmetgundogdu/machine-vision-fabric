@@ -1,0 +1,38 @@
+{
+  "name": "dataset-capture-cognex-delay-gate",
+  "mode": "dataset-collection-profile",
+  "description": "Cognex HMI profile with a temporary 10-second delayed product gate.",
+  "capabilities": [
+    "dataset-capture",
+    "cognex-camera-source",
+    "delay-gate"
+  ],
+  "source": {
+    "mode": "module",
+    "moduleId": "mvf.realworld-cognex-camera",
+    "config": {
+      "ipAddress": "10.159.131.19",
+      "cameraId": "cognex-cam-1",
+      "username": "admin",
+      "password": "",
+      "hmiPort": 8087,
+      "hmiWebSocketPath": "/ws",
+      "hmiUseTls": false,
+      "responseTimeoutMs": 1500,
+      "boundedCapacity": 8,
+      "maxFrames": 30,
+      "acquisitionMode": "manual-trigger-loop",
+      "manualTriggerIntervalMs": 600,
+      "reopenSessionBeforeManualTrigger": true,
+      "manualTriggerRetryCount": 3,
+      "startupDelayMs": 0,
+      "hmiImageQuery": ""
+    }
+  },
+  "simulatorSource": {
+    "sourceFolder": ".\\assets",
+    "loop": false,
+    "frameIntervalMs": 100,
+    "parallelCameraCount": 1
+  }
+}

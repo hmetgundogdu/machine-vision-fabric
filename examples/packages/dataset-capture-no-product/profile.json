@@ -1,0 +1,25 @@
+{
+  "name": "dataset-capture-no-product",
+  "mode": "dataset-collection-profile",
+  "description": "Profile that validates product-absent gating without collecting frames.",
+  "capabilities": [
+    "dataset-capture",
+    "simulator-source"
+  ],
+  "source": {
+    "mode": "module",
+    "moduleId": "mvf.folder-source",
+    "config": {
+      "sourceFolder": "assets/images",
+      "loop": true,
+      "frameIntervalMs": 250,
+      "parallelCameraCount": 2
+    }
+  },
+  "simulatorSource": {
+    "sourceFolder": "assets/images",
+    "loop": true,
+    "frameIntervalMs": 250,
+    "parallelCameraCount": 2
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "dataset-capture-resident-camera-stub",
+  "version": "0.1.0",
+  "entryProfile": "profile.json",
+  "scenario": "resident-camera-stub-dataset-capture",
+  "capturePolicy": {
+    "enabled": true,
+    "requireProductPresent": true,
+    "maxFramesPerCamera": 4,
+    "includeSourcePathInMetadata": true,
+    "mode": "full-stream"
+  },
+  "productPresenceGate": {
+    "mode": "module",
+    "moduleId": "mvf.simulated-gate",
+    "config": {
+      "enabled": true,
+      "productPresent": true,
+      "sourceName": "resident-camera-stub-gate",
+      "stationId": "station-resident-camera",
+      "details": "Resident camera stub sample keeps the source alive and always allows capture."
+    }
+  },
+  "requiredDirectories": [
+    "assets",
+    "assets/configs"
+  ]
+}

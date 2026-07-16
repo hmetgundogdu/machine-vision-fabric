@@ -1,0 +1,15 @@
+{
+  "moduleId": "mvf.folder-source",
+  "displayName": "Folder Sequence Source",
+  "version": "0.1.0",
+  "entryAssembly": "MachineVisionFabric.Integrations.FolderSource.dll",
+  "entryType": "MachineVisionFabric.Integrations.FolderSource.FolderSourceIntegrationModule",
+  "capabilities": [
+    {
+      "name": "folder-sequence-source",
+      "kind": 0,
+      "schemaType": "MachineVisionFabric.Contracts.Simulation.FolderSequenceSourceOptions",
+      "description": "Enumerates image files from a package-relative folder as dataset frames."
+    }
+  ]
+}

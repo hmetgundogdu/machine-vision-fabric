@@ -1,0 +1,39 @@
+{
+  "name": "dataset-capture-s7-gateway",
+  "version": "0.1.0",
+  "entryProfile": "profile.json",
+  "scenario": "dataset-capture",
+  "capturePolicy": {
+    "enabled": true,
+    "requireProductPresent": true,
+    "maxFramesPerCamera": 2,
+    "includeSourcePathInMetadata": true,
+    "mode": "built-in"
+  },
+  "productPresenceGate": {
+    "mode": "module",
+    "moduleId": "mvf.s7-gateway-gate",
+    "config": {
+      "host": "127.0.0.1",
+      "port": 15020,
+      "rack": 0,
+      "slot": 1,
+      "address": {
+        "dataBlockNumber": 1,
+        "byteOffset": 0,
+        "bitOffset": 0
+      },
+      "productPresentValue": "1",
+      "productAbsentValue": "0",
+      "connectTimeoutMs": 1500,
+      "readTimeoutMs": 1500,
+      "sourceName": "s7-gateway-gate",
+      "stationId": "station-1"
+    }
+  },
+  "requiredDirectories": [
+    "assets",
+    "assets/images",
+    "assets/configs"
+  ]
+}

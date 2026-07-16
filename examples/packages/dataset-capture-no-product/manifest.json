@@ -1,0 +1,29 @@
+{
+  "name": "dataset-capture-no-product",
+  "version": "0.1.0",
+  "entryProfile": "profile.json",
+  "scenario": "dataset-capture",
+  "capturePolicy": {
+    "enabled": true,
+    "requireProductPresent": true,
+    "maxFramesPerCamera": 2,
+    "includeSourcePathInMetadata": true,
+    "mode": "built-in"
+  },
+  "productPresenceGate": {
+    "mode": "module",
+    "moduleId": "mvf.simulated-gate",
+    "config": {
+      "enabled": true,
+      "productPresent": false,
+      "sourceName": "simulated-gate-module",
+      "stationId": "station-1",
+      "details": "External integration module decides that no product is present."
+    }
+  },
+  "requiredDirectories": [
+    "assets",
+    "assets/images",
+    "assets/configs"
+  ]
+}

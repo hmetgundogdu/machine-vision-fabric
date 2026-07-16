@@ -1,0 +1,26 @@
+using System.Reflection;
+using System.Runtime.Loader;
+
+namespace MachineVisionFabric.Runtime.Plugins;
+
+public sealed class IntegrationPluginLoadContext : AssemblyLoadContext
+{
+    private readonly AssemblyDependencyResolver _resolver;
+
+    public IntegrationPluginLoadContext(string pluginPath)
+        : base(isCollectible: false)
+    {
+        _resolver = new AssemblyDependencyResolver(pluginPath);
+    }
+
+    protected override Assembly? Load(AssemblyName assemblyName)
+    {
+        if (assemblyName.Name is "MachineVisionFabric.Contracts" or "MachineVisionFabric.Core")
+        {
+            return null;
+        }
+
+        var assemblyPath = _resolver.ResolveAssemblyToPath(assemblyName);
+        return assemblyPath is null ? null : LoadFromAssemblyPath(assemblyPath);
+    }
+}

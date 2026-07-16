@@ -1,0 +1,32 @@
+{
+  "name": "dataset-capture-cognex-delay-gate",
+  "version": "0.1.0",
+  "entryProfile": "profile.json",
+  "scenario": "cognex-delay-gate-dataset-capture",
+  "capturePolicy": {
+    "enabled": true,
+    "requireProductPresent": true,
+    "preTriggerFramesPerCamera": 2,
+    "postTriggerFramesPerCamera": 3,
+    "gateEvaluationIntervalFrames": 1,
+    "includeSourcePathInMetadata": true,
+    "mode": "trigger-window"
+  },
+  "productPresenceGate": {
+    "mode": "module",
+    "moduleId": "mvf.simulated-gate",
+    "config": {
+      "enabled": true,
+      "productPresent": false,
+      "delayBeforePresentMs": 10000,
+      "holdLastSequenceValue": true,
+      "sourceName": "delay-gate-10s",
+      "stationId": "station-cognex-delay",
+      "details": "Temporary product gate. It stays false for 10 seconds, then turns true for pipeline validation without PLC."
+    }
+  },
+  "requiredDirectories": [
+    "assets",
+    "assets/configs"
+  ]
+}

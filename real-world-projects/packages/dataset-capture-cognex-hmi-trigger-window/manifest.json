@@ -1,0 +1,32 @@
+{
+  "name": "dataset-capture-cognex-hmi-trigger-window",
+  "version": "0.1.0",
+  "entryProfile": "profile.json",
+  "scenario": "cognex-hmi-trigger-window-dataset-capture",
+  "capturePolicy": {
+    "enabled": true,
+    "requireProductPresent": true,
+    "preTriggerFramesPerCamera": 1,
+    "postTriggerFramesPerCamera": 2,
+    "gateEvaluationIntervalFrames": 1,
+    "includeSourcePathInMetadata": true,
+    "mode": "trigger-window"
+  },
+  "productPresenceGate": {
+    "mode": "module",
+    "moduleId": "mvf.simulated-gate",
+    "config": {
+      "enabled": true,
+      "productPresent": false,
+      "productPresentSequence": [ false, false, true, true, true ],
+      "holdLastSequenceValue": true,
+      "sourceName": "cognex-trigger-window-gate",
+      "stationId": "station-cognex-trigger-window",
+      "details": "Trigger-window Cognex sample. Replace this simulated gate with TCP or S7 gate when the real product signal is ready."
+    }
+  },
+  "requiredDirectories": [
+    "assets",
+    "assets/configs"
+  ]
+}

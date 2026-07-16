@@ -1,26 +1,30 @@
-# Açık Sorular
+# Open Questions
 
-Bu sorular sonraki adımı daraltmak için hâlâ değerli:
+These questions are still useful, but they are no longer blocking the current headless MVP:
 
-1. Diagram editörü sadece konfigürasyon mu üretecek, yoksa canlı runtime gözlemi ve sınırlı müdahale de yapacak mı?
-2. Python node'ları ilk sürümde sadece `external executable` olarak mı başlayacak, yoksa `resident sidecar worker` da ilk fazda gelecek mi?
-3. Ağ yayını için ilk gerçek öncelik hangisi: cihazlar arası RTSP/SRT mi, yoksa önce metadata/event akışı mı?
-4. Telemetry buffer dolduğunda hangi olaylar düşürülebilir, hangileri mutlaka yerel log'a da yazılmalı?
-5. Pipeline klasör paketinde dış process dosyaları için ileride güven/imza doğrulaması gerekecek mi?
+1. How visible should the difference be between built-in dataset collection and future pipeline-defined collection flows?
+2. Should Python integration begin as `external executable` only, or should a `resident sidecar worker` appear in the first runtime expansion?
+3. Should PLC-gated capture enter immediately after simulator-based collection, or stay one phase later?
+4. When telemetry buffers fill up, which events may be dropped and which must always land in local logs?
+5. Will package-level trust or signature validation be required later for external processes and scripts?
 
-Şu kararlar artık net kabul ediliyor:
+## Decisions Already Locked
 
 - `Windows-first`
 - strict typed graph
-- ayrı `data edge` ve `control edge`
-- `PLC control node` graph içinde birinci sınıf node
+- separate `data edge` and `control edge`
+- `PLC control node` remains a first-class graph concept
 - `JSON + folder package` import/export
-- telemetry opsiyonel ve non-blocking
-- ilk telemetry tercihi `WebSocket`
-- gerçek kamera ilk MVP için zorunlu değil
-- multi-simulator source yaklaşımı tercih ediliyor
+- telemetry is optional and non-blocking
+- first telemetry preference is `WebSocket`
+- real vendor cameras are not required for the first MVP
+- multi-simulator source approach is preferred
+- first MVP is `dataset-first`
+- first MVP is `headless-first`
 
-Netleşmesi gereken en yakın ürün kararı:
+## Nearest Product Decision
 
-- `MVP önce runtime + local studio + PLC control node + multi-simulator source` mu olacak
-- yoksa ilk sprintte temel ONNX node ve package import/export da birlikte mi istenecek
+The nearest scope decision is now:
+
+- first complete increment = `built-in dataset capture + multi-simulator + package import`
+- next increment = `PLC gate + actual frame persistence + session metadata`

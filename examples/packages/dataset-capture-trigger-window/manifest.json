@@ -1,0 +1,32 @@
+{
+  "name": "dataset-capture-trigger-window",
+  "version": "0.1.0",
+  "entryProfile": "profile.json",
+  "scenario": "trigger-window-dataset-capture",
+  "capturePolicy": {
+    "enabled": true,
+    "requireProductPresent": true,
+    "preTriggerFramesPerCamera": 2,
+    "postTriggerFramesPerCamera": 2,
+    "gateEvaluationIntervalFrames": 1,
+    "includeSourcePathInMetadata": true,
+    "mode": "trigger-window"
+  },
+  "productPresenceGate": {
+    "mode": "module",
+    "moduleId": "mvf.simulated-gate",
+    "config": {
+      "enabled": true,
+      "productPresent": false,
+      "productPresentSequence": [ false, false, false, true, true ],
+      "holdLastSequenceValue": true,
+      "sourceName": "simulated-sequence-gate",
+      "stationId": "station-trigger-window",
+      "details": "Trigger-window sample flips to product present after several frame-aligned gate evaluations."
+    }
+  },
+  "requiredDirectories": [
+    "assets",
+    "assets/configs"
+  ]
+}

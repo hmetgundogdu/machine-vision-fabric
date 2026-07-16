@@ -1,0 +1,15 @@
+﻿{
+  "moduleId": "mvf.realworld-cognex-camera",
+  "displayName": "Cognex Camera HMI Source",
+  "version": "0.1.0",
+  "entryAssembly": "MachineVisionFabric.Integrations.CognexCamera.dll",
+  "entryType": "MachineVisionFabric.Integrations.CognexCamera.CognexCameraIntegrationModule",
+  "capabilities": [
+    {
+      "name": "cognex-camera-source",
+      "kind": 0,
+      "schemaType": "MachineVisionFabric.Integrations.CognexCamera.CognexCameraOptions",
+      "description": "Resident Cognex In-Sight HMI-backed source module for real-world dataset collection."
+    }
+  ]
+}

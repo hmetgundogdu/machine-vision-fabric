@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/integrations/">
+    <Project Path="integrations/MachineVisionFabric.Integrations.CameraDatasetStarter/MachineVisionFabric.Integrations.CameraDatasetStarter.csproj" />
+    <Project Path="integrations/MachineVisionFabric.Integrations.CognexCamera/MachineVisionFabric.Integrations.CognexCamera.csproj" />
+  </Folder>
+</Solution>

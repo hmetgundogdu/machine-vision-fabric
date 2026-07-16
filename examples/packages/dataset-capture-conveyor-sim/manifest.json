@@ -1,0 +1,29 @@
+{
+  "name": "dataset-capture-conveyor-sim",
+  "version": "0.1.0",
+  "entryProfile": "profile.json",
+  "scenario": "synthetic-conveyor-dataset-capture",
+  "capturePolicy": {
+    "enabled": true,
+    "requireProductPresent": true,
+    "maxFramesPerCamera": 16,
+    "includeSourcePathInMetadata": true,
+    "mode": "built-in"
+  },
+  "productPresenceGate": {
+    "mode": "module",
+    "moduleId": "mvf.simulated-gate",
+    "config": {
+      "enabled": true,
+      "productPresent": true,
+      "sourceName": "simulated-gate-module",
+      "stationId": "station-1",
+      "details": "Synthetic conveyor scenario keeps the station active while collecting frames."
+    }
+  },
+  "requiredDirectories": [
+    "assets",
+    "assets/images",
+    "assets/annotations"
+  ]
+}

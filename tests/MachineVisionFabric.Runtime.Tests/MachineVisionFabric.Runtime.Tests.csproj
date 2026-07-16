@@ -1,0 +1,34 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\examples\integrations\MachineVisionFabric.Integrations.FolderSource\MachineVisionFabric.Integrations.FolderSource.csproj" />
+    <ProjectReference Include="..\..\examples\integrations\MachineVisionFabric.Integrations.ResidentCameraStub\MachineVisionFabric.Integrations.ResidentCameraStub.csproj" />
+    <ProjectReference Include="..\..\examples\integrations\MachineVisionFabric.Integrations.S7GatewayGate\MachineVisionFabric.Integrations.S7GatewayGate.csproj" />
+    <ProjectReference Include="..\..\examples\integrations\MachineVisionFabric.Integrations.SimulatedGate\MachineVisionFabric.Integrations.SimulatedGate.csproj" />
+    <ProjectReference Include="..\..\examples\integrations\MachineVisionFabric.Integrations.TcpPlcGate\MachineVisionFabric.Integrations.TcpPlcGate.csproj" />
+    <ProjectReference Include="..\..\src\MachineVisionFabric.Contracts\MachineVisionFabric.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\MachineVisionFabric.Core\MachineVisionFabric.Core.csproj" />
+    <ProjectReference Include="..\..\src\MachineVisionFabric.Runtime\MachineVisionFabric.Runtime.csproj" />
+    <ProjectReference Include="..\..\src\MachineVisionFabric.Storage\MachineVisionFabric.Storage.csproj" />
+    <ProjectReference Include="..\..\examples\sources\MachineVisionFabric.Sources.Simulators\MachineVisionFabric.Sources.Simulators.csproj" />
+  </ItemGroup>
+
+</Project>

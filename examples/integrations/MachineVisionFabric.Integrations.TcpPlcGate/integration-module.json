@@ -1,0 +1,15 @@
+{
+  "moduleId": "mvf.tcp-plc-gate",
+  "displayName": "TCP PLC Product Presence Gate",
+  "version": "0.1.0",
+  "entryAssembly": "MachineVisionFabric.Integrations.TcpPlcGate.dll",
+  "entryType": "MachineVisionFabric.Integrations.TcpPlcGate.TcpPlcGateIntegrationModule",
+  "capabilities": [
+    {
+      "name": "tcp-product-presence-gate",
+      "kind": 1,
+      "schemaType": "MachineVisionFabric.Contracts.Control.TcpSignalGateOptions",
+      "description": "Reads a product presence signal from a simple TCP line-based endpoint."
+    }
+  ]
+}

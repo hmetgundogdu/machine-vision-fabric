@@ -1,0 +1,12 @@
+{
+  "fileName": "frame-0004.bmp",
+  "sequenceNumber": 4,
+  "productPresent": true,
+  "sensorActive": false,
+  "boundingBox": {
+    "x": -96,
+    "y": 150,
+    "width": 96,
+    "height": 60
+  }
+}

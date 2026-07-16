@@ -1,0 +1,25 @@
+{
+  "name": "dataset-capture-starter",
+  "mode": "dataset-collection-profile",
+  "description": "Platform-level starter profile for simulator-driven dataset collection.",
+  "capabilities": [
+    "dataset-capture",
+    "simulator-source"
+  ],
+  "source": {
+    "mode": "module",
+    "moduleId": "mvf.folder-source",
+    "config": {
+      "sourceFolder": "assets/images",
+      "loop": true,
+      "frameIntervalMs": 250,
+      "parallelCameraCount": 2
+    }
+  },
+  "simulatorSource": {
+    "sourceFolder": "assets/images",
+    "loop": true,
+    "frameIntervalMs": 250,
+    "parallelCameraCount": 2
+  }
+}

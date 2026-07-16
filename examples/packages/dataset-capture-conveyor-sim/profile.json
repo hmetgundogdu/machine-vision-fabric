@@ -1,0 +1,25 @@
+{
+  "name": "dataset-capture-conveyor-sim",
+  "mode": "dataset-collection-profile",
+  "description": "Synthetic conveyor simulator profile for richer dataset collection trials.",
+  "capabilities": [
+    "dataset-capture",
+    "simulator-source"
+  ],
+  "source": {
+    "mode": "module",
+    "moduleId": "mvf.folder-source",
+    "config": {
+      "sourceFolder": "assets/images",
+      "loop": false,
+      "frameIntervalMs": 100,
+      "parallelCameraCount": 1
+    }
+  },
+  "simulatorSource": {
+    "sourceFolder": "assets/images",
+    "loop": false,
+    "frameIntervalMs": 100,
+    "parallelCameraCount": 1
+  }
+}

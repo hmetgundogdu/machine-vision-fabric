@@ -111,7 +111,7 @@ Beklenen yapı:
 
 ```text
 pipeline-package/
-├─ pipeline.json
+├─ profile.json
 ├─ assets/
 │  ├─ models/
 │  ├─ scripts/

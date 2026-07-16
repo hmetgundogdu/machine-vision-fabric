@@ -1,0 +1,29 @@
+{
+  "name": "dataset-capture-resident-camera-stub",
+  "mode": "dataset-collection-profile",
+  "description": "Resident, channel-backed camera stub profile for adapter integration work.",
+  "capabilities": [
+    "dataset-capture",
+    "resident-camera-source",
+    "simulator-source"
+  ],
+  "source": {
+    "mode": "module",
+    "moduleId": "mvf.resident-camera-stub",
+    "config": {
+      "sourceFolder": "..\\dataset-capture-starter\\assets\\images",
+      "cameraId": "resident-cam-1",
+      "loop": true,
+      "frameIntervalMs": 75,
+      "boundedCapacity": 4,
+      "maxFrames": 4,
+      "deliverMemoryFrames": true
+    }
+  },
+  "simulatorSource": {
+    "sourceFolder": "..\\dataset-capture-starter\\assets\\images",
+    "loop": true,
+    "frameIntervalMs": 75,
+    "parallelCameraCount": 1
+  }
+}

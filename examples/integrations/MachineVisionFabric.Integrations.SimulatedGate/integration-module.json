@@ -1,0 +1,15 @@
+{
+  "moduleId": "mvf.simulated-gate",
+  "displayName": "Simulated Product Presence Gate",
+  "version": "0.1.0",
+  "entryAssembly": "MachineVisionFabric.Integrations.SimulatedGate.dll",
+  "entryType": "MachineVisionFabric.Integrations.SimulatedGate.SimulatedGateIntegrationModule",
+  "capabilities": [
+    {
+      "name": "product-presence-gate",
+      "kind": 1,
+      "schemaType": "MachineVisionFabric.Contracts.Control.SimulatedPlcGateOptions",
+      "description": "Simulated PLC-backed product presence gate for dataset collection tests."
+    }
+  ]
+}

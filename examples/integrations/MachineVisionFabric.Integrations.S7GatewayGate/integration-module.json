@@ -1,0 +1,15 @@
+{
+  "moduleId": "mvf.s7-gateway-gate",
+  "displayName": "S7 Gateway Product Presence Gate",
+  "version": "0.1.0",
+  "entryAssembly": "MachineVisionFabric.Integrations.S7GatewayGate.dll",
+  "entryType": "MachineVisionFabric.Integrations.S7GatewayGate.S7GatewayGateIntegrationModule",
+  "capabilities": [
+    {
+      "name": "s7-gateway-product-presence-gate",
+      "kind": 1,
+      "schemaType": "MachineVisionFabric.Contracts.Control.S7GatewayGateOptions",
+      "description": "Reads an S7-style DB/byte/bit product presence signal through a TCP gateway."
+    }
+  ]
+}

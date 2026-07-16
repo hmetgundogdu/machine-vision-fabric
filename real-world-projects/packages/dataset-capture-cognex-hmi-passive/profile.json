@@ -1,0 +1,38 @@
+{
+  "name": "dataset-capture-cognex-hmi-passive",
+  "mode": "dataset-collection-profile",
+  "description": "Passive Cognex HMI profile for stations where the camera is triggered outside the platform.",
+  "capabilities": [
+    "dataset-capture",
+    "cognex-camera-source",
+    "passive-listen"
+  ],
+  "source": {
+    "mode": "module",
+    "moduleId": "mvf.realworld-cognex-camera",
+    "config": {
+      "ipAddress": "10.159.131.19",
+      "cameraId": "cognex-cam-1",
+      "username": "admin",
+      "password": "",
+      "hmiPort": 8087,
+      "hmiWebSocketPath": "/ws",
+      "hmiUseTls": false,
+      "responseTimeoutMs": 1500,
+      "boundedCapacity": 8,
+      "maxFrames": 5,
+      "acquisitionMode": "passive-listen",
+      "manualTriggerIntervalMs": 500,
+      "reopenSessionBeforeManualTrigger": true,
+      "manualTriggerRetryCount": 3,
+      "startupDelayMs": 0,
+      "hmiImageQuery": ""
+    }
+  },
+  "simulatorSource": {
+    "sourceFolder": ".\\assets",
+    "loop": false,
+    "frameIntervalMs": 100,
+    "parallelCameraCount": 1
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "dataset-capture-camera-starter",
+  "version": "0.1.0",
+  "entryProfile": "profile.json",
+  "scenario": "real-world-camera-dataset-capture",
+  "capturePolicy": {
+    "enabled": true,
+    "requireProductPresent": true,
+    "maxFramesPerCamera": 4,
+    "includeSourcePathInMetadata": true,
+    "mode": "full-stream"
+  },
+  "productPresenceGate": {
+    "mode": "builtin"
+  },
+  "requiredDirectories": [
+    "assets",
+    "assets/images",
+    "assets/configs"
+  ]
+}

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\MachineVisionFabric.Contracts\MachineVisionFabric.Contracts.csproj" />
+    <ProjectReference Include="..\..\..\src\MachineVisionFabric.Core\MachineVisionFabric.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="integration-module.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

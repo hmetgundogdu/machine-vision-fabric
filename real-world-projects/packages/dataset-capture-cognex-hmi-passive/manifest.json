@@ -1,0 +1,28 @@
+{
+  "name": "dataset-capture-cognex-hmi-passive",
+  "version": "0.1.0",
+  "entryProfile": "profile.json",
+  "scenario": "cognex-hmi-passive-dataset-capture",
+  "capturePolicy": {
+    "enabled": true,
+    "requireProductPresent": true,
+    "maxFramesPerCamera": 5,
+    "includeSourcePathInMetadata": true,
+    "mode": "full-stream"
+  },
+  "productPresenceGate": {
+    "mode": "module",
+    "moduleId": "mvf.simulated-gate",
+    "config": {
+      "enabled": true,
+      "productPresent": true,
+      "sourceName": "cognex-passive-gate",
+      "stationId": "station-cognex-passive",
+      "details": "Passive Cognex capture profile. Gate is kept open so externally triggered camera frames are stored immediately."
+    }
+  },
+  "requiredDirectories": [
+    "assets",
+    "assets/configs"
+  ]
+}
