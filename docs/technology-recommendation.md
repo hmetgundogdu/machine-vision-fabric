@@ -1,4 +1,4 @@
-# DynoVisionPipeline Teknoloji Önerisi
+# MachineVisionFabric Teknoloji Önerisi
 
 ## Kısa Sonuç
 

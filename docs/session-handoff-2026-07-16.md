@@ -1,4 +1,4 @@
-# DynoVisionPipeline Session Handoff
+# MachineVisionFabric Session Handoff
 
 Tarih: `2026-07-16`
 
@@ -8,7 +8,7 @@ Bu dosya, başka bir oturumda projeye hızlı devam edebilmek için hazırlanmı
 
 Proje adı:
 
-- `DynoVisionPipeline`
+- `MachineVisionFabric`
 
 Proje tipi:
 
@@ -273,13 +273,13 @@ Ek not:
 
 ## 14. Bu Oturumda Oluşturulan Ana Dokümanlar
 
-- [README.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\README.md)
-- [architecture-foundation.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\architecture-foundation.md)
-- [legacy-project-findings.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\legacy-project-findings.md)
-- [technology-recommendation.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\technology-recommendation.md)
-- [open-questions.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\open-questions.md)
-- [AGENTS.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\AGENTS.md)
-- [CLAUDE.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\CLAUDE.md)
+- [README.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\README.md)
+- [architecture-foundation.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\architecture-foundation.md)
+- [legacy-project-findings.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\legacy-project-findings.md)
+- [technology-recommendation.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\technology-recommendation.md)
+- [open-questions.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\open-questions.md)
+- [AGENTS.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\AGENTS.md)
+- [CLAUDE.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\CLAUDE.md)
 
 ## 15. Kalan Açık Sorular
 
@@ -314,9 +314,9 @@ En mantıklı bir sonraki çalışma:
 
 Başka bir oturumda devam ederken ilk okunacak dosya bu olsun:
 
-- [session-handoff-2026-07-16.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\session-handoff-2026-07-16.md)
+- [session-handoff-2026-07-16.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\session-handoff-2026-07-16.md)
 
 Sonra sırasıyla:
 
-- [architecture-foundation.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\architecture-foundation.md)
-- [technology-recommendation.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\technology-recommendation.md)
+- [architecture-foundation.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\architecture-foundation.md)
+- [technology-recommendation.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\technology-recommendation.md)

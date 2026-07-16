@@ -1,10 +1,10 @@
 # AGENTS.md
 
-Bu dosya, `DynoVisionPipeline` reposunda çalışan AI agent'lar ve geliştiriciler için çalışma rehberidir.
+Bu dosya, `MachineVisionFabric` reposunda çalışan AI agent'lar ve geliştiriciler için çalışma rehberidir.
 
 ## 1. Proje Amacı
 
-DynoVisionPipeline, şirket içi ağlarda panel PC, endüstriyel PC ve NUC cihazlarda çalışan açık kaynak bir `vision integration and execution platform` hedefler.
+MachineVisionFabric, şirket içi ağlarda panel PC, endüstriyel PC ve NUC cihazlarda çalışan açık kaynak bir `vision integration and execution platform` hedefler.
 
 Temel hedefler:
 
@@ -28,7 +28,7 @@ Temel hedefler:
 Şu an repo erken aşamadadır. Temel alanlar:
 
 ```text
-DynoVisionPipeline/
+MachineVisionFabric/
 ├─ docs/
 ├─ src/
 ├─ samples/
@@ -37,10 +37,10 @@ DynoVisionPipeline/
 
 Doküman başlangıç noktaları:
 
-- [README.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\README.md)
-- [architecture-foundation.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\architecture-foundation.md)
-- [technology-recommendation.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\technology-recommendation.md)
-- [open-questions.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\open-questions.md)
+- [README.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\README.md)
+- [architecture-foundation.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\architecture-foundation.md)
+- [technology-recommendation.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\technology-recommendation.md)
+- [open-questions.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\open-questions.md)
 
 Kod iskeleti oluştuğunda bu dosyayı solution ve proje bazında genişlet.
 

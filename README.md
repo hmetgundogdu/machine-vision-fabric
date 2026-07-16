@@ -1,6 +1,6 @@
-# DynoVisionPipeline
+# MachineVisionFabric
 
-DynoVisionPipeline, endüstriyel ve genel amaçlı görüntü kaynaklarını ortak bir entegrasyon modeliyle alıp diyagram tabanlı veri işleme akışlarında çalıştırmayı hedefleyen açık kaynak bir pipeline platformudur.
+MachineVisionFabric, endüstriyel ve genel amaçlı görüntü kaynaklarını ortak bir entegrasyon modeliyle alıp diyagram tabanlı veri işleme akışlarında çalıştırmayı hedefleyen açık kaynak bir pipeline platformudur.
 
 İlk odak:
 
@@ -31,18 +31,18 @@ Bu yön seçildi çünkü eski projede Windows donanım entegrasyonları ve eşz
 
 ## Dokümanlar
 
-- [Eski Proje Bulguları](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\legacy-project-findings.md)
-- [Mimari Temel](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\architecture-foundation.md)
-- [Teknoloji Önerisi](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\technology-recommendation.md)
-- [Açık Sorular](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\open-questions.md)
-- [Session Handoff 2026-07-16](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\docs\session-handoff-2026-07-16.md)
-- [AGENTS.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\AGENTS.md)
-- [CLAUDE.md](C:\Users\c9018243a\Desktop\Projects\DynoVisionPipeline\CLAUDE.md)
+- [Eski Proje Bulguları](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\legacy-project-findings.md)
+- [Mimari Temel](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\architecture-foundation.md)
+- [Teknoloji Önerisi](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\technology-recommendation.md)
+- [Açık Sorular](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\open-questions.md)
+- [Session Handoff 2026-07-16](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\session-handoff-2026-07-16.md)
+- [AGENTS.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\AGENTS.md)
+- [CLAUDE.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\CLAUDE.md)
 
 ## İlk Repo İskeleti
 
 ```text
-DynoVisionPipeline/
+MachineVisionFabric/
 ├─ docs/
 ├─ src/
 ├─ tools/

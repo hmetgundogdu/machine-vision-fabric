@@ -34,7 +34,7 @@ Yeni hedefler açısından eski projede bazı yapısal sınırlar var:
 - UI masaüstü merkezli; açık kaynak topluluk katkısı için web tabanlı editör daha uygun
 - AI modeli bir node tipi gibi değil, uygulamanın ana omurgasına daha sıkı bağlı
 
-## DynoVisionPipeline İçin Çıkarım
+## MachineVisionFabric İçin Çıkarım
 
 Yeni projede korunacak fikirler:
 

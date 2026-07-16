@@ -1,4 +1,4 @@
-# DynoVisionPipeline Mimari Temeli
+# MachineVisionFabric Mimari Temeli
 
 ## 1. Problem Tanımı
 
@@ -505,18 +505,18 @@ Burada önemli olan sinyal kanalını video kanalından ayırmaktır. Video baş
 ## 9. Önerilen Repo Yapısı
 
 ```text
-DynoVisionPipeline/
+MachineVisionFabric/
 ├─ docs/
 ├─ src/
-│  ├─ DynoVisionPipeline.Contracts/
-│  ├─ DynoVisionPipeline.Core/
-│  ├─ DynoVisionPipeline.Runtime/
-│  ├─ DynoVisionPipeline.Adapters/
-│  ├─ DynoVisionPipeline.Streaming/
-│  ├─ DynoVisionPipeline.Api/
-│  └─ DynoVisionPipeline.Host/
+│  ├─ MachineVisionFabric.Contracts/
+│  ├─ MachineVisionFabric.Core/
+│  ├─ MachineVisionFabric.Runtime/
+│  ├─ MachineVisionFabric.Adapters/
+│  ├─ MachineVisionFabric.Streaming/
+│  ├─ MachineVisionFabric.Api/
+│  └─ MachineVisionFabric.Host/
 ├─ ui/
-│  └─ dynovision-studio/
+│  └─ machine-vision-fabric-studio/
 ├─ sdk/
 │  ├─ python/
 │  └─ process/

@@ -2,7 +2,7 @@
 
 ## Project Context
 
-`DynoVisionPipeline` is an open-source edge vision pipeline platform.
+`MachineVisionFabric` is an open-source edge vision pipeline platform.
 
 Primary operating assumptions:
 
