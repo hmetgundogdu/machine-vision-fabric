@@ -246,7 +246,16 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
 
         lock (_pendingSync) _pending[id] = tcs;
 
-        var msg = new { id, method, path, body };
+        // Cognex In-Sight HMI expects the operation verb in "$type" (not "method").
+        // Verified against firmware 6.05.00 / HMI protocol 2.5: an envelope keyed
+        // "method" is echoed back with body "Failure", error -2147483648.
+        var msg = new Dictionary<string, object?>
+        {
+            ["$type"] = method,
+            ["id"]    = id,
+            ["path"]  = path,
+            ["body"]  = body,
+        };
         var json = JsonSerializer.Serialize(msg);
         var bytes = Encoding.UTF8.GetBytes(json);
 
@@ -258,12 +267,27 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
         using var timeoutCts = new CancellationTokenSource(deadline);
         using var linked     = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
 
-        try { return await tcs.Task.WaitAsync(linked.Token); }
+        JsonElement resp;
+        try { resp = await tcs.Task.WaitAsync(linked.Token); }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
         {
             lock (_pendingSync) _pending.Remove(id);
             throw new TimeoutException($"HMI request timed out after {deadline} ms: {method} {path}");
         }
+
+        // The HMI signals failures with an "error" property; "body" carries the reason
+        // (e.g. "Member not found", "Invalid parameter"). Surface it instead of letting
+        // a bogus body (like "Failure") flow downstream as if it were a valid result.
+        if (resp.TryGetProperty("error", out var errEl))
+        {
+            var reason = resp.TryGetProperty("body", out var eb) && eb.ValueKind == JsonValueKind.String
+                ? eb.GetString()
+                : "unknown";
+            throw new InvalidOperationException(
+                $"Cognex HMI request failed: {method} {path} → \"{reason}\" (error {errEl.GetRawText()})");
+        }
+
+        return resp;
     }
 
     private async Task ReceiveLoopAsync(CancellationToken ct)
@@ -345,8 +369,12 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
 
     private object[] BuildLoginPayload()
     {
-        // Cognex HMI login expects username/password in body array
-        return [new Dictionary<string, string> { ["username"] = "admin", ["password"] = string.Empty }];
+        // Cognex HMI login body is a 2-element array of Base64-encoded [username, password].
+        // Verified live: body [{username,password}] is rejected with "Invalid parameter";
+        // ["YWRtaW4=",""] (Base64 "admin","") returns access level "full".
+        var user = Convert.ToBase64String(Encoding.UTF8.GetBytes(_opts.HmiUsername));
+        var pass = Convert.ToBase64String(Encoding.UTF8.GetBytes(_opts.HmiPassword));
+        return [user, pass];
     }
 
     private void Log(string msg)
