@@ -161,10 +161,11 @@ async Task InspectPackageAsync(CliInvocation invocation)
 
 Task ListPackagesAsync(CliInvocation invocation)
 {
-    // "packages" works in both published layout (next to exe) and dev (repo-root/examples/packages fallback)
+    // "packages" works in both published layout (packages/ next to the exe) and dev
+    // layout (real-world-projects/packages under the repo root).
     var defaultPackageRoot = Directory.Exists(ResolveWorkingPath("packages"))
         ? "packages"
-        : "examples\\packages";
+        : "real-world-projects/packages";
     var packageRoot = ResolveWorkingPath(
         invocation.Options.TryGetValue("root", out var root) ? root : defaultPackageRoot);
 
@@ -176,14 +177,18 @@ Task ListPackagesAsync(CliInvocation invocation)
 
     foreach (var directory in Directory.EnumerateDirectories(packageRoot).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
     {
-        var manifestPath = Path.Combine(directory, "manifest.json");
-        var profilePath = Path.Combine(directory, "profile.json");
-        if (!File.Exists(manifestPath) || !File.Exists(profilePath))
+        // A package is either a graph package (pipeline.json) or a legacy
+        // dataset-capture package (manifest.json + profile.json).
+        var hasPipeline = File.Exists(Path.Combine(directory, "pipeline.json"));
+        var hasLegacyProfile = File.Exists(Path.Combine(directory, "manifest.json"))
+            && File.Exists(Path.Combine(directory, "profile.json"));
+        if (!hasPipeline && !hasLegacyProfile)
         {
             continue;
         }
 
-        Console.WriteLine($"{Path.GetFileName(directory)} | {directory}");
+        var kind = hasPipeline ? "graph" : "legacy";
+        Console.WriteLine($"{Path.GetFileName(directory)} | {kind} | {directory}");
     }
 
     return Task.CompletedTask;
@@ -192,7 +197,7 @@ Task ListPackagesAsync(CliInvocation invocation)
 Task ListSessionsAsync(CliInvocation invocation)
 {
     var sessionRoot = ResolveWorkingPath(
-        invocation.Options.TryGetValue("root", out var root) ? root : "artifacts\\datasets");
+        invocation.Options.TryGetValue("root", out var root) ? root : "artifacts/datasets");
 
     if (!Directory.Exists(sessionRoot))
     {
@@ -564,27 +569,45 @@ string ResolveRepositoryRoot()
     // Published layout: integrations/ or packages/ sit next to the executable.
     // Check this first so a publish output inside the repo still resolves correctly.
     if (Directory.Exists(Path.Combine(baseDir, "integrations")) ||
-        Directory.Exists(Path.Combine(baseDir, "packages")))
+        Directory.Exists(Path.Combine(baseDir, "packages")) ||
+        Directory.Exists(Path.Combine(baseDir, "real-world-projects")))
     {
         return baseDir;
     }
 
-    // Dev layout: walk up to find the repository root.
-    var currentDirectory = new DirectoryInfo(baseDir);
-    while (currentDirectory is not null)
+    // Dev layout: walk up looking for a stable repository marker. Search from the
+    // current working directory first (where the user invoked the CLI), then from
+    // the executable location. Keying off .git / CLAUDE.md keeps this working even
+    // as source folders are added or removed.
+    var root = FindRepositoryRoot(Environment.CurrentDirectory)
+        ?? FindRepositoryRoot(baseDir);
+    if (root is not null)
     {
-        var hasSrc = Directory.Exists(Path.Combine(currentDirectory.FullName, "src"));
-        var hasExamples = Directory.Exists(Path.Combine(currentDirectory.FullName, "examples"));
-        var hasLegacySamples = Directory.Exists(Path.Combine(currentDirectory.FullName, "samples"));
-        if (hasSrc && (hasExamples || hasLegacySamples))
-        {
-            return currentDirectory.FullName;
-        }
-
-        currentDirectory = currentDirectory.Parent;
+        return root;
     }
 
-    return baseDir;
+    // Last resort: resolve relative paths against the user's working directory
+    // rather than the executable's bin folder, which is almost never what they mean.
+    return Environment.CurrentDirectory;
+}
+
+static string? FindRepositoryRoot(string startDirectory)
+{
+    var current = new DirectoryInfo(startDirectory);
+    while (current is not null)
+    {
+        var hasSrc = Directory.Exists(Path.Combine(current.FullName, "src"));
+        var hasGit = Directory.Exists(Path.Combine(current.FullName, ".git"));
+        var hasClaudeMd = File.Exists(Path.Combine(current.FullName, "CLAUDE.md"));
+        if (hasSrc && (hasGit || hasClaudeMd))
+        {
+            return current.FullName;
+        }
+
+        current = current.Parent;
+    }
+
+    return null;
 }
 
 void PrintHelp()

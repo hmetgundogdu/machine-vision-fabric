@@ -31,16 +31,16 @@ Temel hedefler:
 MachineVisionFabric/
 ├─ docs/
 ├─ src/
-├─ samples/
+├─ real-world-projects/
 └─ tools/
 ```
 
 Doküman başlangıç noktaları:
 
-- [README.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\README.md)
-- [architecture-foundation.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\architecture-foundation.md)
-- [technology-recommendation.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\technology-recommendation.md)
-- [open-questions.md](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\open-questions.md)
+- [README.md](README.md)
+- [architecture-foundation.md](docs/architecture-foundation.md)
+- [technology-recommendation.md](docs/technology-recommendation.md)
+- [open-questions.md](docs/open-questions.md)
 
 Kod iskeleti oluştuğunda bu dosyayı solution ve proje bazında genişlet.
 

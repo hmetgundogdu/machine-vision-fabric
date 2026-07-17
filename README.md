@@ -25,12 +25,9 @@ MachineVisionFabric/
 |   |-- MachineVisionFabric.Storage/
 |   |-- MachineVisionFabric.Cli/
 |   `-- MachineVisionFabric.Host/
-|-- examples/             non-product example code
-|   |-- integrations/     sample .NET modules
-|   |-- sources/          simulator source implementations
-|   |-- packages/         sample runtime packages
-|   `-- tools/            helper simulators
 |-- real-world-projects/  project-specific integrations and scenarios
+|   |-- integrations/     .NET integration modules (Cognex camera, filters, writers)
+|   |-- packages/         runnable pipeline packages
 |   `-- MachineVisionFabric.RealWorld.slnx
 |-- tools/                platform-owned tooling
 |   `-- MachineVisionFabric.SchemaExporter/
@@ -39,9 +36,9 @@ MachineVisionFabric/
 ```
 
 `src/` is the platform.
-`examples/` exists to demonstrate the SDK surface and to support local development.
-`real-world-projects/` is where project-specific camera and scenario work should begin.
-It is intentionally kept in the same repository, but under its own folder and solution boundary.
+`real-world-projects/` is where project-specific camera and scenario work lives —
+integration modules and the pipeline packages that compose them. It is intentionally
+kept in the same repository, but under its own folder and solution boundary.
 
 ## Current Direction
 
@@ -75,92 +72,70 @@ As of `2026-07-16`, the current MVP is verified to:
 - capture `pre/post trigger` frame windows around the first positive gate event
 - skip capture when the gate says the product is not present
 
-Validated example packages:
+As of `2026-07-17`, the typed pipeline graph is the primary execution model, driven by
+`execute-graph`. The repository ships one end-to-end graph package:
 
-- `examples/packages/dataset-capture-starter`
-- `examples/packages/dataset-capture-no-product`
-- `examples/packages/dataset-capture-s7-gateway`
-- `examples/packages/dataset-capture-tcp-plc`
-- `examples/packages/dataset-capture-conveyor-sim`
-- `examples/packages/dataset-capture-trigger-window`
-- `examples/packages/dataset-capture-resident-camera-stub`
+- `real-world-projects/packages/cognex-dark-capture` — Cognex auto-trigger capture that
+  saves every frame and branches very dark frames into a separate dataset.
 
-As of `2026-07-17`, the repository also includes the first pipeline graph contracts and validator for the future graph execution model.
-It also includes the first typed inspection surface for resolved pipelines and SDK module metadata.
+The runtime discovers integration modules under `real-world-projects/integrations`
+(Cognex camera source, dark-frame filter, black-screen check, dataset writer) and exposes
+a typed inspection surface for resolved pipelines and SDK module metadata.
 
 ## Run
 
-Build and test:
+Build the platform and the integration modules:
 
 ```powershell
 dotnet build MachineVisionFabric.slnx -v minimal
-dotnet test MachineVisionFabric.slnx -v minimal
+dotnet build real-world-projects\MachineVisionFabric.RealWorld.slnx -v minimal
 ```
 
-List packages:
+The CLI resolves its default paths relative to the repository root, so the commands below
+work with no flags when run from a clone. `CLI` is
+`src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll`.
+
+List the discovered integration modules:
 
 ```powershell
-dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll packages
+dotnet $CLI modules
 ```
 
-List example modules:
+List the runnable packages (`graph` = pipeline.json package):
 
 ```powershell
-dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll modules
+dotnet $CLI packages
 ```
 
-Run the default example package:
+Validate the shipped pipeline graph:
 
 ```powershell
-dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll run
+dotnet $CLI validate-pipeline --path real-world-projects\packages\cognex-dark-capture\pipeline.json
 ```
 
-Validate the example typed pipeline graph:
+Run the default pipeline (`real-world-projects\packages\cognex-dark-capture`). Add
+`--no-tui` for plain output and `--max-cycles <n>` to stop after n cycles:
 
 ```powershell
-dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll validate-pipeline --path examples\pipelines\dataset-capture-typed-graph\pipeline.json
+dotnet $CLI execute-graph
+dotnet $CLI execute-graph --no-tui --max-cycles 1
 ```
 
-Inspect a package together with its resolved typed pipeline and module catalog:
+Run a different package or module/integration root explicitly:
 
 ```powershell
-dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll inspect-runtime --package examples\packages\dataset-capture-starter --root .
+dotnet $CLI execute-graph --package <package-dir> --integrations-root <integrations-dir>
 ```
 
-Run the product-absent example:
+### Self-contained deploy
+
+`publish.ps1` assembles the CLI, the integration modules, and the packages into a single
+folder with `appsettings.json` patched for that layout:
 
 ```powershell
-dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll run --package examples\packages\dataset-capture-no-product
-```
-
-Inspect an example package:
-
-```powershell
-dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll inspect-package --package examples\packages\dataset-capture-tcp-plc
-```
-
-Run the TCP signal simulator:
-
-```powershell
-dotnet examples\tools\MachineVisionFabric.TcpSignalSimulator\bin\Debug\net10.0\MachineVisionFabric.TcpSignalSimulator.dll --port 15020 --value 1
-```
-
-Run the conveyor dataset example:
-
-```powershell
-dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll run --package examples\packages\dataset-capture-conveyor-sim --dataset-root artifacts\datasets-live --session-prefix live-test
-```
-
-Run the trigger-window example:
-
-```powershell
-dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll run --package examples\packages\dataset-capture-trigger-window --dataset-root artifacts\datasets-trigger --session-prefix trigger-window
-```
-
-Run the resident camera stub example:
-
-```powershell
-dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll run --package examples\packages\dataset-capture-resident-camera-stub --dataset-root artifacts\datasets-resident --session-prefix resident-camera
+./publish.ps1                     # -> publish/mvf
+cd publish/mvf
+./MachineVisionFabric.Cli execute-graph --package packages/cognex-dark-capture
 ```
 
 ## Integrator Direction
@@ -176,10 +151,10 @@ That means a real camera adapter belongs in its own project under `real-world-pr
 
 ## Documents
 
-- [Platform Product Boundary](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\platform-product-boundary.md)
-- [Pipeline Graph Foundation](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\pipeline-graph-foundation.md)
-- [Integration SDK Strategy](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\integration-sdk-strategy.md)
-- [SDK Quickstart](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\sdk-quickstart.md)
-- [Dataset-First MVP Roadmap](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\dataset-first-mvp-roadmap.md)
-- [Session Handoff](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\session-handoff-2026-07-16.md)
-- [Examples README](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\examples\README.md)
+- [Architecture Foundation](docs/architecture-foundation.md)
+- [Platform Product Boundary](docs/platform-product-boundary.md)
+- [Pipeline Graph Foundation](docs/pipeline-graph-foundation.md)
+- [Integration SDK Strategy](docs/integration-sdk-strategy.md)
+- [SDK Quickstart](docs/sdk-quickstart.md)
+- [Dataset-First MVP Roadmap](docs/dataset-first-mvp-roadmap.md)
+- [Session Handoff](docs/session-handoff-2026-07-16.md)

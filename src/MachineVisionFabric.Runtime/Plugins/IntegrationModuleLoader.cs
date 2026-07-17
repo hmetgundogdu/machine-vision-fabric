@@ -35,6 +35,7 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
         }
 
         var candidatesByModuleId = new Dictionary<string, ModuleCandidate>(StringComparer.OrdinalIgnoreCase);
+        var missingAssemblyByModuleId = new Dictionary<string, (string EntryAssembly, string AssemblyPath)>(StringComparer.OrdinalIgnoreCase);
         foreach (var manifestPath in Directory.EnumerateFiles(fullPluginRoot, ManifestFileName, SearchOption.AllDirectories))
         {
             if (!IsRuntimeManifestPath(manifestPath))
@@ -51,9 +52,11 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
             var assemblyPath = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(manifestPath) ?? fullPluginRoot, manifest.EntryAssembly));
             if (!File.Exists(assemblyPath) || !IsRuntimeAssemblyPath(assemblyPath))
             {
-                _logger.LogWarning(
-                    "Integration module '{ModuleId}' skipped: entry assembly '{EntryAssembly}' was not found at '{AssemblyPath}'.",
-                    manifest.ModuleId, manifest.EntryAssembly, assemblyPath);
+                // Defer this warning. A module commonly appears twice under one root: a
+                // source-tree manifest with no co-located DLL, plus a built copy under
+                // bin/ that loads fine. Warning here would flag a module that is actually
+                // available. Record it and only warn below if no deployable copy is found.
+                missingAssemblyByModuleId.TryAdd(manifest.ModuleId, (manifest.EntryAssembly, assemblyPath));
                 continue;
             }
 
@@ -69,6 +72,18 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
             {
                 candidatesByModuleId[manifest.ModuleId] = candidate;
             }
+        }
+
+        foreach (var (moduleId, info) in missingAssemblyByModuleId)
+        {
+            if (candidatesByModuleId.ContainsKey(moduleId))
+            {
+                continue;
+            }
+
+            _logger.LogWarning(
+                "Integration module '{ModuleId}' skipped: entry assembly '{EntryAssembly}' was not found at '{AssemblyPath}'.",
+                moduleId, info.EntryAssembly, info.AssemblyPath);
         }
 
         var modules = new List<IIntegrationModule>();

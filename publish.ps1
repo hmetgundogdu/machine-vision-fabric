@@ -77,16 +77,11 @@ Write-Host ""
 Write-Host "[2/4] Integration modules" -ForegroundColor Yellow
 
 $integrations = @(
-    @{ Project = "examples/integrations/MachineVisionFabric.Integrations.DatasetWriter/MachineVisionFabric.Integrations.DatasetWriter.csproj"; Id = "mvf.dataset-writer" },
-    @{ Project = "examples/integrations/MachineVisionFabric.Integrations.FolderSource/MachineVisionFabric.Integrations.FolderSource.csproj";     Id = "mvf.folder-source" },
-    @{ Project = "examples/integrations/MachineVisionFabric.Integrations.SimulatedGate/MachineVisionFabric.Integrations.SimulatedGate.csproj";   Id = "mvf.simulated-gate" },
-    @{ Project = "examples/integrations/MachineVisionFabric.Integrations.ResidentCameraStub/MachineVisionFabric.Integrations.ResidentCameraStub.csproj"; Id = "mvf.resident-camera-stub" }
+    @{ Project = "real-world-projects/integrations/MachineVisionFabric.Integrations.CognexCamera/MachineVisionFabric.Integrations.CognexCamera.csproj";     Id = "mvf.realworld-cognex-camera" },
+    @{ Project = "real-world-projects/integrations/MachineVisionFabric.Integrations.DarkFrameFilter/MachineVisionFabric.Integrations.DarkFrameFilter.csproj"; Id = "mvf.realworld-dark-frame-filter" },
+    @{ Project = "real-world-projects/integrations/MachineVisionFabric.Integrations.BlackScreenCheck/MachineVisionFabric.Integrations.BlackScreenCheck.csproj"; Id = "mvf.black-screen-check" },
+    @{ Project = "real-world-projects/integrations/MachineVisionFabric.Integrations.DatasetWriter/MachineVisionFabric.Integrations.DatasetWriter.csproj";       Id = "mvf.dataset-writer" }
 )
-
-if ($IncludeRealWorld) {
-    $integrations += @{ Project = "real-world-projects/integrations/MachineVisionFabric.Integrations.CognexCamera/MachineVisionFabric.Integrations.CognexCamera.csproj"; Id = "mvf.realworld-cognex-camera" }
-    $integrations += @{ Project = "real-world-projects/integrations/MachineVisionFabric.Integrations.DarkFrameFilter/MachineVisionFabric.Integrations.DarkFrameFilter.csproj"; Id = "mvf.realworld-dark-frame-filter" }
-}
 
 foreach ($m in $integrations) {
     $target = Join-Path (Join-Path $out "integrations") $m.Id
@@ -99,20 +94,12 @@ Write-Host "[3/4] Packages" -ForegroundColor Yellow
 $packagesDest = Join-Path $out "packages"
 New-Item -ItemType Directory -Force -Path $packagesDest | Out-Null
 
-$packagesSource = Join-Path $Root "examples/packages"
+$packagesSource = Join-Path $Root "real-world-projects/packages"
 if (Test-Path $packagesSource) {
-    Write-Host "  → examples/packages → $packagesDest" -ForegroundColor Cyan
+    Write-Host "  → real-world-projects/packages → $packagesDest" -ForegroundColor Cyan
     # Copy the contents, not the folder itself: with an existing destination the latter
     # would nest a packages/packages directory on every run.
     Copy-Item -Path (Join-Path $packagesSource "*") -Destination $packagesDest -Recurse -Force
-}
-
-if ($IncludeRealWorld) {
-    $rwPackages = Join-Path $Root "real-world-projects/packages"
-    if (Test-Path $rwPackages) {
-        Write-Host "  → real-world-projects/packages → $packagesDest" -ForegroundColor Cyan
-        Copy-Item -Path (Join-Path $rwPackages "*") -Destination $packagesDest -Recurse -Force
-    }
 }
 
 # ── 4. Patch appsettings.json for published layout ───────────────────────────

@@ -2,7 +2,8 @@ namespace MachineVisionFabric.Contracts.Simulation;
 
 public sealed class FolderSequenceSourceOptions
 {
-    public string SourceFolder { get; set; } = ".\\examples\\packages\\dataset-capture-starter\\assets\\images";
+    // Relative paths are resolved against the package root at activation time.
+    public string SourceFolder { get; set; } = "assets/images";
 
     public bool Loop { get; set; } = true;
 
