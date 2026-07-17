@@ -1,0 +1,39 @@
+{
+  "name": "dataset-capture-cognex-auto-trigger-dark-filter",
+  "mode": "dataset-collection-profile",
+  "description": "Passive-listen Cognex HMI profile with OpenCV dark-frame rejection and continuous dataset capture.",
+  "capabilities": [
+    "dataset-capture",
+    "cognex-camera-source",
+    "dark-frame-filter",
+    "continuous-capture"
+  ],
+  "source": {
+    "mode": "module",
+    "moduleId": "mvf.realworld-cognex-camera",
+    "config": {
+      "ipAddress": "10.159.131.19",
+      "cameraId": "cognex-cam-1",
+      "username": "admin",
+      "password": "",
+      "hmiPort": 8087,
+      "hmiWebSocketPath": "/ws",
+      "hmiUseTls": false,
+      "responseTimeoutMs": 1500,
+      "boundedCapacity": 16,
+      "maxFrames": null,
+      "acquisitionMode": "passive-listen",
+      "manualTriggerIntervalMs": 600,
+      "reopenSessionBeforeManualTrigger": true,
+      "manualTriggerRetryCount": 3,
+      "startupDelayMs": 0,
+      "hmiImageQuery": ""
+    }
+  },
+  "simulatorSource": {
+    "sourceFolder": ".\\assets",
+    "loop": false,
+    "frameIntervalMs": 100,
+    "parallelCameraCount": 1
+  }
+}

@@ -19,6 +19,8 @@ Current starter:
 - `integrations/MachineVisionFabric.Integrations.CameraDatasetStarter`
 - `packages/dataset-capture-camera-starter`
 - `integrations/MachineVisionFabric.Integrations.CognexCamera`
+- `integrations/MachineVisionFabric.Integrations.OpenCvDarkFrameGate`
+- `packages/dataset-capture-cognex-auto-trigger-dark-filter`
 - `packages/dataset-capture-cognex-delay-gate`
 - `packages/dataset-capture-cognex-hmi-passive`
 - `packages/dataset-capture-cognex-hmi-trigger-window`
@@ -53,6 +55,12 @@ Run the Cognex passive HMI package:
 
 ```powershell
 dotnet run --project src\MachineVisionFabric.Cli -- run --integrations-root . --package real-world-projects\packages\dataset-capture-cognex-hmi-passive --dataset-root artifacts\datasets-cognex --session-prefix cognex-passive
+```
+
+Run the Cognex auto-trigger dark-filter package:
+
+```powershell
+dotnet run --project src\MachineVisionFabric.Cli -- run --integrations-root . --package real-world-projects\packages\dataset-capture-cognex-auto-trigger-dark-filter --dataset-root artifacts\datasets-cognex --session-prefix cognex-auto
 ```
 
 Run the Cognex trigger-window package:

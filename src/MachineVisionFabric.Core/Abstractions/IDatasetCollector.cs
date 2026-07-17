@@ -10,6 +10,7 @@ public interface IDatasetCollector
         FabricProfileManifest manifest,
         int declaredCameraCount,
         IProductPresenceGate productPresenceGate,
+        IFrameProcessor? frameProcessor,
         IFrameSourceSession frameSourceSession,
         CancellationToken cancellationToken);
 }

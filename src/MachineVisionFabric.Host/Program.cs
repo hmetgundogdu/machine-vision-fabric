@@ -23,6 +23,7 @@ builder.Services.AddSingleton<ISimulatorSourceCatalog, FolderSequenceSourceCatal
 builder.Services.AddSingleton<IIntegrationModuleLoader, IntegrationModuleLoader>();
 builder.Services.AddSingleton<IFrameSourceResolver, ProfileFrameSourceResolver>();
 builder.Services.AddSingleton<IProductPresenceGateResolver, ProfileProductPresenceGateResolver>();
+builder.Services.AddSingleton<IFrameProcessorResolver, ProfileFrameProcessorResolver>();
 builder.Services.AddSingleton<IHeadlessRuntimeBootstrapper, HeadlessRuntimeBootstrapper>();
 builder.Services.AddHostedService<Worker>();
 

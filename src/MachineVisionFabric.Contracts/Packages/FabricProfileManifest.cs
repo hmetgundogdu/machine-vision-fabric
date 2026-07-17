@@ -14,6 +14,8 @@ public sealed class FabricProfileManifest
 
     public ProductPresenceGateBinding ProductPresenceGate { get; set; } = new();
 
+    public FrameProcessorBinding FrameProcessor { get; set; } = new();
+
     public IReadOnlyList<string> RequiredDirectories { get; set; } =
     [
         "assets",

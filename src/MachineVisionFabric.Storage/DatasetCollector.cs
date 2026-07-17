@@ -19,6 +19,7 @@ public sealed class DatasetCollector : IDatasetCollector
         FabricProfileManifest manifest,
         int declaredCameraCount,
         IProductPresenceGate productPresenceGate,
+        IFrameProcessor? frameProcessor,
         IFrameSourceSession frameSourceSession,
         CancellationToken cancellationToken)
     {
@@ -30,8 +31,8 @@ public sealed class DatasetCollector : IDatasetCollector
 
         var writeContext = new CaptureWriteContext(imagesRoot, metadataRoot, manifest.CapturePolicy);
         var productPresenceDecision = IsTriggerWindowMode(manifest.CapturePolicy)
-            ? await CollectTriggerWindowAsync(writeContext, productPresenceGate, frameSourceSession, declaredCameraCount, cancellationToken)
-            : await CollectFullStreamAsync(writeContext, productPresenceGate, frameSourceSession, declaredCameraCount, cancellationToken);
+            ? await CollectTriggerWindowAsync(writeContext, productPresenceGate, frameProcessor, frameSourceSession, declaredCameraCount, cancellationToken)
+            : await CollectFullStreamAsync(writeContext, productPresenceGate, frameProcessor, frameSourceSession, declaredCameraCount, cancellationToken);
 
         return await FinalizeSessionAsync(
             sessionRoot,
@@ -46,6 +47,7 @@ public sealed class DatasetCollector : IDatasetCollector
     private static async Task<ProductPresenceDecision> CollectFullStreamAsync(
         CaptureWriteContext writeContext,
         IProductPresenceGate productPresenceGate,
+        IFrameProcessor? frameProcessor,
         IFrameSourceSession frameSourceSession,
         int declaredCameraCount,
         CancellationToken cancellationToken)
@@ -78,6 +80,11 @@ public sealed class DatasetCollector : IDatasetCollector
                 }
             }
 
+            if (!await ShouldPersistFrameAsync(frameProcessor, frame, cancellationToken))
+            {
+                continue;
+            }
+
             await WriteFrameAsync(writeContext, frame, cancellationToken);
             capturedFramesPerCamera[frame.CameraId] = capturedFramesPerCamera.GetValueOrDefault(frame.CameraId) + 1;
 
@@ -93,6 +100,7 @@ public sealed class DatasetCollector : IDatasetCollector
     private static async Task<ProductPresenceDecision> CollectTriggerWindowAsync(
         CaptureWriteContext writeContext,
         IProductPresenceGate productPresenceGate,
+        IFrameProcessor? frameProcessor,
         IFrameSourceSession frameSourceSession,
         int declaredCameraCount,
         CancellationToken cancellationToken)
@@ -149,6 +157,11 @@ public sealed class DatasetCollector : IDatasetCollector
 
                 foreach (var bufferedFrame in framesToPersist)
                 {
+                    if (!await ShouldPersistFrameAsync(frameProcessor, bufferedFrame, cancellationToken))
+                    {
+                        continue;
+                    }
+
                     await WriteFrameAsync(writeContext, bufferedFrame, cancellationToken);
                 }
 
@@ -167,6 +180,11 @@ public sealed class DatasetCollector : IDatasetCollector
                     break;
                 }
 
+                continue;
+            }
+
+            if (!await ShouldPersistFrameAsync(frameProcessor, snapshot, cancellationToken))
+            {
                 continue;
             }
 
@@ -271,6 +289,20 @@ public sealed class DatasetCollector : IDatasetCollector
             frame.ContentType,
             frame.TimestampUtc,
             frame.SourcePath);
+    }
+
+    private static async Task<bool> ShouldPersistFrameAsync(
+        IFrameProcessor? frameProcessor,
+        IFrameEnvelope frame,
+        CancellationToken cancellationToken)
+    {
+        if (frameProcessor is null)
+        {
+            return true;
+        }
+
+        var decision = await frameProcessor.EvaluateAsync(frame, cancellationToken);
+        return decision.Accepted;
     }
 
     private static bool IsTriggerWindowMode(DatasetCapturePolicy capturePolicy)

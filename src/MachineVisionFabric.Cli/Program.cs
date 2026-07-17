@@ -124,6 +124,7 @@ async Task InspectPackageAsync(CliInvocation invocation)
     Console.WriteLine(
         $"CapturePolicy: enabled={manifest.CapturePolicy.Enabled}; requireProductPresent={manifest.CapturePolicy.RequireProductPresent}; maxFramesPerCamera={manifest.CapturePolicy.MaxFramesPerCamera}; mode={manifest.CapturePolicy.Mode}; preTriggerFramesPerCamera={manifest.CapturePolicy.PreTriggerFramesPerCamera}; postTriggerFramesPerCamera={manifest.CapturePolicy.PostTriggerFramesPerCamera}; gateEvaluationIntervalFrames={manifest.CapturePolicy.GateEvaluationIntervalFrames}");
     Console.WriteLine($"ProductGate: mode={manifest.ProductPresenceGate.Mode}; moduleId={manifest.ProductPresenceGate.ModuleId ?? "-"}");
+    Console.WriteLine($"FrameProcessor: mode={manifest.FrameProcessor.Mode}; moduleId={manifest.FrameProcessor.ModuleId ?? "-"}");
     Console.WriteLine($"FrameSource: mode={profile.Source.Mode}; moduleId={profile.Source.ModuleId ?? "-"}");
     Console.WriteLine($"RequiredDirectories: {string.Join(", ", manifest.RequiredDirectories)}");
 }
@@ -249,6 +250,7 @@ Task ExportSchemasAsync(CliInvocation invocation)
     WriteSchema<IntegrationModuleManifest>("integration-module-manifest.schema.json");
     WriteSchema<IntegrationCapabilityDescriptor>("integration-capability-descriptor.schema.json");
     WriteSchema<ProductPresenceGateBinding>("product-presence-gate-binding.schema.json");
+    WriteSchema<FrameProcessorBinding>("frame-processor-binding.schema.json");
     WriteSchema<S7GatewayGateOptions>("s7-gateway-gate-options.schema.json");
     WriteSchema<S7SignalAddress>("s7-signal-address.schema.json");
     WriteSchema<SimulatedPlcGateOptions>("simulated-plc-gate-options.schema.json");
@@ -289,6 +291,7 @@ IHost BuildHost(IReadOnlyDictionary<string, string?>? overrides = null)
     builder.Services.AddSingleton<IIntegrationModuleLoader, IntegrationModuleLoader>();
     builder.Services.AddSingleton<IFrameSourceResolver, ProfileFrameSourceResolver>();
     builder.Services.AddSingleton<IProductPresenceGateResolver, ProfileProductPresenceGateResolver>();
+    builder.Services.AddSingleton<IFrameProcessorResolver, ProfileFrameProcessorResolver>();
     builder.Services.AddSingleton<IHeadlessRuntimeBootstrapper, HeadlessRuntimeBootstrapper>();
 
     return builder.Build();

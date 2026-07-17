@@ -38,6 +38,23 @@ public static class IntegrationModuleDescriptorBuilder
             description);
     }
 
+    public static IntegrationModuleDescriptor CreateProcessor<TOptions>(
+        string moduleId,
+        string displayName,
+        string version,
+        string capabilityName,
+        string description)
+    {
+        return Create(
+            moduleId,
+            displayName,
+            version,
+            capabilityName,
+            IntegrationCapabilityKind.Processor,
+            typeof(TOptions).FullName ?? typeof(TOptions).Name,
+            description);
+    }
+
     private static IntegrationModuleDescriptor Create(
         string moduleId,
         string displayName,

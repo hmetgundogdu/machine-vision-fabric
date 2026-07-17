@@ -13,6 +13,7 @@ public sealed class HeadlessRuntimeBootstrapper(
     IDatasetSessionPreparer datasetSessionPreparer,
     IFrameSourceResolver frameSourceResolver,
     IProductPresenceGateResolver productPresenceGateResolver,
+    IFrameProcessorResolver frameProcessorResolver,
     IDatasetCollector datasetCollector,
     ILogger<HeadlessRuntimeBootstrapper> logger) : IHeadlessRuntimeBootstrapper
 {
@@ -46,6 +47,7 @@ public sealed class HeadlessRuntimeBootstrapper(
             runtimeOptions.DatasetCapture.CreateSessionOnStartup);
 
         var gateResolution = productPresenceGateResolver.Resolve(manifest, integrationsRoot);
+        var frameProcessorResolution = frameProcessorResolver.Resolve(manifest, integrationsRoot);
         var frameSourceResolution = frameSourceResolver.Resolve(profile, packageRoot, integrationsRoot);
         await using var frameSourceSession = frameSourceResolution.Session;
         var estimatedFrameCount = frameSourceSession.EstimatedFrameCount;
@@ -54,17 +56,20 @@ public sealed class HeadlessRuntimeBootstrapper(
             manifest,
             frameSourceSession.DeclaredCameraCount,
             gateResolution.Gate,
+            frameProcessorResolution.Processor,
             frameSourceSession,
             cancellationToken);
 
         logger.LogInformation(
-            "Dataset-first bootstrap prepared package '{PackageName}' with profile '{ProfileName}' at {PackageRoot}. Session root: {SessionRoot}. Source strategy: {SourceStrategy}. Source: {Source}. Estimated frames: {FrameCount}. Product present: {ProductPresent}. Gate strategy: {GateStrategy}. Captured frames: {CapturedFrameCount}.",
+            "Dataset-first bootstrap prepared package '{PackageName}' with profile '{ProfileName}' at {PackageRoot}. Session root: {SessionRoot}. Source strategy: {SourceStrategy}. Source: {Source}. Processor strategy: {ProcessorStrategy}. Processor: {Processor}. Estimated frames: {FrameCount}. Product present: {ProductPresent}. Gate strategy: {GateStrategy}. Captured frames: {CapturedFrameCount}.",
             manifest.Name,
             profile.Name,
             packageRoot,
             sessionRoot,
             frameSourceResolution.Strategy,
             frameSourceResolution.Source,
+            frameProcessorResolution.Strategy,
+            frameProcessorResolution.Source,
             estimatedFrameCount,
             datasetCollection.ProductPresenceDecision.ProductPresent,
             gateResolution.Strategy,

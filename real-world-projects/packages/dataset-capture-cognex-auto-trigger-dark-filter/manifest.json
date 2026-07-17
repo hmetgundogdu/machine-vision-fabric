@@ -1,0 +1,38 @@
+{
+  "name": "dataset-capture-cognex-auto-trigger-dark-filter",
+  "version": "0.1.0",
+  "entryProfile": "profile.json",
+  "scenario": "cognex-auto-trigger-dark-filter-dataset-capture",
+  "capturePolicy": {
+    "enabled": true,
+    "requireProductPresent": true,
+    "maxFramesPerCamera": null,
+    "includeSourcePathInMetadata": true,
+    "mode": "full-stream"
+  },
+  "productPresenceGate": {
+    "mode": "module",
+    "moduleId": "mvf.simulated-gate",
+    "config": {
+      "enabled": true,
+      "productPresent": true,
+      "sourceName": "auto-trigger-open-gate",
+      "stationId": "station-cognex-auto-trigger",
+      "details": "Temporary always-open gate for auto-trigger camera flow until real PLC gate is ready."
+    }
+  },
+  "frameProcessor": {
+    "mode": "module",
+    "moduleId": "mvf.opencv-dark-frame-gate",
+    "config": {
+      "minimumMeanBrightness": 18.0,
+      "sourceName": "opencv-dark-frame-gate",
+      "strategyName": "mean-grayscale-threshold",
+      "rejectOnDecodeFailure": true
+    }
+  },
+  "requiredDirectories": [
+    "assets",
+    "assets/configs"
+  ]
+}
