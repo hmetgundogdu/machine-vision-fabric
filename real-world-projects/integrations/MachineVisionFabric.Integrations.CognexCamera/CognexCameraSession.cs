@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -180,8 +181,10 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
                 if (attempt > 0 || _opts.ReopenSessionBeforeManualTrigger)
                     await ReopenSessionAsync(ct);
 
-                await SendAsync("post", $"{_sessionPath}/trigger", Array.Empty<object>(), ct);
-                await FetchAndEnqueueFrameAsync(ct);
+                // In-Sight expects "manualTrigger" with body [true]. The resulting frame
+                // is delivered asynchronously as an acqImageView event, which ReceiveLoop
+                // routes to HandleHmiEventAsync — do NOT fetch a hardcoded path here.
+                await SendAsync("post", $"{_sessionPath}/manualTrigger", new object[] { true }, ct, timeoutMs: 600);
                 return;
             }
             catch (OperationCanceledException) { throw; }
@@ -202,14 +205,25 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
 
     // ── Frame fetch ──────────────────────────────────────────────────────────
 
-    private async Task FetchAndEnqueueFrameAsync(CancellationToken ct)
+    private int _frameSeq;
+
+    /// <summary>
+    /// Fetches the image referenced by an acqImageView event's ImageLayer url.
+    /// The HMI serves it over HTTP relative to the WebSocket host; the url is only
+    /// valid for the current result, so this is driven by events, not a fixed path.
+    /// </summary>
+    private async Task FetchImageFromUrlAsync(string imageUrl, CancellationToken ct)
     {
         await _hmiFetchLock.WaitAsync(ct);
         try
         {
-            var query = string.IsNullOrWhiteSpace(_opts.HmiImageQuery)
-                ? $"{_sessionPath}/image"
-                : $"{_sessionPath}/{_opts.HmiImageQuery}";
+            var relative  = imageUrl.StartsWith('/') ? imageUrl[1..] : imageUrl;
+            var extra     = string.IsNullOrWhiteSpace(_opts.HmiImageQuery) ? "" : _opts.HmiImageQuery.TrimStart('?');
+            var sep       = relative.Contains('?') ? "&" : "?";
+            var cacheBust = $"_ts={DateTime.UtcNow.Ticks}";
+            var query     = string.IsNullOrEmpty(extra)
+                ? $"{relative}{sep}{cacheBust}"
+                : $"{relative}{sep}{extra}&{cacheBust}";
 
             var resp = await _http!.GetAsync(query, ct);
             resp.EnsureSuccessStatusCode();
@@ -217,23 +231,95 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
             var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
             if (bytes.Length == 0) return;
 
-            var ct2 = resp.Content.Headers.ContentType?.MediaType ?? "image/jpeg";
+            var contentType = resp.Content.Headers.ContentType?.MediaType ?? ResolveContentType(imageUrl);
+            var extension   = ResolveExtension(contentType, imageUrl);
+            var seq         = Interlocked.Increment(ref _frameSeq);
             var envelope = FrameEnvelopeFactory.FromBytes(
-                cameraId:    _opts.CameraId,
-                sequenceNumber: 0,
-                fileName:    $"frame-{DateTime.UtcNow:HHmmss-fff}.jpg",
-                payload:     bytes,
-                contentType: ct2);
+                cameraId:       _opts.CameraId,
+                sequenceNumber: seq,
+                fileName:       $"{_opts.CameraId}-seq{seq:0000}{extension}",
+                payload:        bytes,
+                contentType:    contentType);
 
             await PublishAsync(envelope, ct);
 
             if (_opts.LogDiagnostics)
-                Log($"Frame enqueued: {bytes.Length} bytes  type={ct2}");
+                Log($"Frame enqueued: seq{seq:0000}  {bytes.Length} bytes  type={contentType}");
         }
         finally
         {
             _hmiFetchLock.Release();
         }
+    }
+
+    private async Task HandleHmiEventAsync(JsonElement root, CancellationToken ct)
+    {
+        if (!TryExtractImageUrl(root, out var imageUrl) || string.IsNullOrWhiteSpace(imageUrl))
+            return;
+
+        try { await FetchImageFromUrlAsync(imageUrl!, ct); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Log($"[WARN] image fetch: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Pulls the ImageLayer url out of an HMI event body:
+    /// { body: { acqImageView: { layers: [ { $type:"ImageLayer", url:"…" } ] } } }
+    /// </summary>
+    private static bool TryExtractImageUrl(JsonElement node, out string? imageUrl)
+    {
+        imageUrl = null;
+
+        if (node.ValueKind == JsonValueKind.Object && node.TryGetProperty("body", out var body))
+            return TryExtractImageUrl(body, out imageUrl);
+
+        if (node.ValueKind != JsonValueKind.Object) return false;
+        if (!node.TryGetProperty("acqImageView", out var view) || view.ValueKind != JsonValueKind.Object) return false;
+        if (!view.TryGetProperty("layers", out var layers) || layers.ValueKind != JsonValueKind.Array) return false;
+
+        foreach (var layer in layers.EnumerateArray())
+        {
+            if (!layer.TryGetProperty("$type", out var t) ||
+                !string.Equals(t.GetString(), "ImageLayer", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (layer.TryGetProperty("url", out var u) && u.ValueKind == JsonValueKind.String)
+            {
+                var url = u.GetString();
+                if (!string.IsNullOrWhiteSpace(url)) { imageUrl = url; return true; }
+            }
+        }
+        return false;
+    }
+
+    private static string ResolveContentType(string imageUrl) => ExtFromUrl(imageUrl) switch
+    {
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".png"            => "image/png",
+        ".bmp"            => "image/bmp",
+        ".tif" or ".tiff" => "image/tiff",
+        _                 => "application/octet-stream"
+    };
+
+    private static string ResolveExtension(string? contentType, string imageUrl)
+    {
+        if (!string.IsNullOrWhiteSpace(contentType))
+            return contentType.ToLowerInvariant() switch
+            {
+                "image/jpeg" => ".jpg",
+                "image/png"  => ".png",
+                "image/bmp"  => ".bmp",
+                "image/tiff" => ".tif",
+                _            => ExtFromUrl(imageUrl)
+            };
+        return ExtFromUrl(imageUrl);
+    }
+
+    private static string ExtFromUrl(string imageUrl)
+    {
+        var clean = imageUrl.Split('?', '#')[0];
+        var ext   = Path.GetExtension(clean);
+        return string.IsNullOrWhiteSpace(ext) ? ".bin" : ext.ToLowerInvariant();
     }
 
     // ── HMI WebSocket protocol ───────────────────────────────────────────────
@@ -326,11 +412,12 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
                     }
                 }
 
-                // resultChanged event → fetch frame
-                if (root.TryGetProperty("event", out var evEl) &&
-                    evEl.GetString()?.Contains("resultChanged", StringComparison.OrdinalIgnoreCase) == true)
+                // HMI push event → if it carries an acqImageView image layer, fetch it.
+                if (root.TryGetProperty("$type", out var typeEl) &&
+                    string.Equals(typeEl.GetString(), "event", StringComparison.OrdinalIgnoreCase))
                 {
-                    _ = Task.Run(() => FetchAndEnqueueFrameAsync(ct), ct);
+                    var evClone = root.Clone();
+                    _ = Task.Run(() => HandleHmiEventAsync(evClone, ct), ct);
                 }
             }
             catch (OperationCanceledException) { break; }
