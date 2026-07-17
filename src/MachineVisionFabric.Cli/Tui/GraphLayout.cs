@@ -10,7 +10,7 @@ public sealed class GraphLayout
 {
     public const int NodeBoxWidth    = 26;
     public const int NodeBoxHeight   = 5;
-    public const int EdgeColumnWidth = 14;
+    public const int EdgeColumnWidth = 18;
     public const int NodeRowPad      = 1;
 
     /// <summary>Node ID → (layer index, slot index within layer).</summary>

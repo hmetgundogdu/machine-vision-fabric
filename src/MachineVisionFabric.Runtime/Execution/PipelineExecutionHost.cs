@@ -56,6 +56,8 @@ public sealed class PipelineExecutionHost(IPipelineGraphExecutor executor) : IPi
                 PackageRoot = options.PackageRoot,
                 IntegrationsRoot = options.IntegrationsRoot,
                 MaxCycles = options.MaxCycles,
+                // Forward OnNodeExecuted directly — host does not need to intercept it
+                OnNodeExecuted = options.OnNodeExecuted,
                 OnCycleCompleted = progress =>
                 {
                     _state = new SnapshotState(PipelineExecutionStatus.Running)

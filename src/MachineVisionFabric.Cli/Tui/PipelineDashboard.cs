@@ -140,26 +140,29 @@ public sealed class PipelineDashboard
     {
         var status = snapshot.Status switch
         {
-            PipelineExecutionStatus.Running  => "[yellow]⟳ RUNNING[/]",
-            PipelineExecutionStatus.Stopped  => "[green]✓ DONE[/]",
-            PipelineExecutionStatus.Faulted  => "[red]✖ FAULTED[/]",
-            PipelineExecutionStatus.Starting => "[grey]◌ Starting…[/]",
-            PipelineExecutionStatus.Stopping => "[yellow]◌ Stopping…[/]",
-            _                                => "[grey]○ Idle[/]"
+            PipelineExecutionStatus.Running  => "[yellow]>> RUNNING[/]",
+            PipelineExecutionStatus.Stopped  => "[green]OK DONE[/]",
+            PipelineExecutionStatus.Faulted  => "[red]!! FAULTED[/]",
+            PipelineExecutionStatus.Starting => "[grey].. Starting[/]",
+            PipelineExecutionStatus.Stopping => "[yellow].. Stopping[/]",
+            _                                => "[grey]-- Idle[/]"
         };
 
         var elapsed = snapshot.Elapsed.TotalSeconds > 0
             ? $"{snapshot.Elapsed.TotalSeconds:F1}s"
-            : "–";
+            : "-";
+
+        // Truncate run ID to 8 chars
+        var runId = snapshot.RunId is { Length: > 8 } r ? r[..8] : snapshot.RunId ?? "-";
 
         return new Markup(
-            $"[bold deepskyblue1]MachineVisionFabric[/] [grey]|[/] " +
+            $"[bold deepskyblue1]MVF[/] [grey]|[/] " +
             $"[bold]{Markup.Escape(_definition.Name)}[/]  " +
-            $"[grey]run:[/][grey58]{Markup.Escape(snapshot.RunId ?? "–")}[/]  " +
+            $"[grey]run:[/][grey58]{Markup.Escape(runId)}[/]  " +
             $"{status}  " +
-            $"[grey]cycles:[/][white]{snapshot.TotalCycles}[/]  " +
-            $"[grey]accepted:[/][green]{snapshot.AcceptedCycles}[/]  " +
-            $"[grey]elapsed:[/][grey58]{elapsed}[/]");
+            $"[grey]cyc:[/][white]{snapshot.TotalCycles}[/]  " +
+            $"[grey]ok:[/][green]{snapshot.AcceptedCycles}[/]  " +
+            $"[grey]t:[/][grey58]{elapsed}[/]");
     }
 
     private IRenderable BuildLogPanel()

@@ -94,7 +94,7 @@ public sealed class PipelineRenderState
                     node.Status = NodeLifecycleStatus.Done;
             }
 
-            var icon = p.CycleAccepted ? "✓" : "○";
+        var icon = p.CycleAccepted ? "[OK]" : "[--]";
             AddLog(LogLevel.Success,
                 $"[cyc:{p.CycleIndex}] {icon}  total={p.TotalCycles} accepted={p.AcceptedCycles}  elapsed={p.Elapsed.TotalSeconds:F1}s");
         }

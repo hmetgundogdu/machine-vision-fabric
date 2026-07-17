@@ -16,10 +16,10 @@ namespace MachineVisionFabric.Cli.Tui;
 public static class GraphRenderer
 {
     // ── Status icons ────────────────────────────────────────────────────────
-    private const string IconIdle    = "[grey]○[/]";
-    private const string IconActive  = "[yellow]◉[/]";
-    private const string IconDone    = "[green]●[/]";
-    private const string IconFaulted = "[red]✖[/]";
+    private const string IconIdle    = "[grey]o[/]";
+    private const string IconActive  = "[yellow]*[/]";
+    private const string IconDone    = "[green]+[/]";
+    private const string IconFaulted = "[red]![/]";
 
     // ── Category colours ────────────────────────────────────────────────────
     private static string CategoryColor(string category) => category.ToLowerInvariant() switch
@@ -125,8 +125,8 @@ public static class GraphRenderer
         var title   = Truncate(state.DisplayName, w);
         var sub     = Truncate(state.TypeLabel, w);
         var cycles  = state.TotalCycles == 0
-            ? "[grey42]waiting…[/]"
-            : $"[grey42]cyc [white]{state.TotalCycles}[/]  ok [green]{state.AcceptedCycles}[/][grey42]/{state.TotalCycles}[/]";
+            ? "[grey42]waiting[/]"
+            : $"[grey42]cyc[/][white]{state.TotalCycles}[/] [grey42]ok[/][green]{state.AcceptedCycles}[/]";
         var timing  = state.LastDurationMs > 0
             ? $"[grey42]{state.LastDurationMs}ms[/]"
             : string.Empty;
@@ -163,8 +163,8 @@ public static class GraphRenderer
         foreach (var edge in edges)
         {
             var color = EdgeColor(edge.Kind);
-            var label = Truncate(edge.FromPort, GraphLayout.EdgeColumnWidth - 4);
-            lines.Add($"[{color}]──{Markup.Escape(label)}──►[/]");
+            var label = Truncate(edge.FromPort, GraphLayout.EdgeColumnWidth - 6);
+            lines.Add($"[{color}]--{Markup.Escape(label)}-->[/]");
         }
 
         return new Markup(string.Join("\n", lines));
