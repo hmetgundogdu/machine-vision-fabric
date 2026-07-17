@@ -15,7 +15,6 @@
     <ProjectReference Include="..\MachineVisionFabric.Contracts\MachineVisionFabric.Contracts.csproj" />
     <ProjectReference Include="..\MachineVisionFabric.Core\MachineVisionFabric.Core.csproj" />
     <ProjectReference Include="..\MachineVisionFabric.Runtime\MachineVisionFabric.Runtime.csproj" />
-    <ProjectReference Include="..\..\examples\sources\MachineVisionFabric.Sources.Simulators\MachineVisionFabric.Sources.Simulators.csproj" />
     <ProjectReference Include="..\MachineVisionFabric.Storage\MachineVisionFabric.Storage.csproj" />
   </ItemGroup>
 

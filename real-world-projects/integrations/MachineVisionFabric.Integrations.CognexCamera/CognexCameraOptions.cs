@@ -28,6 +28,12 @@ public sealed class CognexCameraOptions
     /// <summary>Use TLS for HMI connection (default: false).</summary>
     public bool HmiUseTls { get; set; } = false;
 
+    /// <summary>HMI login username (default: admin). Sent Base64-encoded.</summary>
+    public string HmiUsername { get; set; } = "admin";
+
+    /// <summary>HMI login password (default: empty). Sent Base64-encoded.</summary>
+    public string HmiPassword { get; set; } = "";
+
     /// <summary>
     /// How to acquire frames:
     ///   passive-listen   — subscribe to resultChanged events (camera triggers externally)

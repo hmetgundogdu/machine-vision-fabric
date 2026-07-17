@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -19,16 +19,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\examples\integrations\MachineVisionFabric.Integrations.FolderSource\MachineVisionFabric.Integrations.FolderSource.csproj" />
-    <ProjectReference Include="..\..\examples\integrations\MachineVisionFabric.Integrations.ResidentCameraStub\MachineVisionFabric.Integrations.ResidentCameraStub.csproj" />
-    <ProjectReference Include="..\..\examples\integrations\MachineVisionFabric.Integrations.S7GatewayGate\MachineVisionFabric.Integrations.S7GatewayGate.csproj" />
-    <ProjectReference Include="..\..\examples\integrations\MachineVisionFabric.Integrations.SimulatedGate\MachineVisionFabric.Integrations.SimulatedGate.csproj" />
-    <ProjectReference Include="..\..\examples\integrations\MachineVisionFabric.Integrations.TcpPlcGate\MachineVisionFabric.Integrations.TcpPlcGate.csproj" />
     <ProjectReference Include="..\..\src\MachineVisionFabric.Contracts\MachineVisionFabric.Contracts.csproj" />
     <ProjectReference Include="..\..\src\MachineVisionFabric.Core\MachineVisionFabric.Core.csproj" />
     <ProjectReference Include="..\..\src\MachineVisionFabric.Runtime\MachineVisionFabric.Runtime.csproj" />
+    <ProjectReference Include="..\..\src\MachineVisionFabric.Sdk\MachineVisionFabric.Sdk.csproj" />
     <ProjectReference Include="..\..\src\MachineVisionFabric.Storage\MachineVisionFabric.Storage.csproj" />
-    <ProjectReference Include="..\..\examples\sources\MachineVisionFabric.Sources.Simulators\MachineVisionFabric.Sources.Simulators.csproj" />
   </ItemGroup>
 
 </Project>

@@ -11,10 +11,10 @@
       "schemaType": "MachineVisionFabric.Integrations.DarkFrameFilter.DarkFrameFilterOptions",
       "description": "Rejects frames whose mean grayscale brightness falls below a threshold. Uses OpenCV.",
       "inputs": [
-        { "name": "frame", "dataType": "data/frame", "description": "Input frame to evaluate" }
+        { "name": "frame", "channel": "data", "dataType": "data/frame", "description": "Input frame to evaluate" }
       ],
       "outputs": [
-        { "name": "frame", "dataType": "data/frame", "description": "Frame passed through only when brightness >= threshold" }
+        { "name": "frame", "channel": "data", "dataType": "data/frame", "description": "Frame passed through only when brightness >= threshold" }
       ]
     }
   ]

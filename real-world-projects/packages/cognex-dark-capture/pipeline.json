@@ -1,0 +1,87 @@
+{
+  "name": "cognex-dark-capture",
+  "version": "1.0.0",
+  "description": "Cognex auto-trigger capture. Every frame is saved; a black-screen check branches very dark frames into a separate dataset with a warning. Runs continuously.",
+  "nodes": [
+    {
+      "id": "camera1",
+      "kind": "integration-module",
+      "category": "source",
+      "moduleId": "mvf.realworld-cognex-camera",
+      "displayName": "Cognex Camera",
+      "config": {
+        "ipAddress": "10.159.130.87",
+        "cameraId": "cognex-cam-1",
+        "hmiPort": 8087,
+        "hmiWebSocketPath": "/ws",
+        "acquisitionMode": "passive-listen",
+        "hmiReadyIntervalMs": 1000,
+        "responseTimeoutMs": 2000,
+        "boundedCapacity": 8,
+        "logDiagnostics": true
+      },
+      "inputs": [],
+      "outputs": [{ "name": "frame", "channel": "data", "dataType": "data/frame" }]
+    },
+    {
+      "id": "fork1",
+      "kind": "embedded-primitive",
+      "category": "flow-control",
+      "primitiveType": "fork",
+      "displayName": "Fork",
+      "inputs": [{ "name": "frame", "channel": "data", "dataType": "data/frame" }],
+      "outputs": [
+        { "name": "all",   "channel": "data", "dataType": "data/frame", "allowMultipleEdges": true },
+        { "name": "check", "channel": "data", "dataType": "data/frame", "allowMultipleEdges": true }
+      ]
+    },
+    {
+      "id": "saveAll",
+      "kind": "integration-module",
+      "category": "output",
+      "moduleId": "mvf.dataset-writer",
+      "displayName": "Save All Frames",
+      "config": {
+        "outputRoot": "datasets/all",
+        "sessionPrefix": "all",
+        "includeSourcePathInMetadata": false
+      },
+      "inputs": [{ "name": "frame", "channel": "data", "dataType": "data/frame" }],
+      "outputs": []
+    },
+    {
+      "id": "blackCheck1",
+      "kind": "integration-module",
+      "category": "compute",
+      "moduleId": "mvf.black-screen-check",
+      "displayName": "Black Screen Check",
+      "config": {
+        "darknessThreshold": 40.0,
+        "treatDecodeFailureAsBlack": true,
+        "logWarnings": true
+      },
+      "inputs": [{ "name": "frame", "channel": "data", "dataType": "data/frame" }],
+      "outputs": [{ "name": "frame", "channel": "data", "dataType": "data/frame" }]
+    },
+    {
+      "id": "saveDark",
+      "kind": "integration-module",
+      "category": "output",
+      "moduleId": "mvf.dataset-writer",
+      "displayName": "Save Dark Frames",
+      "config": {
+        "outputRoot": "datasets/dark",
+        "sessionPrefix": "dark",
+        "includeSourcePathInMetadata": false
+      },
+      "inputs": [{ "name": "frame", "channel": "data", "dataType": "data/frame" }],
+      "outputs": []
+    }
+  ],
+  "edges": [
+    { "id": "e1", "kind": "data", "from": { "nodeId": "camera1",     "port": "frame" }, "to": { "nodeId": "fork1",       "port": "frame" } },
+    { "id": "e2", "kind": "data", "from": { "nodeId": "fork1",       "port": "all"   }, "to": { "nodeId": "saveAll",     "port": "frame" } },
+    { "id": "e3", "kind": "data", "from": { "nodeId": "fork1",       "port": "check" }, "to": { "nodeId": "blackCheck1", "port": "frame" } },
+    { "id": "e4", "kind": "data", "from": { "nodeId": "blackCheck1", "port": "frame" }, "to": { "nodeId": "saveDark",    "port": "frame" } }
+  ]
+}

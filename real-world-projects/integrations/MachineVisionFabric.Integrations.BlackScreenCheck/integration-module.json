@@ -1,0 +1,21 @@
+{
+  "moduleId": "mvf.black-screen-check",
+  "displayName": "Black Screen Check",
+  "version": "1.0.0",
+  "entryAssembly": "MachineVisionFabric.Integrations.BlackScreenCheck.dll",
+  "entryType": "MachineVisionFabric.Integrations.BlackScreenCheck.BlackScreenCheckModule",
+  "capabilities": [
+    {
+      "name": "black-screen-check",
+      "kind": 4,
+      "schemaType": "MachineVisionFabric.Integrations.BlackScreenCheck.BlackScreenCheckOptions",
+      "description": "Passes through frames whose mean grayscale brightness is at or below a threshold (very black), logging a warning for each.",
+      "inputs": [
+        { "name": "frame", "channel": "data", "dataType": "data/frame", "required": true, "allowMultipleEdges": false, "description": "Frame to evaluate." }
+      ],
+      "outputs": [
+        { "name": "frame", "channel": "data", "dataType": "data/frame", "required": false, "allowMultipleEdges": true, "description": "Emitted only when the frame is black." }
+      ]
+    }
+  ]
+}
