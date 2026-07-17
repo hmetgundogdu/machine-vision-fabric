@@ -9,37 +9,20 @@ namespace MachineVisionFabric.Cli.Tui;
 /// <summary>
 /// Full-screen pipeline TUI dashboard.
 ///
-/// Uses the terminal alternate screen buffer so the main scroll history is
-/// never disturbed and cursor drift cannot occur:
+/// Rendering strategy:
+///   1. Hide cursor
+///   2. Before every frame: SetCursorPosition(0,0)
+///   3. Write the layout via AnsiConsole (overwrites previous content)
+///   4. Blank remaining lines so old content below doesn't bleed through
+///   5. Restore cursor on exit
 ///
-///   ESC[?1049h  →  enter alternate screen
-///   ESC[?25l    →  hide cursor
-///   ESC[H       →  move to (0,0) before each frame
-///   ESC[J       →  erase from cursor to end of screen
-///   ESC[?25h    →  show cursor
-///   ESC[?1049l  →  leave alternate screen
-///
-/// Screen layout:
-/// ┌─────────────────────────────────────────────────────┐
-/// │  Header: run id · pipeline name · status · elapsed  │
-/// ├─────────────────────────────────────────────────────┤
-/// │  Graph: topological diagram, node status + stats    │
-/// ├─────────────────────────────────────────────────────┤
-/// │  Logs: last N lines (timestamp + level)             │
-/// └─────────────────────────────────────────────────────┘
+/// This avoids escape-sequence portability issues on Windows Console hosts
+/// while still producing flicker-free in-place refresh.
 /// </summary>
 public sealed class PipelineDashboard
 {
     private const int LogLines  = 10;
     private const int RefreshMs = 120;
-
-    // ANSI escape sequences (written to stdout directly)
-    private const string AltScreenOn   = "\x1b[?1049h";
-    private const string AltScreenOff  = "\x1b[?1049l";
-    private const string CursorHide    = "\x1b[?25l";
-    private const string CursorShow    = "\x1b[?25h";
-    private const string CursorHome    = "\x1b[H";
-    private const string EraseToEnd    = "\x1b[J";
 
     private readonly IPipelineExecutionHost _host;
     private readonly PipelineDefinition     _definition;
@@ -57,8 +40,8 @@ public sealed class PipelineDashboard
     }
 
     /// <summary>
-    /// Starts the pipeline via <paramref name="options"/> and renders the live dashboard
-    /// on the alternate screen buffer.  Returns the final execution report.
+    /// Starts the pipeline via <paramref name="options"/> and renders the live dashboard.
+    /// Returns the final execution report when the run finishes.
     /// </summary>
     public async Task<PipelineExecutionReport?> RunAsync(
         PipelineExecutionOptions options,
@@ -76,14 +59,8 @@ public sealed class PipelineDashboard
         _state.OnRunStarted(Guid.NewGuid().ToString("N")[..8], _definition.Name);
         await _host.StartAsync(_definition, enriched, cancellationToken);
 
-        var ansi = AnsiConsole.Profile.Capabilities.Ansi;
-
-        if (ansi)
-        {
-            Console.Write(AltScreenOn);
-            Console.Write(CursorHide);
-        }
-
+        // Hide cursor to prevent flicker
+        try { Console.CursorVisible = false; } catch { /* not supported on all hosts */ }
         Console.Clear();
 
         try
@@ -101,25 +78,20 @@ public sealed class PipelineDashboard
                 await Task.Delay(RefreshMs, cancellationToken).ConfigureAwait(false);
             }
 
-            RenderFrame(); // final frame before leaving alternate screen
-            await Task.Delay(150).ConfigureAwait(false);
+            RenderFrame(); // final frame
         }
         catch (OperationCanceledException) { /* clean shutdown */ }
         finally
         {
-            if (ansi)
-            {
-                Console.Write(CursorShow);
-                Console.Write(AltScreenOff);
-            }
+            try { Console.CursorVisible = true; } catch { }
         }
 
-        // Execution may still be finishing — wait for the report
         var report = await _host.WaitForCompletionAsync(cancellationToken);
         _state.OnFinished(report?.Succeeded == false ? report.ErrorMessage : null);
 
-        // Print final summary on the main screen (visible after alternate screen closes)
-        AnsiConsole.Write(BuildLayout(ComputeActiveLayer(), fullScreen: false));
+        // Print final summary (cursor is at bottom after RenderFrame)
+        Console.Clear();
+        AnsiConsole.Write(BuildLayout(ComputeActiveLayer()));
         return report;
     }
 
@@ -127,22 +99,33 @@ public sealed class PipelineDashboard
 
     private void RenderFrame()
     {
-        // Move to top-left, erase from cursor to end — no clear flash
-        Console.Write(CursorHome);
-        Console.Write(EraseToEnd);
-        AnsiConsole.Write(BuildLayout(ComputeActiveLayer(), fullScreen: true));
+        // Jump to top-left without clearing (avoids flash)
+        try { Console.SetCursorPosition(0, 0); } catch { }
+
+        AnsiConsole.Write(BuildLayout(ComputeActiveLayer()));
+
+        // Blank lines from current cursor position to bottom so old content doesn't bleed
+        try
+        {
+            var cur  = Console.CursorTop;
+            var rows = Console.WindowHeight > 0 ? Console.WindowHeight : 40;
+            var cols = Console.WindowWidth  > 0 ? Console.WindowWidth  : 120;
+            var blank = new string(' ', cols);
+            for (var r = cur; r < rows - 1; r++)
+            {
+                Console.SetCursorPosition(0, r);
+                Console.Write(blank);
+            }
+        }
+        catch { /* ignore on non-interactive hosts */ }
     }
 
-    private IRenderable BuildLayout(int activeLayer, bool fullScreen)
-    {
-        var width    = Console.WindowWidth  > 0 ? Console.WindowWidth  : 120;
-        var height   = Console.WindowHeight > 0 ? Console.WindowHeight : 40;
-        var snapshot = _host.GetSnapshot();
+    // ── Layout ───────────────────────────────────────────────────────────────
 
-        // Reserve lines: header(1) + rule(1) + graph + rule(1) + logs(LogLines)
-        var graphHeight = fullScreen
-            ? Math.Max(6, height - 3 - LogLines - 2)  // -2 for rules
-            : 0; // not used in static mode
+    private IRenderable BuildLayout(int activeLayer)
+    {
+        var width    = Console.WindowWidth > 0 ? Console.WindowWidth : 120;
+        var snapshot = _host.GetSnapshot();
 
         return new Rows(
             BuildHeader(snapshot),
@@ -212,4 +195,5 @@ public sealed class PipelineDashboard
         return _layout.NodePositions.TryGetValue(active.NodeId, out var pos) ? pos.Layer : 0;
     }
 }
+
 
