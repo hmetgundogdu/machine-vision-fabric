@@ -7,8 +7,6 @@ using MachineVisionFabric.Contracts.Control;
 using MachineVisionFabric.Contracts.Dataset;
 using MachineVisionFabric.Contracts.Execution;
 using MachineVisionFabric.Contracts.Integrations;
-using MachineVisionFabric.Contracts.Inspection;
-using MachineVisionFabric.Contracts.Packages;
 using MachineVisionFabric.Contracts.Pipelines;
 using MachineVisionFabric.Contracts.Simulation;
 using MachineVisionFabric.Core.Abstractions;
@@ -17,7 +15,6 @@ using MachineVisionFabric.Runtime.Execution;
 using Spectre.Console;
 using MachineVisionFabric.Runtime.Pipelines;
 using MachineVisionFabric.Runtime.Plugins;
-using MachineVisionFabric.Storage;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -39,14 +36,8 @@ switch (invocation.Command)
     case "packages":
         await ListPackagesAsync(invocation);
         break;
-    case "inspect-package":
-        await InspectPackageAsync(invocation);
-        break;
     case "modules":
         await ListModulesAsync(invocation);
-        break;
-    case "inspect-runtime":
-        await InspectRuntimeAsync(invocation);
         break;
     case "sessions":
         await ListSessionsAsync(invocation);
@@ -63,9 +54,6 @@ switch (invocation.Command)
     case "execute-graph":
         await ExecuteGraphAsync(invocation);
         break;
-    case "run":
-        await RunAsync(invocation);
-        break;
     default:
         Console.Error.WriteLine($"Unknown command '{invocation.Command}'.");
         PrintHelp();
@@ -74,90 +62,6 @@ switch (invocation.Command)
 }
 
 return;
-
-async Task RunAsync(CliInvocation invocation)
-{
-    var overrides = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-
-    if (invocation.Options.TryGetValue("integrations-root", out var integrationsRoot))
-    {
-        overrides["MachineVisionFabric:IntegrationsRoot"] = integrationsRoot;
-    }
-
-    if (invocation.Options.TryGetValue("package", out var packageRoot))
-    {
-        overrides["MachineVisionFabric:DatasetCapture:PackageRoot"] = packageRoot;
-    }
-
-    if (invocation.Options.TryGetValue("dataset-root", out var datasetRoot))
-    {
-        overrides["MachineVisionFabric:DatasetCapture:DatasetRoot"] = datasetRoot;
-    }
-
-    if (invocation.Options.TryGetValue("session-prefix", out var sessionPrefix))
-    {
-        overrides["MachineVisionFabric:DatasetCapture:SessionPrefix"] = sessionPrefix;
-    }
-
-    using var host = BuildHost(overrides);
-    var bootstrapper = host.Services.GetRequiredService<IHeadlessRuntimeBootstrapper>();
-    var report = await bootstrapper.BootstrapAsync(CancellationToken.None);
-
-    Console.WriteLine($"PackageRoot: {report.PackageRoot}");
-    Console.WriteLine($"SessionRoot: {report.DatasetSessionRoot}");
-    Console.WriteLine($"FrameSource: {report.FrameSourceSource} ({report.FrameSourceStrategy})");
-    Console.WriteLine($"ProductGate: {report.ProductPresenceSource} ({report.ProductPresenceStrategy})");
-    Console.WriteLine($"ProductPresent: {report.ProductPresent}");
-    Console.WriteLine($"CapturedFrames: {report.CapturedFrameCount}");
-    Console.WriteLine($"Pipeline: {report.PipelineName}");
-    Console.WriteLine($"PipelineSource: {report.PipelineSource}");
-    Console.WriteLine($"PipelineSynthetic: {report.PipelineIsSynthetic}");
-    Console.WriteLine($"PipelineValid: {report.PipelineIsValid}");
-    Console.WriteLine($"PipelineNodes: {report.PipelineNodeCount}");
-    Console.WriteLine($"PipelineEdges: {report.PipelineEdgeCount}");
-    Console.WriteLine($"SessionMetadata: {report.SessionMetadataPath}");
-}
-
-async Task InspectPackageAsync(CliInvocation invocation)
-{
-    using var host = BuildHost();
-    var opts = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MachineVisionFabricRuntimeOptions>>().Value;
-
-    var packagePath = invocation.Options.TryGetValue("package", out var packageRoot)
-        ? ResolveWorkingPath(packageRoot)
-        : ResolveWorkingPath(opts.DatasetCapture.PackageRoot);
-
-    var manifestPath = Path.Combine(packagePath, "manifest.json");
-    var profilePath = Path.Combine(packagePath, "profile.json");
-
-    if (!File.Exists(manifestPath) || !File.Exists(profilePath))
-    {
-        Console.WriteLine($"Package files were not found under: {packagePath}");
-        return;
-    }
-
-    var manifest = await ReadJsonAsync<FabricProfileManifest>(manifestPath);
-    var profile = await ReadJsonAsync<FabricRuntimeProfile>(profilePath);
-    var pipelineProvider = host.Services.GetRequiredService<IPipelineDefinitionProvider>();
-    var validator = host.Services.GetRequiredService<IPipelineDefinitionValidator>();
-    var resolvedPipeline = await pipelineProvider.LoadAsync(packagePath, manifest, profile, CancellationToken.None);
-    var pipelineValidation = validator.Validate(resolvedPipeline.Definition);
-
-    Console.WriteLine($"Package: {manifest.Name}");
-    Console.WriteLine($"Version: {manifest.Version}");
-    Console.WriteLine($"Scenario: {manifest.Scenario}");
-    Console.WriteLine($"EntryProfile: {manifest.EntryProfile}");
-    Console.WriteLine($"PipelineDefinition: {manifest.PipelineDefinition ?? "(synthetic compatibility graph)"}");
-    Console.WriteLine($"ProfileMode: {profile.Mode}");
-    Console.WriteLine($"Capabilities: {string.Join(", ", profile.Capabilities)}");
-    Console.WriteLine(
-        $"CapturePolicy: enabled={manifest.CapturePolicy.Enabled}; requireProductPresent={manifest.CapturePolicy.RequireProductPresent}; maxFramesPerCamera={manifest.CapturePolicy.MaxFramesPerCamera}; mode={manifest.CapturePolicy.Mode}; preTriggerFramesPerCamera={manifest.CapturePolicy.PreTriggerFramesPerCamera}; postTriggerFramesPerCamera={manifest.CapturePolicy.PostTriggerFramesPerCamera}; gateEvaluationIntervalFrames={manifest.CapturePolicy.GateEvaluationIntervalFrames}");
-    Console.WriteLine($"ProductGate: mode={manifest.ProductPresenceGate.Mode}; moduleId={manifest.ProductPresenceGate.ModuleId ?? "-"}");
-    Console.WriteLine($"FrameProcessor: mode={manifest.FrameProcessor.Mode}; moduleId={manifest.FrameProcessor.ModuleId ?? "-"}");
-    Console.WriteLine($"FrameSource: mode={profile.Source.Mode}; moduleId={profile.Source.ModuleId ?? "-"}");
-    Console.WriteLine($"ResolvedPipeline: name={resolvedPipeline.Definition.Name}; source={resolvedPipeline.Source}; synthetic={resolvedPipeline.IsSynthetic}; valid={pipelineValidation.IsValid}; nodes={resolvedPipeline.Definition.Nodes.Count}; edges={resolvedPipeline.Definition.Edges.Count}");
-    Console.WriteLine($"RequiredDirectories: {string.Join(", ", manifest.RequiredDirectories)}");
-}
 
 Task ListPackagesAsync(CliInvocation invocation)
 {
@@ -269,71 +173,10 @@ Task ListModulesAsync(CliInvocation invocation)
     return Task.CompletedTask;
 }
 
-async Task InspectRuntimeAsync(CliInvocation invocation)
-{
-    using var host = BuildHost();
-    var options = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MachineVisionFabricRuntimeOptions>>().Value;
-
-    var packagePath = invocation.Options.TryGetValue("package", out var packageRoot)
-        ? ResolveWorkingPath(packageRoot)
-        : ResolveWorkingPath(options.DatasetCapture.PackageRoot);
-
-    var integrationsRoot = ResolveWorkingPath(
-        invocation.Options.TryGetValue("root", out var root) ? root : options.IntegrationsRoot);
-    var inspectionService = host.Services.GetRequiredService<IPipelineInspectionService>();
-    var report = await inspectionService.InspectAsync(packagePath, integrationsRoot, CancellationToken.None);
-
-    Console.WriteLine($"Package: {report.Manifest.Name}");
-    Console.WriteLine($"PackageRoot: {report.PackageRoot}");
-    Console.WriteLine($"Pipeline: {report.Pipeline.Name}");
-    Console.WriteLine($"PipelineSource: {report.PipelineSource}");
-    Console.WriteLine($"PipelineSynthetic: {report.PipelineIsSynthetic}");
-    Console.WriteLine($"PipelineValid: {report.Validation.IsValid}");
-    Console.WriteLine($"AvailableModules: {report.AvailableModules.Count}");
-    Console.WriteLine("Nodes:");
-    foreach (var node in report.Pipeline.Nodes)
-    {
-        var binding = node.ModuleId ?? node.PrimitiveType ?? node.BuiltinType ?? "-";
-        Console.WriteLine($"  {node.Id} | {node.Kind} | {node.Category} | {binding}");
-    }
-
-    Console.WriteLine("Edges:");
-    foreach (var edge in report.Pipeline.Edges)
-    {
-        Console.WriteLine($"  {edge.Id} | {edge.Kind} | {edge.From.NodeId}.{edge.From.Port} -> {edge.To.NodeId}.{edge.To.Port}");
-    }
-
-    Console.WriteLine("Modules:");
-    foreach (var module in report.AvailableModules)
-    {
-        foreach (var capability in module.Capabilities)
-        {
-            var inputs = capability.Inputs.Count == 0
-                ? "-"
-                : string.Join(", ", capability.Inputs.Select(port => $"{port.Name}:{port.Channel}/{port.DataType}"));
-            var outputs = capability.Outputs.Count == 0
-                ? "-"
-                : string.Join(", ", capability.Outputs.Select(port => $"{port.Name}:{port.Channel}/{port.DataType}"));
-            Console.WriteLine($"  {module.ModuleId} | {capability.Kind} | schema={capability.SchemaType} | in=[{inputs}] | out=[{outputs}]");
-        }
-    }
-
-    if (!report.Validation.IsValid)
-    {
-        Console.WriteLine("ValidationIssues:");
-        foreach (var issue in report.Validation.Issues)
-        {
-            Console.WriteLine($"  {issue.Severity.ToUpperInvariant()} {issue.Code} | node={issue.NodeId ?? "-"} | edge={issue.EdgeId ?? "-"} | {issue.Message}");
-        }
-
-        Environment.ExitCode = 1;
-    }
-}
-
 Task ExportSchemasAsync(CliInvocation invocation)
 {
     var outputRoot = ResolveWorkingPath(
-        invocation.Options.TryGetValue("output", out var output) ? output : "artifacts\\schemas");
+        invocation.Options.TryGetValue("output", out var output) ? output : "artifacts/schemas");
 
     Directory.CreateDirectory(outputRoot);
 
@@ -343,16 +186,10 @@ Task ExportSchemasAsync(CliInvocation invocation)
         TypeInfoResolver = new DefaultJsonTypeInfoResolver()
     };
 
-    WriteSchema<FabricProfileManifest>("fabric-profile-manifest.schema.json");
-    WriteSchema<FabricRuntimeProfile>("fabric-runtime-profile.schema.json");
-    WriteSchema<SourceBinding>("source-binding.schema.json");
     WriteSchema<IntegrationModuleDescriptor>("integration-module-descriptor.schema.json");
     WriteSchema<IntegrationModuleManifest>("integration-module-manifest.schema.json");
     WriteSchema<IntegrationCapabilityDescriptor>("integration-capability-descriptor.schema.json");
     WriteSchema<ModulePortDescriptor>("module-port-descriptor.schema.json");
-    WriteSchema<PipelineInspectionReport>("pipeline-inspection-report.schema.json");
-    WriteSchema<ProductPresenceGateBinding>("product-presence-gate-binding.schema.json");
-    WriteSchema<FrameProcessorBinding>("frame-processor-binding.schema.json");
     WriteSchema<PipelineDefinition>("pipeline-definition.schema.json");
     WriteSchema<PipelineNodeDefinition>("pipeline-node-definition.schema.json");
     WriteSchema<PipelineEdgeDefinition>("pipeline-edge-definition.schema.json");
@@ -532,23 +369,12 @@ IHost BuildHost(IReadOnlyDictionary<string, string?>? overrides = null)
 
     builder.Services.Configure<MachineVisionFabricRuntimeOptions>(
         builder.Configuration.GetSection(MachineVisionFabricRuntimeOptions.SectionName));
-    builder.Services.AddSingleton<IPackageManifestLoader, PackageManifestLoader>();
-    builder.Services.AddSingleton<IEntryProfileLoader, EntryProfileLoader>();
-    builder.Services.AddSingleton<IDatasetSessionPreparer, DatasetSessionPreparer>();
-    builder.Services.AddSingleton<IDatasetCollector, DatasetCollector>();
     builder.Services.AddSingleton<ISimulatorSourceCatalog, EmptySimulatorSourceCatalog>();
     builder.Services.AddSingleton<IIntegrationModuleLoader, IntegrationModuleLoader>();
-    builder.Services.AddSingleton<IFrameSourceResolver, ProfileFrameSourceResolver>();
-    builder.Services.AddSingleton<IProductPresenceGateResolver, ProfileProductPresenceGateResolver>();
-    builder.Services.AddSingleton<IFrameProcessorResolver, ProfileFrameProcessorResolver>();
-    builder.Services.AddSingleton<DatasetCaptureCompatibilityPipelineFactory>();
-    builder.Services.AddSingleton<IPipelineDefinitionProvider, PackagePipelineDefinitionProvider>();
     builder.Services.AddSingleton<IPipelineDefinitionValidator, PipelineDefinitionValidator>();
-    builder.Services.AddSingleton<IPipelineInspectionService, PipelineInspectionService>();
     builder.Services.AddSingleton<IPipelineNodeActivator, PipelineNodeActivator>();
     builder.Services.AddSingleton<IPipelineGraphExecutor, PipelineGraphExecutor>();
     builder.Services.AddTransient<IPipelineExecutionHost, PipelineExecutionHost>();
-    builder.Services.AddSingleton<IHeadlessRuntimeBootstrapper, HeadlessRuntimeBootstrapper>();
 
     return builder.Build();
 }
@@ -614,16 +440,13 @@ void PrintHelp()
 {
     Console.WriteLine("MachineVisionFabric.Cli");
     Console.WriteLine("Commands:");
-    Console.WriteLine("  run [--integrations-root <path>] [--package <path>] [--dataset-root <path>] [--session-prefix <value>]");
-    Console.WriteLine("  packages [--root <path>]");
-    Console.WriteLine("  inspect-package [--package <path>]");
+    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--no-tui]");
+    Console.WriteLine("  validate-pipeline --path <pipeline.json>");
     Console.WriteLine("  modules [--root <path>]");
-    Console.WriteLine("  inspect-runtime [--package <path>] [--root <integrations-root>]");
+    Console.WriteLine("  packages [--root <path>]");
     Console.WriteLine("  sessions [--root <path>]");
     Console.WriteLine("  inspect-session --path <session-folder-or-session.json>");
     Console.WriteLine("  schemas [--output <path>]");
-    Console.WriteLine("  validate-pipeline --path <pipeline.json>");
-    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>]");
 }
 
 async Task<T> ReadJsonAsync<T>(string path)
@@ -648,8 +471,8 @@ internal sealed class CliInvocation
         {
             return new CliInvocation
             {
-                Command = "run",
-                ShowHelp = false,
+                Command = "help",
+                ShowHelp = true,
                 Options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             };
         }

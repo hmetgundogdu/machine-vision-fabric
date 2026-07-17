@@ -1,4 +1,4 @@
-namespace MachineVisionFabric.Contracts.Packages;
+namespace MachineVisionFabric.Contracts.Dataset;
 
 public sealed class DatasetCapturePolicy
 {

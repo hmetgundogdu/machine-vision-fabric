@@ -18,14 +18,12 @@
 
 .EXAMPLE
     ./publish.ps1
-    ./publish.ps1 -IncludeRealWorld
     ./publish.ps1 -Output dist/mvf -SelfContained $true
 #>
 param(
     [string]$Output = "publish/mvf",
     [string]$Runtime = "",
     [bool]$SelfContained = $false,
-    [switch]$IncludeRealWorld,
     [switch]$NoClean
 )
 
@@ -109,11 +107,11 @@ $appSettings = Join-Path $out "appsettings.json"
 if (Test-Path $appSettings) {
     $json = Get-Content $appSettings -Raw | ConvertFrom-Json
     $json.MachineVisionFabric.IntegrationsRoot = "integrations"
-    $json.MachineVisionFabric.DatasetCapture.PackageRoot = "packages/dataset-capture-starter"
+    $json.MachineVisionFabric.DatasetCapture.PackageRoot = "packages/cognex-dark-capture"
     $json.MachineVisionFabric.DatasetCapture.DatasetRoot = "datasets"
     $json | ConvertTo-Json -Depth 10 | Set-Content $appSettings
     Write-Host "  → IntegrationsRoot = integrations" -ForegroundColor Cyan
-    Write-Host "  → PackageRoot      = packages/dataset-capture-starter" -ForegroundColor Cyan
+    Write-Host "  → PackageRoot      = packages/cognex-dark-capture" -ForegroundColor Cyan
 }
 
 # ── Done ──────────────────────────────────────────────────────────────────────
@@ -123,6 +121,6 @@ Write-Host "  Done!  $out" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Usage:" -ForegroundColor Gray
 Write-Host "  cd $out" -ForegroundColor White
-Write-Host "  ./MachineVisionFabric.Cli execute-graph --package packages/dataset-capture-starter" -ForegroundColor White
+Write-Host "  ./MachineVisionFabric.Cli execute-graph --package packages/cognex-dark-capture" -ForegroundColor White
 Write-Host "═══════════════════════════════════════════════" -ForegroundColor DarkCyan
 Write-Host ""

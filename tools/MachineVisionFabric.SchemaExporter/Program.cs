@@ -3,8 +3,8 @@ using System.Text.Json.Nodes;
 using System.Text.Json.Schema;
 using System.Text.Json.Serialization.Metadata;
 using MachineVisionFabric.Contracts.Integrations;
-using MachineVisionFabric.Contracts.Packages;
 using MachineVisionFabric.Contracts.Control;
+using MachineVisionFabric.Contracts.Pipelines;
 using MachineVisionFabric.Contracts.Simulation;
 
 var outputRoot = args.Length > 0
@@ -19,13 +19,15 @@ var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
     TypeInfoResolver = new DefaultJsonTypeInfoResolver()
 };
 
-WriteSchema<FabricProfileManifest>("fabric-profile-manifest.schema.json");
-WriteSchema<FabricRuntimeProfile>("fabric-runtime-profile.schema.json");
-WriteSchema<SourceBinding>("source-binding.schema.json");
 WriteSchema<IntegrationModuleDescriptor>("integration-module-descriptor.schema.json");
 WriteSchema<IntegrationModuleManifest>("integration-module-manifest.schema.json");
 WriteSchema<IntegrationCapabilityDescriptor>("integration-capability-descriptor.schema.json");
-WriteSchema<ProductPresenceGateBinding>("product-presence-gate-binding.schema.json");
+WriteSchema<ModulePortDescriptor>("module-port-descriptor.schema.json");
+WriteSchema<PipelineDefinition>("pipeline-definition.schema.json");
+WriteSchema<PipelineNodeDefinition>("pipeline-node-definition.schema.json");
+WriteSchema<PipelineEdgeDefinition>("pipeline-edge-definition.schema.json");
+WriteSchema<PipelinePortDefinition>("pipeline-port-definition.schema.json");
+WriteSchema<PipelineValidationResult>("pipeline-validation-result.schema.json");
 WriteSchema<S7GatewayGateOptions>("s7-gateway-gate-options.schema.json");
 WriteSchema<S7SignalAddress>("s7-signal-address.schema.json");
 WriteSchema<SimulatedPlcGateOptions>("simulated-plc-gate-options.schema.json");

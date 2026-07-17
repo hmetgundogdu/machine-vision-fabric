@@ -23,7 +23,6 @@
     <ProjectReference Include="..\..\src\MachineVisionFabric.Core\MachineVisionFabric.Core.csproj" />
     <ProjectReference Include="..\..\src\MachineVisionFabric.Runtime\MachineVisionFabric.Runtime.csproj" />
     <ProjectReference Include="..\..\src\MachineVisionFabric.Sdk\MachineVisionFabric.Sdk.csproj" />
-    <ProjectReference Include="..\..\src\MachineVisionFabric.Storage\MachineVisionFabric.Storage.csproj" />
   </ItemGroup>
 
 </Project>
