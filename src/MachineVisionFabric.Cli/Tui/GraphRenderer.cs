@@ -122,17 +122,19 @@ public static class GraphRenderer
         var catColor = CategoryColor(state.Category);
         var w = GraphLayout.NodeBoxWidth - 2; // inside border
 
-        var title   = Truncate($"{state.DisplayName}", w);
+        var title   = Truncate(state.DisplayName, w);
         var sub     = Truncate(state.TypeLabel, w);
-        var stats   = state.TotalCycles == 0
-            ? string.Empty
-            : $"cyc:{state.TotalCycles} acc:{state.AcceptedCycles}";
-        var timing  = state.LastDurationMs > 0 ? $"{state.LastDurationMs}ms" : string.Empty;
+        var cycles  = state.TotalCycles == 0
+            ? "[grey42]waiting…[/]"
+            : $"[grey42]cyc [white]{state.TotalCycles}[/]  ok [green]{state.AcceptedCycles}[/][grey42]/{state.TotalCycles}[/]";
+        var timing  = state.LastDurationMs > 0
+            ? $"[grey42]{state.LastDurationMs}ms[/]"
+            : string.Empty;
 
         var content = new Markup(
             $"{icon} [{catColor}]{Markup.Escape(title)}[/]\n" +
-            $"[grey]{Markup.Escape(sub)}[/]\n" +
-            $"[grey62]{Markup.Escape(stats)}  {Markup.Escape(timing)}[/]");
+            $"[grey42]{Markup.Escape(sub)}[/]\n" +
+            $"{cycles}  {timing}");
 
         var borderStyle = state.Status switch
         {

@@ -8,10 +8,10 @@ namespace MachineVisionFabric.Cli.Tui;
 /// </summary>
 public sealed class GraphLayout
 {
-    public const int NodeBoxWidth = 22;
-    public const int NodeBoxHeight = 4;
-    public const int EdgeColumnWidth = 16;
-    public const int NodeRowPad = 1;     // vertical padding between nodes in the same layer
+    public const int NodeBoxWidth    = 26;
+    public const int NodeBoxHeight   = 5;
+    public const int EdgeColumnWidth = 14;
+    public const int NodeRowPad      = 1;
 
     /// <summary>Node ID → (layer index, slot index within layer).</summary>
     public IReadOnlyDictionary<string, (int Layer, int Slot)> NodePositions { get; }
