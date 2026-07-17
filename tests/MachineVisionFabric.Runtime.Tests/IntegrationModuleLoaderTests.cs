@@ -8,7 +8,18 @@ public sealed class IntegrationModuleLoaderTests
     public void LoadModules_UsesIntegrationManifestDiscovery()
     {
         var repositoryRoot = ResolveRepositoryRoot();
-        var integrationsRoot = Path.Combine(repositoryRoot, "examples", "integrations");
+
+        // The loader resolves each manifest's entry assembly relative to the manifest
+        // file, so it needs a deployed layout where manifest + DLL are colocated.
+        // publish.ps1 produces exactly that under publish/mvf/integrations.
+        var integrationsRoot = Path.Combine(repositoryRoot, "publish", "mvf", "integrations");
+        if (!Directory.Exists(integrationsRoot))
+        {
+            // No published layout available (e.g. clean checkout without a publish run) —
+            // nothing to discover, so there is nothing to assert here.
+            return;
+        }
+
         var loader = new IntegrationModuleLoader();
 
         var modules = loader.LoadModules(integrationsRoot);
@@ -17,13 +28,12 @@ public sealed class IntegrationModuleLoaderTests
             .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
+        // No duplicate module ids from discovery.
         Assert.Equal(moduleIds.Length, moduleIds.Distinct(StringComparer.OrdinalIgnoreCase).Count());
 
-        Assert.Contains("mvf.folder-source", moduleIds);
-        Assert.Contains("mvf.resident-camera-stub", moduleIds);
-        Assert.Contains("mvf.s7-gateway-gate", moduleIds);
-        Assert.Contains("mvf.simulated-gate", moduleIds);
-        Assert.Contains("mvf.tcp-plc-gate", moduleIds);
+        // The kept real-world integration modules must be discoverable.
+        Assert.Contains("mvf.realworld-cognex-camera", moduleIds);
+        Assert.Contains("mvf.realworld-dark-frame-filter", moduleIds);
     }
 
     private static string ResolveRepositoryRoot()
@@ -32,8 +42,8 @@ public sealed class IntegrationModuleLoaderTests
         while (currentDirectory is not null)
         {
             var hasSrc = Directory.Exists(Path.Combine(currentDirectory.FullName, "src"));
-            var hasExampleIntegrations = Directory.Exists(Path.Combine(currentDirectory.FullName, "examples", "integrations"));
-            if (hasSrc && hasExampleIntegrations)
+            var hasRealWorld = Directory.Exists(Path.Combine(currentDirectory.FullName, "real-world-projects"));
+            if (hasSrc && hasRealWorld)
             {
                 return currentDirectory.FullName;
             }

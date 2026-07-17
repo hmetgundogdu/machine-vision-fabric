@@ -17,7 +17,6 @@ using MachineVisionFabric.Runtime.Execution;
 using Spectre.Console;
 using MachineVisionFabric.Runtime.Pipelines;
 using MachineVisionFabric.Runtime.Plugins;
-using MachineVisionFabric.Sources.Simulators;
 using MachineVisionFabric.Storage;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -532,7 +531,7 @@ IHost BuildHost(IReadOnlyDictionary<string, string?>? overrides = null)
     builder.Services.AddSingleton<IEntryProfileLoader, EntryProfileLoader>();
     builder.Services.AddSingleton<IDatasetSessionPreparer, DatasetSessionPreparer>();
     builder.Services.AddSingleton<IDatasetCollector, DatasetCollector>();
-    builder.Services.AddSingleton<ISimulatorSourceCatalog, FolderSequenceSourceCatalog>();
+    builder.Services.AddSingleton<ISimulatorSourceCatalog, EmptySimulatorSourceCatalog>();
     builder.Services.AddSingleton<IIntegrationModuleLoader, IntegrationModuleLoader>();
     builder.Services.AddSingleton<IFrameSourceResolver, ProfileFrameSourceResolver>();
     builder.Services.AddSingleton<IProductPresenceGateResolver, ProfileProductPresenceGateResolver>();
