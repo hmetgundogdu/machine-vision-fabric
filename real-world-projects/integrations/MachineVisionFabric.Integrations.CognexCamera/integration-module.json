@@ -12,7 +12,7 @@
       "description": "Cognex In-Sight HMI WebSocket source. Connects to camera, triggers and streams frames continuously.",
       "inputs": [],
       "outputs": [
-        { "name": "frame", "dataType": "data/frame", "description": "Captured camera frame" }
+        { "name": "frame", "channel": "data", "dataType": "data/frame", "description": "Captured camera frame" }
       ]
     }
   ]
