@@ -24,3 +24,5 @@ coverage/
 artifacts/
 temp/
 tmp/
+
+publish/

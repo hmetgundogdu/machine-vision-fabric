@@ -121,9 +121,12 @@ async Task RunAsync(CliInvocation invocation)
 
 async Task InspectPackageAsync(CliInvocation invocation)
 {
+    using var host = BuildHost();
+    var opts = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MachineVisionFabricRuntimeOptions>>().Value;
+
     var packagePath = invocation.Options.TryGetValue("package", out var packageRoot)
         ? ResolveWorkingPath(packageRoot)
-        : ResolveWorkingPath("examples\\packages\\dataset-capture-starter");
+        : ResolveWorkingPath(opts.DatasetCapture.PackageRoot);
 
     var manifestPath = Path.Combine(packagePath, "manifest.json");
     var profilePath = Path.Combine(packagePath, "profile.json");
@@ -136,7 +139,6 @@ async Task InspectPackageAsync(CliInvocation invocation)
 
     var manifest = await ReadJsonAsync<FabricProfileManifest>(manifestPath);
     var profile = await ReadJsonAsync<FabricRuntimeProfile>(profilePath);
-    using var host = BuildHost();
     var pipelineProvider = host.Services.GetRequiredService<IPipelineDefinitionProvider>();
     var validator = host.Services.GetRequiredService<IPipelineDefinitionValidator>();
     var resolvedPipeline = await pipelineProvider.LoadAsync(packagePath, manifest, profile, CancellationToken.None);
@@ -160,8 +162,12 @@ async Task InspectPackageAsync(CliInvocation invocation)
 
 Task ListPackagesAsync(CliInvocation invocation)
 {
+    // "packages" works in both published layout (next to exe) and dev (repo-root/examples/packages fallback)
+    var defaultPackageRoot = Directory.Exists(ResolveWorkingPath("packages"))
+        ? "packages"
+        : "examples\\packages";
     var packageRoot = ResolveWorkingPath(
-        invocation.Options.TryGetValue("root", out var root) ? root : "examples\\packages");
+        invocation.Options.TryGetValue("root", out var root) ? root : defaultPackageRoot);
 
     if (!Directory.Exists(packageRoot))
     {
@@ -261,12 +267,13 @@ Task ListModulesAsync(CliInvocation invocation)
 
 async Task InspectRuntimeAsync(CliInvocation invocation)
 {
-    var packagePath = invocation.Options.TryGetValue("package", out var packageRoot)
-        ? ResolveWorkingPath(packageRoot)
-        : ResolveWorkingPath("examples\\packages\\dataset-capture-starter");
-
     using var host = BuildHost();
     var options = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MachineVisionFabricRuntimeOptions>>().Value;
+
+    var packagePath = invocation.Options.TryGetValue("package", out var packageRoot)
+        ? ResolveWorkingPath(packageRoot)
+        : ResolveWorkingPath(options.DatasetCapture.PackageRoot);
+
     var integrationsRoot = ResolveWorkingPath(
         invocation.Options.TryGetValue("root", out var root) ? root : options.IntegrationsRoot);
     var inspectionService = host.Services.GetRequiredService<IPipelineInspectionService>();
@@ -411,9 +418,25 @@ async Task ValidatePipelineAsync(CliInvocation invocation)
 
 async Task ExecuteGraphAsync(CliInvocation invocation)
 {
-    var pipelinePath = invocation.Options.TryGetValue("path", out var path)
-        ? ResolveWorkingPath(path)
-        : ResolveWorkingPath("examples\\pipelines\\dataset-capture-typed-graph\\pipeline.json");
+    using var host = BuildHost();
+    var runtimeOptions = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MachineVisionFabricRuntimeOptions>>().Value;
+    var integrationsRoot = ResolveWorkingPath(
+        invocation.Options.TryGetValue("integrations-root", out var intRoot) ? intRoot : runtimeOptions.IntegrationsRoot);
+
+    var packageRoot = invocation.Options.TryGetValue("package", out var pkg)
+        ? ResolveWorkingPath(pkg)
+        : ResolveWorkingPath(runtimeOptions.DatasetCapture.PackageRoot);
+
+    // Resolve pipeline.json: explicit --path wins, then package pipeline.json
+    string pipelinePath;
+    if (invocation.Options.TryGetValue("path", out var path))
+    {
+        pipelinePath = ResolveWorkingPath(path);
+    }
+    else
+    {
+        pipelinePath = Path.Combine(packageRoot, "pipeline.json");
+    }
 
     if (!File.Exists(pipelinePath))
     {
@@ -430,15 +453,6 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         Environment.ExitCode = 1;
         return;
     }
-
-    using var host = BuildHost();
-    var runtimeOptions = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MachineVisionFabricRuntimeOptions>>().Value;
-    var integrationsRoot = ResolveWorkingPath(
-        invocation.Options.TryGetValue("integrations-root", out var intRoot) ? intRoot : runtimeOptions.IntegrationsRoot);
-
-    var packageRoot = invocation.Options.TryGetValue("package", out var pkg)
-        ? ResolveWorkingPath(pkg)
-        : ResolveWorkingPath("examples\\packages\\dataset-capture-starter");
 
     var maxCycles = invocation.Options.TryGetValue("max-cycles", out var mc) && int.TryParse(mc, out var mcInt)
         ? mcInt
@@ -546,7 +560,18 @@ string ResolveWorkingPath(string path)
 
 string ResolveRepositoryRoot()
 {
-    var currentDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+    var baseDir = AppContext.BaseDirectory;
+
+    // Published layout: integrations/ or packages/ sit next to the executable.
+    // Check this first so a publish output inside the repo still resolves correctly.
+    if (Directory.Exists(Path.Combine(baseDir, "integrations")) ||
+        Directory.Exists(Path.Combine(baseDir, "packages")))
+    {
+        return baseDir;
+    }
+
+    // Dev layout: walk up to find the repository root.
+    var currentDirectory = new DirectoryInfo(baseDir);
     while (currentDirectory is not null)
     {
         var hasSrc = Directory.Exists(Path.Combine(currentDirectory.FullName, "src"));
@@ -560,7 +585,7 @@ string ResolveRepositoryRoot()
         currentDirectory = currentDirectory.Parent;
     }
 
-    return AppContext.BaseDirectory;
+    return baseDir;
 }
 
 void PrintHelp()

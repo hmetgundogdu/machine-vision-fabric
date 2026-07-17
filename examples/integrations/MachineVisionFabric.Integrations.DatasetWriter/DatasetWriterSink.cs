@@ -5,6 +5,15 @@ using MachineVisionFabric.Core.Abstractions;
 namespace MachineVisionFabric.Integrations.DatasetWriter;
 
 /// <summary>
+/// Summary written to <c>session.json</c> when the sink is flushed.
+/// </summary>
+internal sealed record DatasetSessionSummary(
+    string SessionRoot,
+    int FrameCount,
+    DateTime FinalizedAtUtc,
+    IReadOnlyList<DatasetCaptureRecord> Records);
+
+/// <summary>
 /// Frame sink that writes each accepted frame as an image file and a
 /// per-frame JSON metadata record under a timestamped session directory.
 ///
@@ -77,7 +86,20 @@ internal sealed class DatasetWriterSink : IFrameSink
         _records.Add(record);
     }
 
-    public Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public async Task FlushAsync(CancellationToken cancellationToken)
+    {
+        if (_records.Count == 0) return;
+
+        var sessionMeta = new DatasetSessionSummary(
+            SessionRoot: _sessionRoot,
+            FrameCount: _records.Count,
+            FinalizedAtUtc: DateTime.UtcNow,
+            Records: _records);
+
+        var sessionJsonPath = Path.Combine(_sessionRoot, "session.json");
+        await using var stream = File.Create(sessionJsonPath);
+        await JsonSerializer.SerializeAsync(stream, sessionMeta, JsonOptions, cancellationToken);
+    }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
