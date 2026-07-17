@@ -125,6 +125,20 @@ public sealed class PipelineGraphExecutor(IPipelineNodeActivator nodeActivator) 
                         if (faulted) acc.FaultedCycles++;
                     }
 
+                    options.OnNodeExecuted?.Invoke(new NodeExecutionEvent
+                    {
+                        RunId = runId,
+                        NodeId = node.Id,
+                        CycleIndex = totalCycles,
+                        HasOutput = result.HasOutput,
+                        Faulted = faulted,
+                        DurationMs = nodeElapsed,
+                        OutputPortNames = result.HasOutput
+                            ? result.All.Select(kvp => kvp.Key).ToList()
+                            : [],
+                        InputPortNames = inputs.All.Select(kvp => kvp.Key).ToList()
+                    });
+
                     if (IsSourceNode(node) && !result.HasOutput)
                     {
                         sourcesExhausted = true;

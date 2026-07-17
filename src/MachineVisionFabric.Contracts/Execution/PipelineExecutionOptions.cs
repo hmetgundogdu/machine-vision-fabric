@@ -27,4 +27,10 @@ public sealed class PipelineExecutionOptions
     /// Use to observe real-time progress without polling.
     /// </summary>
     public Action<PipelineExecutionProgress>? OnCycleCompleted { get; init; }
+
+    /// <summary>
+    /// Optional callback invoked immediately after each node finishes executing.
+    /// Fired before cycle-level routing — allows per-node observability.
+    /// </summary>
+    public Action<NodeExecutionEvent>? OnNodeExecuted { get; init; }
 }

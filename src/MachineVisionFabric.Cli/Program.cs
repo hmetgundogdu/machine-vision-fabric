@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Schema;
 using System.Text.Json.Serialization.Metadata;
+using MachineVisionFabric.Cli.Tui;
 using MachineVisionFabric.Contracts.Control;
 using MachineVisionFabric.Contracts.Dataset;
 using MachineVisionFabric.Contracts.Execution;
@@ -13,6 +14,7 @@ using MachineVisionFabric.Contracts.Simulation;
 using MachineVisionFabric.Core.Abstractions;
 using MachineVisionFabric.Runtime;
 using MachineVisionFabric.Runtime.Execution;
+using Spectre.Console;
 using MachineVisionFabric.Runtime.Pipelines;
 using MachineVisionFabric.Runtime.Plugins;
 using MachineVisionFabric.Sources.Simulators;
@@ -452,52 +454,46 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
     var validator = host.Services.GetRequiredService<IPipelineDefinitionValidator>();
     var validation = validator.Validate(definition);
 
-    Console.WriteLine($"Pipeline: {definition.Name}");
-    Console.WriteLine($"Nodes: {definition.Nodes.Count}");
-    Console.WriteLine($"Edges: {definition.Edges.Count}");
-    Console.WriteLine($"Valid: {validation.IsValid}");
-    Console.WriteLine($"PackageRoot: {packageRoot}");
-    Console.WriteLine($"IntegrationsRoot: {integrationsRoot}");
-    Console.WriteLine($"MaxCycles: {(maxCycles > 0 ? maxCycles.ToString() : "unlimited")}");
-
     if (!validation.IsValid)
     {
+        AnsiConsole.MarkupLine($"[bold]{Markup.Escape(definition.Name)}[/]  [red]✖ Invalid pipeline[/]");
         foreach (var issue in validation.Issues)
         {
-            Console.Error.WriteLine($"  {issue.Severity.ToUpperInvariant()} {issue.Code} | {issue.Message}");
+            AnsiConsole.MarkupLine($"  [red]{Markup.Escape(issue.Severity.ToUpperInvariant())}[/] {issue.Code} | {Markup.Escape(issue.Message)}");
         }
-
         Environment.ExitCode = 1;
         return;
     }
 
-    var executionHost = host.Services.GetRequiredService<IPipelineExecutionHost>();
-    await using var _ = executionHost;
-    await executionHost.StartAsync(definition, options);
-    var report = await executionHost.WaitForCompletionAsync();
+    var noTui = invocation.Options.ContainsKey("no-tui") || !AnsiConsole.Profile.Capabilities.Ansi;
 
-    Console.WriteLine($"Succeeded: {report?.Succeeded}");
-    Console.WriteLine($"TotalCycles: {report?.TotalCycles}");
-    Console.WriteLine($"AcceptedCycles: {report?.AcceptedCycles}");
-    Console.WriteLine($"Duration: {report?.Duration.TotalSeconds:F2}s");
-
-    if (report?.NodeStats.Count > 0)
+    if (noTui)
     {
-        Console.WriteLine("NodeStats:");
-        foreach (var (nodeId, stats) in report.NodeStats.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
+        // Plain text fallback
+        var executionHost = host.Services.GetRequiredService<IPipelineExecutionHost>();
+        await using var _ = executionHost;
+        Console.WriteLine($"Pipeline: {definition.Name}  nodes:{definition.Nodes.Count}  edges:{definition.Edges.Count}");
+        await executionHost.StartAsync(definition, options);
+        var report = await executionHost.WaitForCompletionAsync();
+        Console.WriteLine($"Succeeded:{report?.Succeeded}  cycles:{report?.TotalCycles}  accepted:{report?.AcceptedCycles}  duration:{report?.Duration.TotalSeconds:F2}s");
+        foreach (var (nid, ns) in report?.NodeStats ?? new Dictionary<string, MachineVisionFabric.Contracts.Execution.NodeExecutionStats>())
+            Console.WriteLine($"  {nid}: cycles={ns.TotalCycles} faults={ns.FaultedCycles} avg={ns.AverageDurationMs:F1}ms");
+        if (report is null || !report.Succeeded)
         {
-            Console.WriteLine($"  {nodeId}: cycles={stats.TotalCycles} faults={stats.FaultedCycles} avg={stats.AverageDurationMs:F1}ms");
+            Console.Error.WriteLine($"Error: {report?.ErrorMessage ?? "unknown"}");
+            Environment.ExitCode = 1;
         }
+        return;
     }
 
-    foreach (var warning in report?.Warnings ?? [])
-    {
-        Console.WriteLine($"  WARNING {warning}");
-    }
+    // TUI dashboard
+    var tuiHost = host.Services.GetRequiredService<IPipelineExecutionHost>();
+    await using var _2 = tuiHost;
+    var dashboard = new PipelineDashboard(tuiHost, definition);
+    var dashReport = await dashboard.RunAsync(options);
 
-    if (report is null || !report.Succeeded)
+    if (dashReport is null || !dashReport.Succeeded)
     {
-        Console.Error.WriteLine($"Error: {report?.ErrorMessage ?? "unknown"}");
         Environment.ExitCode = 1;
     }
 }
