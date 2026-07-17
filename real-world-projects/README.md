@@ -1,85 +1,71 @@
-# Real-World Projects
+# MachineVisionFabric — Real-World Projects
 
-This folder is intentionally separate from `src/`.
-It stays in the same repository, but it has its own solution boundary: `MachineVisionFabric.RealWorld.slnx`.
+Bu dizin gerçek donanımlara bağlanan entegrasyon modüllerini ve hazır senaryoları içerir.
 
-Purpose:
+---
 
-- hold project-specific camera integrations
-- hold project-specific packages and dataset collection scenarios
-- evolve station or customer work without polluting the platform core
+## Senaryo: Cognex In-Sight — Dark Frame Filter — Dataset Writer
 
-This folder is for external work nodes and real scenarios.
-It is not the place for embedded pipeline primitives such as `if`, `switch`, `fork`, `join`, or `loop`.
-
-Solution rule:
-
-- `MachineVisionFabric.slnx` = platform solution
-- `real-world-projects/MachineVisionFabric.RealWorld.slnx` = project-specific solution
-
-Current starter:
-
-- `integrations/MachineVisionFabric.Integrations.CameraDatasetStarter`
-- `packages/dataset-capture-camera-starter`
-- `integrations/MachineVisionFabric.Integrations.CognexCamera`
-- `integrations/MachineVisionFabric.Integrations.OpenCvDarkFrameGate`
-- `packages/dataset-capture-cognex-auto-trigger-dark-filter`
-- `packages/dataset-capture-cognex-delay-gate`
-- `packages/dataset-capture-cognex-hmi-passive`
-- `packages/dataset-capture-cognex-hmi-trigger-window`
-
-Scaffold a new project-specific integration from the starter:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File real-world-projects\tools\New-MvfRealWorldIntegration.ps1 -Name CognexCamera -DisplayName "Cognex Camera Dataset Source"
+**Pipeline:**
+```
+Cognex Camera (source)
+    → frame →
+Dark Frame Filter (compute)       ← karanlık frame'leri atar
+    → frame (sadece parlak frame) →
+Dataset Writer (output)
 ```
 
-Run the starter scenario:
+Sürekli çalışır, Ctrl+C ile durdurulur.
 
-```powershell
-dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll run --integrations-root real-world-projects\integrations --package real-world-projects\packages\dataset-capture-camera-starter --dataset-root artifacts\datasets-real-world --session-prefix real-world
+---
+
+## Kamera IP'sini Nasıl Değiştirirsin?
+
+`packages/cognex-dark-filter-dataset/pipeline.json` dosyasını aç:
+
+```json
+{
+  "id": "camera1",
+  "config": {
+    "ipAddress": "192.168.1.11",   ← BUNU DEĞİŞTİR
+    "cameraId": "cognex-cam-1",
+    ...
+  }
+}
 ```
 
-List only real-world modules:
+---
+
+## Publish ve Çalıştırma
 
 ```powershell
-dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll modules --root real-world-projects\integrations
+# Repo kökünden
+powershell -File publish.ps1 -IncludeRealWorld
+
+# Çalıştır
+cd publish\mvf
+.\MachineVisionFabric.Cli.exe execute-graph --package packages\cognex-dark-filter-dataset
 ```
 
-Suggested next step:
+---
 
-- clone `MachineVisionFabric.Integrations.CameraDatasetStarter`
-- rename it to a real vendor adapter such as `MachineVisionFabric.Integrations.CognexCamera`
-- replace the file-backed producer inside `CameraDatasetStarterSession` with real SDK acquisition code
+## Karanlık Eşik Ayarı
 
-The scaffold script above automates that rename and solution registration step.
+`pipeline.json` → `dark-filter` node:
 
-Run the Cognex passive HMI package:
-
-```powershell
-dotnet run --project src\MachineVisionFabric.Cli -- run --integrations-root . --package real-world-projects\packages\dataset-capture-cognex-hmi-passive --dataset-root artifacts\datasets-cognex --session-prefix cognex-passive
+```json
+"config": {
+  "minimumMeanBrightness": 18.0   ← 0–255 arası, düşür = daha az filtre, artır = daha katı
+}
 ```
 
-Run the Cognex auto-trigger dark-filter package:
+---
 
-```powershell
-dotnet run --project src\MachineVisionFabric.Cli -- run --integrations-root . --package real-world-projects\packages\dataset-capture-cognex-auto-trigger-dark-filter --dataset-root artifacts\datasets-cognex --session-prefix cognex-auto
-```
+## Entegrasyon Modülleri
 
-Run the Cognex trigger-window package:
+| Modül | ID | Açıklama |
+|---|---|---|
+| CognexCamera | `mvf.realworld-cognex-camera` | Cognex In-Sight HMI WebSocket kaynak |
+| DarkFrameFilter | `mvf.realworld-dark-frame-filter` | OpenCV ortalama parlaklık filtresi |
 
-```powershell
-dotnet run --project src\MachineVisionFabric.Cli -- run --integrations-root . --package real-world-projects\packages\dataset-capture-cognex-hmi-trigger-window --dataset-root artifacts\datasets-cognex --session-prefix cognex-trigger
-```
-
-Run the Cognex delay-gate package:
-
-```powershell
-dotnet run --project src\MachineVisionFabric.Cli -- run --integrations-root . --package real-world-projects\packages\dataset-capture-cognex-delay-gate --dataset-root artifacts\datasets-cognex --session-prefix cognex-delay
-```
-
-Why `--integrations-root .` is used here:
-
-- the Cognex source module lives under `real-world-projects/`
-- the simulated or PLC gate modules live under `examples/`
-- scanning the repository root lets the runtime resolve both built module sets together
+`mvf.dataset-writer` platform `examples/integrations/` içindedir.

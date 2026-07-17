@@ -1,0 +1,21 @@
+{
+  "moduleId": "mvf.realworld-dark-frame-filter",
+  "displayName": "Dark Frame Filter",
+  "version": "1.0.0",
+  "entryAssembly": "MachineVisionFabric.Integrations.DarkFrameFilter.dll",
+  "entryType": "MachineVisionFabric.Integrations.DarkFrameFilter.DarkFrameFilterModule",
+  "capabilities": [
+    {
+      "name": "dark-frame-filter",
+      "kind": 3,
+      "schemaType": "MachineVisionFabric.Integrations.DarkFrameFilter.DarkFrameFilterOptions",
+      "description": "Rejects frames whose mean grayscale brightness falls below a threshold. Uses OpenCV.",
+      "inputs": [
+        { "name": "frame", "dataType": "data/frame", "description": "Input frame to evaluate" }
+      ],
+      "outputs": [
+        { "name": "frame", "dataType": "data/frame", "description": "Frame passed through only when brightness >= threshold" }
+      ]
+    }
+  ]
+}

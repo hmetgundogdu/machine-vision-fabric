@@ -19,7 +19,8 @@
 param(
     [string]$Output = "publish/mvf",
     [string]$Runtime = "",
-    [bool]$SelfContained = $false
+    [bool]$SelfContained = $false,
+    [switch]$IncludeRealWorld
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,21 +61,33 @@ $integrations = @(
     @{ Project = "examples/integrations/MachineVisionFabric.Integrations.ResidentCameraStub/MachineVisionFabric.Integrations.ResidentCameraStub.csproj"; Id = "mvf.resident-camera-stub" }
 )
 
+if ($IncludeRealWorld) {
+    $integrations += @{ Project = "real-world-projects/integrations/MachineVisionFabric.Integrations.CognexCamera/MachineVisionFabric.Integrations.CognexCamera.csproj"; Id = "mvf.realworld-cognex-camera" }
+    $integrations += @{ Project = "real-world-projects/integrations/MachineVisionFabric.Integrations.DarkFrameFilter/MachineVisionFabric.Integrations.DarkFrameFilter.csproj"; Id = "mvf.realworld-dark-frame-filter" }
+}
+
 foreach ($m in $integrations) {
     $target = Join-Path (Join-Path $out "integrations") $m.Id
     Invoke-Publish $m.Project $target
 }
 
-# ── 3. Example packages ───────────────────────────────────────────────────────
+# ── 3. Packages ───────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "[3/3] Example packages" -ForegroundColor Yellow
+Write-Host "[3/3] Packages" -ForegroundColor Yellow
+$packagesDest = Join-Path $out "packages"
+
 $packagesSource = Join-Path $Root "examples/packages"
-$packagesDest   = Join-Path $out "packages"
 if (Test-Path $packagesSource) {
     Write-Host "  → examples/packages → $packagesDest" -ForegroundColor Cyan
     Copy-Item -Path $packagesSource -Destination $packagesDest -Recurse -Force
-} else {
-    Write-Host "  (no packages directory found, skipping)" -ForegroundColor DarkGray
+}
+
+if ($IncludeRealWorld) {
+    $rwPackages = Join-Path $Root "real-world-projects/packages"
+    if (Test-Path $rwPackages) {
+        Write-Host "  → real-world-projects/packages → $packagesDest" -ForegroundColor Cyan
+        Copy-Item -Path (Join-Path $rwPackages "*") -Destination $packagesDest -Recurse -Force
+    }
 }
 
 # ── 4. Patch appsettings.json for published layout ───────────────────────────

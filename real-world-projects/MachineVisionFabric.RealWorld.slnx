@@ -1,7 +1,6 @@
 <Solution>
   <Folder Name="/integrations/">
-    <Project Path="integrations/MachineVisionFabric.Integrations.CameraDatasetStarter/MachineVisionFabric.Integrations.CameraDatasetStarter.csproj" />
     <Project Path="integrations/MachineVisionFabric.Integrations.CognexCamera/MachineVisionFabric.Integrations.CognexCamera.csproj" />
-    <Project Path="integrations/MachineVisionFabric.Integrations.OpenCvDarkFrameGate/MachineVisionFabric.Integrations.OpenCvDarkFrameGate.csproj" />
+    <Project Path="integrations/MachineVisionFabric.Integrations.DarkFrameFilter/MachineVisionFabric.Integrations.DarkFrameFilter.csproj" />
   </Folder>
 </Solution>

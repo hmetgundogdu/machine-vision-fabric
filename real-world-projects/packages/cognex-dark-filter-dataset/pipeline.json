@@ -1,0 +1,80 @@
+{
+  "name": "cognex-dark-filter-dataset",
+  "version": "1.0.0",
+  "description": "Cognex In-Sight camera → dark-frame filter → dataset writer. Runs continuously.",
+  "nodes": [
+    {
+      "id": "camera1",
+      "kind": "integration-module",
+      "category": "source",
+      "moduleId": "mvf.realworld-cognex-camera",
+      "displayName": "Cognex Camera",
+      "config": {
+        "ipAddress": "192.168.1.11",
+        "cameraId": "cognex-cam-1",
+        "hmiPort": 8087,
+        "hmiWebSocketPath": "/ws",
+        "acquisitionMode": "passive-listen",
+        "manualTriggerIntervalMs": 500,
+        "hmiReadyIntervalMs": 1000,
+        "responseTimeoutMs": 1500,
+        "boundedCapacity": 8,
+        "startupDelayMs": 0,
+        "reopenSessionBeforeManualTrigger": true,
+        "logDiagnostics": true
+      },
+      "inputs": [],
+      "outputs": [
+        { "name": "frame", "dataType": "data/frame" }
+      ]
+    },
+    {
+      "id": "dark-filter",
+      "kind": "integration-module",
+      "category": "compute",
+      "moduleId": "mvf.realworld-dark-frame-filter",
+      "displayName": "Dark Frame Filter",
+      "config": {
+        "minimumMeanBrightness": 18.0,
+        "rejectOnDecodeFailure": true,
+        "logDecisions": true
+      },
+      "inputs": [
+        { "name": "frame", "dataType": "data/frame" }
+      ],
+      "outputs": [
+        { "name": "frame", "dataType": "data/frame" }
+      ]
+    },
+    {
+      "id": "writer",
+      "kind": "integration-module",
+      "category": "output",
+      "moduleId": "mvf.dataset-writer",
+      "displayName": "Dataset Writer",
+      "config": {
+        "outputRoot": "datasets",
+        "sessionPrefix": "capture",
+        "includeSourcePath": false
+      },
+      "inputs": [
+        { "name": "frame", "dataType": "data/frame" }
+      ],
+      "outputs": []
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "kind": "data",
+      "from": { "nodeId": "camera1",    "port": "frame" },
+      "to":   { "nodeId": "dark-filter","port": "frame" }
+    },
+    {
+      "id": "e2",
+      "kind": "data",
+      "from": { "nodeId": "dark-filter","port": "frame" },
+      "to":   { "nodeId": "writer",     "port": "frame" }
+    }
+  ]
+}

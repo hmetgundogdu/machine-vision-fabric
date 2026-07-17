@@ -27,7 +27,8 @@
     <Project Path="tests/MachineVisionFabric.Runtime.Tests/MachineVisionFabric.Runtime.Tests.csproj" />
   </Folder>
   <Folder Name="/real-world-projects/integrations/">
-    <Project Path="real-world-projects/integrations/MachineVisionFabric.Integrations.CameraDatasetStarter/MachineVisionFabric.Integrations.CameraDatasetStarter.csproj" />
+    <Project Path="real-world-projects/integrations/MachineVisionFabric.Integrations.CognexCamera/MachineVisionFabric.Integrations.CognexCamera.csproj" />
+    <Project Path="real-world-projects/integrations/MachineVisionFabric.Integrations.DarkFrameFilter/MachineVisionFabric.Integrations.DarkFrameFilter.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/MachineVisionFabric.SchemaExporter/MachineVisionFabric.SchemaExporter.csproj" />

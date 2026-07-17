@@ -1,4 +1,3 @@
-using System.Net.Http.Headers;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -7,710 +6,352 @@ using MachineVisionFabric.Sdk;
 
 namespace MachineVisionFabric.Integrations.CognexCamera;
 
+/// <summary>
+/// Cognex In-Sight HMI WebSocket frame source session.
+///
+/// Modes:
+///   passive-listen  — listens for resultChanged events; camera triggers externally (e.g. PLC)
+///   manual-trigger  — sends a software trigger on a fixed interval
+///
+/// Runs continuously until the pipeline executor cancels the token.
+/// No MaxFrames limit — the dark-frame filter and dataset writer downstream decide what gets saved.
+/// </summary>
 public sealed class CognexCameraSession : BackgroundFrameSourceSession
 {
-    private readonly SemaphoreSlim hmiSendLock = new(1, 1);
-    private readonly SemaphoreSlim hmiFetchLock = new(1, 1);
-    private readonly Dictionary<int, TaskCompletionSource<JsonElement>> pendingRequests = [];
-    private readonly object pendingSync = new();
-    private readonly TaskCompletionSource completionSource = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly CognexCameraOptions options;
+    private readonly SemaphoreSlim   _hmiSendLock  = new(1, 1);
+    private readonly SemaphoreSlim   _hmiFetchLock = new(1, 1);
+    private readonly Dictionary<int, TaskCompletionSource<JsonElement>> _pending = [];
+    private readonly object          _pendingSync  = new();
+    private readonly CognexCameraOptions _opts;
 
-    private ClientWebSocket? hmiWebSocket;
-    private HttpClient? hmiHttpClient;
-    private CancellationTokenSource? hmiCancellationSource;
-    private Task? hmiReceiveTask;
-    private string? hmiSessionUserPath;
-    private int hmiRequestId = 100;
-    private int producedFrameCount;
+    private ClientWebSocket?  _ws;
+    private HttpClient?       _http;
+    private CancellationTokenSource? _hmiCts;
+    private Task?             _receiveTask;
+    private string?           _sessionPath;
+    private int               _reqId = 100;
 
     public CognexCameraSession(CognexCameraOptions options)
-        : base(
-            declaredCameraCount: 1,
-            estimatedFrameCount: ResolveEstimatedFrameCount(options),
-            boundedCapacity: options.BoundedCapacity)
+        : base(declaredCameraCount: 1, estimatedFrameCount: null, boundedCapacity: options.BoundedCapacity)
     {
-        this.options = options;
+        _opts = options;
         StartBackgroundProducer(ProduceFramesAsync);
     }
 
-    public CognexCameraOptions Options => options;
+    // ── Main producer ────────────────────────────────────────────────────────
 
-    private async Task ProduceFramesAsync(CancellationToken cancellationToken)
+    private async Task ProduceFramesAsync(CancellationToken ct)
     {
         try
         {
-            if (options.StartupDelayMs > 0)
+            if (_opts.StartupDelayMs > 0)
             {
-                Log($"Startup delay: {options.StartupDelayMs} ms");
-                await Task.Delay(options.StartupDelayMs, cancellationToken);
+                Log($"Startup delay: {_opts.StartupDelayMs} ms");
+                await Task.Delay(_opts.StartupDelayMs, ct);
             }
 
-            await ConnectViaHmiAsync(cancellationToken);
+            await ConnectAsync(ct);
 
-            if (IsManualTriggerLoopMode())
-            {
-                await RunManualTriggerLoopAsync(cancellationToken);
-                return;
-            }
-
-            await RunPassiveListenLoopAsync(cancellationToken);
+            if (_opts.AcquisitionMode.Equals("manual-trigger", StringComparison.OrdinalIgnoreCase))
+                await RunManualTriggerLoopAsync(ct);
+            else
+                await RunPassiveListenLoopAsync(ct);
         }
-        finally
+        catch (OperationCanceledException)
         {
-            await SafeDisconnectHmiAsync();
-            hmiSendLock.Dispose();
-            hmiFetchLock.Dispose();
-        }
-    }
-
-    private async Task ConnectViaHmiAsync(CancellationToken cancellationToken)
-    {
-        await SafeDisconnectHmiAsync();
-
-        var socket = new ClientWebSocket();
-        var webSocketScheme = options.HmiUseTls ? "wss" : "ws";
-        var webSocketPath = options.HmiWebSocketPath.StartsWith("/", StringComparison.Ordinal)
-            ? options.HmiWebSocketPath
-            : "/" + options.HmiWebSocketPath;
-        var webSocketUri = new Uri($"{webSocketScheme}://{options.IpAddress}:{options.HmiPort}{webSocketPath}");
-        Log($"Connecting HMI WebSocket: {webSocketUri}");
-
-        hmiCancellationSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        await socket.ConnectAsync(webSocketUri, cancellationToken);
-        hmiWebSocket = socket;
-        Log("HMI WebSocket connected");
-
-        var httpScheme = options.HmiUseTls ? "https" : "http";
-        hmiHttpClient = new HttpClient
-        {
-            BaseAddress = new Uri($"{httpScheme}://{options.IpAddress}:{options.HmiPort}"),
-            Timeout = TimeSpan.FromMilliseconds(Math.Max(1000, options.ResponseTimeoutMs))
-        };
-
-        hmiReceiveTask = Task.Run(() => HmiReceiveLoopAsync(hmiCancellationSource.Token), hmiCancellationSource.Token);
-
-        await SendHmiRequestAsync("get", "system/settings", null, cancellationToken);
-        await SendHmiRequestAsync("get", "system/info", null, cancellationToken);
-        await SendHmiRequestAsync("get", "system/job", null, cancellationToken);
-        await OpenSessionAsync(cancellationToken);
-    }
-
-    private async Task OpenSessionAsync(CancellationToken cancellationToken)
-    {
-        var openSessionBody = new object[]
-        {
-            new Dictionary<string, object?>()
-            {
-                ["$type"] = "HmiSessionInfo",
-                ["enableQueuedResults"] = true,
-                ["cellNames"] = null,
-                ["includeCustomView"] = true,
-                ["includeEasyView"] = true
-            }
-        };
-
-        var openSessionResponse = await SendHmiRequestAsync("post", "system/openSession", openSessionBody, cancellationToken);
-        var sessionPath = openSessionResponse.TryGetProperty("body", out var bodyElement) && bodyElement.ValueKind == JsonValueKind.String
-            ? bodyElement.GetString()
-            : null;
-
-        if (string.IsNullOrWhiteSpace(sessionPath))
-        {
-            throw new InvalidOperationException("Cognex HMI openSession did not return a user session path.");
-        }
-
-        if (sessionPath.Contains("Access denied", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException("Cognex HMI openSession returned access denied.");
-        }
-
-        hmiSessionUserPath = sessionPath;
-        Log($"HMI session opened: {hmiSessionUserPath}");
-
-        await SendHmiRequestAsync("post", $"{sessionPath}/login", BuildHmiLoginPayload(), cancellationToken);
-        Log("HMI login completed");
-        await SendHmiRequestAsync("listen", $"{sessionPath}/resultChanged", null, cancellationToken);
-        await SendHmiRequestAsync("listen", "system/stateChanged", null, cancellationToken);
-        Log("HMI listeners registered: resultChanged, system/stateChanged");
-    }
-
-    private async Task ReopenSessionAsync(CancellationToken cancellationToken)
-    {
-        if (!string.IsNullOrWhiteSpace(hmiSessionUserPath))
-        {
-            try
-            {
-                await SendHmiRequestAsync("post", $"{hmiSessionUserPath}/dispose", Array.Empty<object>(), cancellationToken, 700);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-            }
-        }
-
-        await OpenSessionAsync(cancellationToken);
-        Log($"HMI session reopened: {hmiSessionUserPath}");
-    }
-
-    private async Task RunManualTriggerLoopAsync(CancellationToken cancellationToken)
-    {
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            if (options.MaxFrames is int maxFrames && Volatile.Read(ref producedFrameCount) >= maxFrames)
-            {
-                completionSource.TrySetResult();
-                break;
-            }
-
-            await TriggerViaHmiAsync(cancellationToken);
-
-            if (options.MaxFrames is int frameLimit && Volatile.Read(ref producedFrameCount) >= frameLimit)
-            {
-                completionSource.TrySetResult();
-                break;
-            }
-
-            if (options.ManualTriggerIntervalMs > 0)
-            {
-                await Task.Delay(options.ManualTriggerIntervalMs, cancellationToken);
-            }
-        }
-
-        await WaitForCompletionAsync(cancellationToken);
-    }
-
-    private async Task RunPassiveListenLoopAsync(CancellationToken cancellationToken)
-    {
-        Log($"Passive listen mode started. Ready interval: {options.HmiReadyIntervalMs} ms");
-
-        if (!string.IsNullOrWhiteSpace(hmiSessionUserPath))
-        {
-            await TrySendReadyAsync(cancellationToken);
-        }
-
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            if (options.MaxFrames is int maxFrames && Volatile.Read(ref producedFrameCount) >= maxFrames)
-            {
-                completionSource.TrySetResult();
-                break;
-            }
-
-            if (options.HmiReadyIntervalMs > 0 && !string.IsNullOrWhiteSpace(hmiSessionUserPath))
-            {
-                await TrySendReadyAsync(cancellationToken);
-            }
-
-            await Task.Delay(Math.Max(250, options.HmiReadyIntervalMs), cancellationToken);
-        }
-
-        await WaitForCompletionAsync(cancellationToken);
-    }
-
-    private async Task TriggerViaHmiAsync(CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(hmiSessionUserPath))
-        {
-            throw new InvalidOperationException("Cognex HMI session is not initialized.");
-        }
-
-        if (options.ReopenSessionBeforeManualTrigger)
-        {
-            await ReopenSessionAsync(cancellationToken);
-        }
-
-        Exception? lastError = null;
-        var retryCount = Math.Max(1, options.ManualTriggerRetryCount);
-
-        for (var attempt = 1; attempt <= retryCount; attempt++)
-        {
-            try
-            {
-                try
-                {
-                    await SendHmiRequestAsync("post", $"{hmiSessionUserPath}/manualTrigger", new object[] { true }, cancellationToken, 600);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                }
-
-                await SendHmiRequestAsync("post", $"{hmiSessionUserPath}/ready", Array.Empty<object>(), cancellationToken, 900);
-                return;
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                lastError = ex;
-                await Task.Delay(60, cancellationToken);
-            }
-        }
-
-        throw new InvalidOperationException("Cognex HMI trigger failed after retries.", lastError);
-    }
-
-    private async Task HmiReceiveLoopAsync(CancellationToken cancellationToken)
-    {
-        var webSocket = hmiWebSocket;
-        if (webSocket is null)
-        {
-            return;
-        }
-
-        var buffer = new byte[64 * 1024];
-        using var memoryStream = new MemoryStream();
-
-        while (!cancellationToken.IsCancellationRequested && webSocket.State == WebSocketState.Open)
-        {
-            memoryStream.SetLength(0);
-
-            WebSocketReceiveResult? receiveResult;
-            do
-            {
-                receiveResult = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
-                if (receiveResult.MessageType == WebSocketMessageType.Close)
-                {
-                    return;
-                }
-
-                memoryStream.Write(buffer, 0, receiveResult.Count);
-            }
-            while (!receiveResult.EndOfMessage);
-
-            var payload = Encoding.UTF8.GetString(memoryStream.GetBuffer(), 0, (int)memoryStream.Length);
-            if (string.IsNullOrWhiteSpace(payload))
-            {
-                continue;
-            }
-
-            JsonElement root;
-            try
-            {
-                using var document = JsonDocument.Parse(payload);
-                root = document.RootElement.Clone();
-            }
-            catch (JsonException)
-            {
-                continue;
-            }
-
-            if (!root.TryGetProperty("$type", out var typeElement))
-            {
-                continue;
-            }
-
-            var messageType = typeElement.GetString();
-            if (string.Equals(messageType, "resp", StringComparison.OrdinalIgnoreCase))
-            {
-                CompletePendingResponse(root);
-                continue;
-            }
-
-            if (string.Equals(messageType, "event", StringComparison.OrdinalIgnoreCase))
-            {
-                var eventPath = root.TryGetProperty("path", out var pathElement) ? pathElement.GetString() : "<unknown>";
-                Log($"HMI event received: {eventPath}");
-                _ = Task.Run(() => HandleHmiEventAsync(root, cancellationToken), cancellationToken);
-            }
-        }
-    }
-
-    private void CompletePendingResponse(JsonElement root)
-    {
-        if (!root.TryGetProperty("id", out var idElement) || !idElement.TryGetInt32(out var id))
-        {
-            return;
-        }
-
-        TaskCompletionSource<JsonElement>? completion = null;
-        lock (pendingSync)
-        {
-            if (pendingRequests.TryGetValue(id, out var existing))
-            {
-                completion = existing;
-                pendingRequests.Remove(id);
-            }
-        }
-
-        completion?.TrySetResult(root);
-    }
-
-    private async Task HandleHmiEventAsync(JsonElement root, CancellationToken cancellationToken)
-    {
-        if (!TryExtractHmiImageUrl(root, out var imageUrl))
-        {
-            Log("HMI event did not contain an image URL");
-            return;
-        }
-
-        Log($"HMI image URL detected: {imageUrl}");
-        await FetchAndPublishHmiImageAsync(imageUrl!, cancellationToken);
-    }
-
-    private async Task FetchAndPublishHmiImageAsync(string imageUrl, CancellationToken cancellationToken)
-    {
-        if (hmiHttpClient is null)
-        {
-            return;
-        }
-
-        await hmiFetchLock.WaitAsync(cancellationToken);
-        try
-        {
-            var imageUri = BuildHmiImageUri(imageUrl);
-            using var response = await hmiHttpClient.GetAsync(imageUri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            response.EnsureSuccessStatusCode();
-
-            var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-            if (bytes.Length == 0)
-            {
-                return;
-            }
-
-            var sequenceNumber = Interlocked.Increment(ref producedFrameCount);
-            if (options.MaxFrames is int maxFrames && sequenceNumber > maxFrames)
-            {
-                completionSource.TrySetResult();
-                return;
-            }
-
-            var contentType = ResolveContentType(response.Content.Headers.ContentType, imageUrl);
-            var extension = ResolveExtension(contentType, imageUrl);
-            var fileName = $"{options.CameraId}-seq{sequenceNumber:0000}{extension}";
-            var sourcePath = BuildAbsoluteImageUrl(imageUri);
-            var frame = FrameEnvelopeFactory.FromBytes(
-                options.CameraId,
-                sequenceNumber,
-                fileName,
-                bytes,
-                contentType,
-                DateTime.UtcNow,
-                sourcePath);
-
-            await PublishAsync(frame, cancellationToken);
-            Log($"Frame published: seq={sequenceNumber}; bytes={bytes.Length}; contentType={contentType}; source={sourcePath}");
-
-            if (options.MaxFrames is int limit && sequenceNumber >= limit)
-            {
-                completionSource.TrySetResult();
-            }
-        }
-        finally
-        {
-            hmiFetchLock.Release();
-        }
-    }
-
-    private Uri BuildHmiImageUri(string imageUrl)
-    {
-        var relativePath = imageUrl.StartsWith("/", StringComparison.Ordinal)
-            ? imageUrl
-            : "/" + imageUrl;
-        var extraQuery = string.IsNullOrWhiteSpace(options.HmiImageQuery)
-            ? string.Empty
-            : options.HmiImageQuery.TrimStart('?');
-        var cacheBust = $"_ts={DateTime.UtcNow.Ticks}";
-        var mergedQuery = string.IsNullOrWhiteSpace(extraQuery)
-            ? cacheBust
-            : $"{extraQuery}&{cacheBust}";
-        var separator = relativePath.Contains('?', StringComparison.Ordinal) ? "&" : "?";
-
-        return new Uri(relativePath + separator + mergedQuery, UriKind.Relative);
-    }
-
-    private string BuildAbsoluteImageUrl(Uri imageUri)
-    {
-        if (hmiHttpClient?.BaseAddress is null)
-        {
-            return imageUri.ToString();
-        }
-
-        return new Uri(hmiHttpClient.BaseAddress, imageUri).ToString();
-    }
-
-    private async Task<JsonElement> SendHmiRequestAsync(
-        string type,
-        string path,
-        object? body,
-        CancellationToken cancellationToken,
-        int? timeoutMs = null)
-    {
-        var webSocket = hmiWebSocket;
-        if (webSocket is null || webSocket.State != WebSocketState.Open)
-        {
-            throw new InvalidOperationException("Cognex HMI websocket is not connected.");
-        }
-
-        var requestId = Interlocked.Increment(ref hmiRequestId);
-        var request = new Dictionary<string, object?>
-        {
-            ["$type"] = type,
-            ["id"] = requestId,
-            ["path"] = path
-        };
-
-        if (body is not null)
-        {
-            request["body"] = body;
-        }
-
-        var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(request));
-        var pendingResponse = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        lock (pendingSync)
-        {
-            pendingRequests[requestId] = pendingResponse;
-        }
-
-        await hmiSendLock.WaitAsync(cancellationToken);
-        try
-        {
-            await webSocket.SendAsync(payload, WebSocketMessageType.Text, true, cancellationToken);
-        }
-        finally
-        {
-            hmiSendLock.Release();
-        }
-
-        var effectiveTimeoutMs = timeoutMs ?? Math.Max(1000, options.ResponseTimeoutMs);
-        var completedTask = await Task.WhenAny(pendingResponse.Task, Task.Delay(effectiveTimeoutMs, cancellationToken));
-        if (completedTask != pendingResponse.Task)
-        {
-            lock (pendingSync)
-            {
-                pendingRequests.Remove(requestId);
-            }
-
-            Log($"HMI request timeout: type={type}; path={path}");
-            throw new InvalidOperationException($"Cognex HMI request timeout: {type} {path}");
-        }
-
-        var response = await pendingResponse.Task;
-        if (response.TryGetProperty("error", out var errorElement)
-            && errorElement.ValueKind == JsonValueKind.Number
-            && errorElement.TryGetInt32(out var errorCode)
-            && errorCode != 0)
-        {
-            var bodyText = response.TryGetProperty("body", out var errorBody)
-                ? errorBody.ToString()
-                : "<empty>";
-            throw new InvalidOperationException(
-                $"Cognex HMI request failed ({type} {path}), code={errorCode}, body={bodyText}");
-        }
-
-        return response;
-    }
-
-    private async Task WaitForCompletionAsync(CancellationToken cancellationToken)
-    {
-        if (options.MaxFrames is int)
-        {
-            await completionSource.Task.WaitAsync(cancellationToken);
-            return;
-        }
-
-        await Task.Delay(Timeout.Infinite, cancellationToken);
-    }
-
-    private async Task SafeDisconnectHmiAsync()
-    {
-        try
-        {
-            hmiCancellationSource?.Cancel();
-        }
-        catch
-        {
-        }
-
-        lock (pendingSync)
-        {
-            foreach (var pending in pendingRequests.Values)
-            {
-                pending.TrySetCanceled();
-            }
-
-            pendingRequests.Clear();
-        }
-
-        if (hmiReceiveTask is not null)
-        {
-            try
-            {
-                await hmiReceiveTask;
-            }
-            catch
-            {
-            }
-            finally
-            {
-                hmiReceiveTask = null;
-            }
-        }
-
-        if (hmiWebSocket is not null)
-        {
-            try
-            {
-                if (hmiWebSocket.State == WebSocketState.Open)
-                {
-                    await hmiWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "shutdown", CancellationToken.None);
-                }
-            }
-            catch
-            {
-            }
-
-            hmiWebSocket.Dispose();
-            hmiWebSocket = null;
-        }
-
-        hmiHttpClient?.Dispose();
-        hmiHttpClient = null;
-
-        hmiCancellationSource?.Dispose();
-        hmiCancellationSource = null;
-        hmiSessionUserPath = null;
-    }
-
-    private object[] BuildHmiLoginPayload()
-    {
-        var username = Convert.ToBase64String(Encoding.UTF8.GetBytes(options.Username));
-        var password = Convert.ToBase64String(Encoding.UTF8.GetBytes(options.Password));
-        return [username, password];
-    }
-
-    private bool TryExtractHmiImageUrl(JsonElement node, out string? imageUrl)
-    {
-        imageUrl = null;
-
-        if (node.ValueKind == JsonValueKind.Object && node.TryGetProperty("body", out var bodyNode))
-        {
-            return TryExtractHmiImageUrl(bodyNode, out imageUrl);
-        }
-
-        if (node.ValueKind != JsonValueKind.Object)
-        {
-            return false;
-        }
-
-        if (!node.TryGetProperty("acqImageView", out var imageViewNode) || imageViewNode.ValueKind != JsonValueKind.Object)
-        {
-            return false;
-        }
-
-        if (!imageViewNode.TryGetProperty("layers", out var layersNode) || layersNode.ValueKind != JsonValueKind.Array)
-        {
-            return false;
-        }
-
-        foreach (var layer in layersNode.EnumerateArray())
-        {
-            if (!layer.TryGetProperty("$type", out var typeNode))
-            {
-                continue;
-            }
-
-            if (!string.Equals(typeNode.GetString(), "ImageLayer", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            if (!layer.TryGetProperty("url", out var urlNode) || urlNode.ValueKind != JsonValueKind.String)
-            {
-                continue;
-            }
-
-            var url = urlNode.GetString();
-            if (string.IsNullOrWhiteSpace(url))
-            {
-                continue;
-            }
-
-            imageUrl = url;
-            return true;
-        }
-
-        return false;
-    }
-
-    private static string ResolveContentType(MediaTypeHeaderValue? contentTypeHeader, string imageUrl)
-    {
-        var mediaType = contentTypeHeader?.MediaType;
-        if (!string.IsNullOrWhiteSpace(mediaType))
-        {
-            return mediaType;
-        }
-
-        return ResolveExtension(null, imageUrl) switch
-        {
-            ".jpg" or ".jpeg" => "image/jpeg",
-            ".png" => "image/png",
-            ".bmp" => "image/bmp",
-            ".tif" or ".tiff" => "image/tiff",
-            _ => "application/octet-stream"
-        };
-    }
-
-    private static string ResolveExtension(string? contentType, string imageUrl)
-    {
-        if (!string.IsNullOrWhiteSpace(contentType))
-        {
-            return contentType.ToLowerInvariant() switch
-            {
-                "image/jpeg" => ".jpg",
-                "image/png" => ".png",
-                "image/bmp" => ".bmp",
-                "image/tiff" => ".tif",
-                _ => ResolveExtensionFromUrl(imageUrl)
-            };
-        }
-
-        return ResolveExtensionFromUrl(imageUrl);
-    }
-
-    private static string ResolveExtensionFromUrl(string imageUrl)
-    {
-        var cleanUrl = imageUrl.Split('?', '#')[0];
-        var extension = Path.GetExtension(cleanUrl);
-        return string.IsNullOrWhiteSpace(extension) ? ".bin" : extension.ToLowerInvariant();
-    }
-
-    private static int? ResolveEstimatedFrameCount(CognexCameraOptions options)
-    {
-        return options.MaxFrames is > 0 ? options.MaxFrames : null;
-    }
-
-    private bool IsManualTriggerLoopMode()
-    {
-        return string.Equals(options.AcquisitionMode, "manual-trigger-loop", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private async Task TrySendReadyAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            await SendHmiRequestAsync("post", $"{hmiSessionUserPath}/ready", Array.Empty<object>(), cancellationToken, 900);
-            Log("HMI ready sent");
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
+            // normal shutdown
         }
         catch (Exception ex)
         {
-            Log($"HMI ready failed: {ex.Message}");
+            Log($"[ERROR] {ex.Message}");
+        }
+        finally
+        {
+            await SafeDisconnectAsync();
+            _hmiSendLock.Dispose();
+            _hmiFetchLock.Dispose();
         }
     }
 
-    private void Log(string message)
+    // ── Connection ───────────────────────────────────────────────────────────
+
+    private async Task ConnectAsync(CancellationToken ct)
     {
-        if (!options.LogDiagnostics)
+        await SafeDisconnectAsync();
+
+        var scheme = _opts.HmiUseTls ? "wss" : "ws";
+        var path   = _opts.HmiWebSocketPath.StartsWith('/') ? _opts.HmiWebSocketPath : "/" + _opts.HmiWebSocketPath;
+        var uri    = new Uri($"{scheme}://{_opts.IpAddress}:{_opts.HmiPort}{path}");
+
+        Log($"Connecting: {uri}");
+        _hmiCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _ws = new ClientWebSocket();
+        await _ws.ConnectAsync(uri, ct);
+        Log("WebSocket connected");
+
+        var httpScheme = _opts.HmiUseTls ? "https" : "http";
+        _http = new HttpClient
         {
-            return;
+            BaseAddress = new Uri($"{httpScheme}://{_opts.IpAddress}:{_opts.HmiPort}"),
+            Timeout = TimeSpan.FromMilliseconds(Math.Max(1000, _opts.ResponseTimeoutMs))
+        };
+
+        _receiveTask = Task.Run(() => ReceiveLoopAsync(_hmiCts.Token), _hmiCts.Token);
+
+        await SendAsync("get", "system/info",     null, ct);
+        await SendAsync("get", "system/job",      null, ct);
+        await OpenSessionAsync(ct);
+    }
+
+    private async Task OpenSessionAsync(CancellationToken ct)
+    {
+        var payload = new object[]
+        {
+            new Dictionary<string, object?>
+            {
+                ["$type"]                = "HmiSessionInfo",
+                ["enableQueuedResults"]  = true,
+                ["cellNames"]            = null,
+                ["includeCustomView"]    = true,
+                ["includeEasyView"]      = true
+            }
+        };
+
+        var resp = await SendAsync("post", "system/openSession", payload, ct);
+
+        var sp = resp.TryGetProperty("body", out var b) && b.ValueKind == JsonValueKind.String
+            ? b.GetString()
+            : null;
+
+        if (string.IsNullOrWhiteSpace(sp) || sp.Contains("Access denied", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Cognex HMI openSession failed: {sp ?? "no session path returned"}");
+
+        _sessionPath = sp;
+        Log($"Session opened: {_sessionPath}");
+
+        await SendAsync("post",   $"{_sessionPath}/login",         BuildLoginPayload(), ct);
+        await SendAsync("listen", $"{_sessionPath}/resultChanged", null, ct);
+        await SendAsync("listen", "system/stateChanged",           null, ct);
+        Log("HMI listeners registered");
+    }
+
+    private async Task ReopenSessionAsync(CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(_sessionPath))
+        {
+            try { await SendAsync("post", $"{_sessionPath}/dispose", Array.Empty<object>(), ct, timeoutMs: 700); }
+            catch { /* best-effort */ }
+        }
+        await OpenSessionAsync(ct);
+        Log($"Session reopened: {_sessionPath}");
+    }
+
+    // ── Acquisition loops ────────────────────────────────────────────────────
+
+    private async Task RunManualTriggerLoopAsync(CancellationToken ct)
+    {
+        Log("Manual-trigger mode started");
+        while (!ct.IsCancellationRequested)
+        {
+            await TriggerAsync(ct);
+            if (_opts.ManualTriggerIntervalMs > 0)
+                await Task.Delay(_opts.ManualTriggerIntervalMs, ct);
+        }
+    }
+
+    private async Task RunPassiveListenLoopAsync(CancellationToken ct)
+    {
+        Log($"Passive-listen mode started (ready interval: {_opts.HmiReadyIntervalMs} ms)");
+        while (!ct.IsCancellationRequested)
+        {
+            if (!string.IsNullOrWhiteSpace(_sessionPath))
+                await TrySendReadyAsync(ct);
+
+            await Task.Delay(_opts.HmiReadyIntervalMs > 0 ? _opts.HmiReadyIntervalMs : 1000, ct);
+        }
+    }
+
+    private async Task TriggerAsync(CancellationToken ct)
+    {
+        for (var attempt = 0; attempt <= _opts.ManualTriggerRetryCount; attempt++)
+        {
+            try
+            {
+                if (attempt > 0 || _opts.ReopenSessionBeforeManualTrigger)
+                    await ReopenSessionAsync(ct);
+
+                await SendAsync("post", $"{_sessionPath}/trigger", Array.Empty<object>(), ct);
+                await FetchAndEnqueueFrameAsync(ct);
+                return;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) when (attempt < _opts.ManualTriggerRetryCount)
+            {
+                Log($"[WARN] Trigger attempt {attempt + 1} failed: {ex.Message}. Retrying…");
+                await Task.Delay(200, ct);
+            }
+        }
+    }
+
+    private async Task TrySendReadyAsync(CancellationToken ct)
+    {
+        try { await SendAsync("post", $"{_sessionPath}/ready", Array.Empty<object>(), ct, timeoutMs: 800); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { Log($"[WARN] ready signal: {ex.Message}"); }
+    }
+
+    // ── Frame fetch ──────────────────────────────────────────────────────────
+
+    private async Task FetchAndEnqueueFrameAsync(CancellationToken ct)
+    {
+        await _hmiFetchLock.WaitAsync(ct);
+        try
+        {
+            var query = string.IsNullOrWhiteSpace(_opts.HmiImageQuery)
+                ? $"{_sessionPath}/image"
+                : $"{_sessionPath}/{_opts.HmiImageQuery}";
+
+            var resp = await _http!.GetAsync(query, ct);
+            resp.EnsureSuccessStatusCode();
+
+            var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
+            if (bytes.Length == 0) return;
+
+            var ct2 = resp.Content.Headers.ContentType?.MediaType ?? "image/jpeg";
+            var envelope = FrameEnvelopeFactory.FromBytes(
+                cameraId:    _opts.CameraId,
+                sequenceNumber: 0,
+                fileName:    $"frame-{DateTime.UtcNow:HHmmss-fff}.jpg",
+                payload:     bytes,
+                contentType: ct2);
+
+            await PublishAsync(envelope, ct);
+
+            if (_opts.LogDiagnostics)
+                Log($"Frame enqueued: {bytes.Length} bytes  type={ct2}");
+        }
+        finally
+        {
+            _hmiFetchLock.Release();
+        }
+    }
+
+    // ── HMI WebSocket protocol ───────────────────────────────────────────────
+
+    private async Task<JsonElement> SendAsync(
+        string method, string path, object? body, CancellationToken ct, int? timeoutMs = null)
+    {
+        var id  = Interlocked.Increment(ref _reqId);
+        var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        lock (_pendingSync) _pending[id] = tcs;
+
+        var msg = new { id, method, path, body };
+        var json = JsonSerializer.Serialize(msg);
+        var bytes = Encoding.UTF8.GetBytes(json);
+
+        await _hmiSendLock.WaitAsync(ct);
+        try { await _ws!.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct); }
+        finally { _hmiSendLock.Release(); }
+
+        var deadline = timeoutMs ?? _opts.ResponseTimeoutMs;
+        using var timeoutCts = new CancellationTokenSource(deadline);
+        using var linked     = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+
+        try { return await tcs.Task.WaitAsync(linked.Token); }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+        {
+            lock (_pendingSync) _pending.Remove(id);
+            throw new TimeoutException($"HMI request timed out after {deadline} ms: {method} {path}");
+        }
+    }
+
+    private async Task ReceiveLoopAsync(CancellationToken ct)
+    {
+        var buf = new byte[64 * 1024];
+        var sb  = new StringBuilder();
+
+        while (!ct.IsCancellationRequested && _ws?.State == WebSocketState.Open)
+        {
+            try
+            {
+                sb.Clear();
+                WebSocketReceiveResult result;
+                do
+                {
+                    result = await _ws.ReceiveAsync(buf, ct);
+                    if (result.MessageType == WebSocketMessageType.Close) return;
+                    sb.Append(Encoding.UTF8.GetString(buf, 0, result.Count));
+                }
+                while (!result.EndOfMessage);
+
+                var text = sb.ToString();
+                if (string.IsNullOrWhiteSpace(text)) continue;
+
+                using var doc = JsonDocument.Parse(text);
+                var root = doc.RootElement;
+
+                if (root.TryGetProperty("id", out var idEl) && idEl.TryGetInt32(out var id))
+                {
+                    TaskCompletionSource<JsonElement>? tcs;
+                    lock (_pendingSync) _pending.TryGetValue(id, out tcs);
+                    if (tcs is not null)
+                    {
+                        tcs.TrySetResult(root.Clone());
+                        lock (_pendingSync) _pending.Remove(id);
+                    }
+                }
+
+                // resultChanged event → fetch frame
+                if (root.TryGetProperty("event", out var evEl) &&
+                    evEl.GetString()?.Contains("resultChanged", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    _ = Task.Run(() => FetchAndEnqueueFrameAsync(ct), ct);
+                }
+            }
+            catch (OperationCanceledException) { break; }
+            catch (WebSocketException) { break; }
+            catch (Exception ex) { Log($"[WARN] receive: {ex.Message}"); }
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private async Task SafeDisconnectAsync()
+    {
+        _hmiCts?.Cancel();
+
+        if (_ws is { State: WebSocketState.Open })
+        {
+            try { await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None); }
+            catch { /* best-effort */ }
         }
 
-        Console.WriteLine($"[CognexCamera] {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}");
+        _ws?.Dispose();
+        _http?.Dispose();
+        _ws   = null;
+        _http = null;
+
+        if (_receiveTask is not null)
+        {
+            try { await _receiveTask.WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch { /* ignore */ }
+            _receiveTask = null;
+        }
+
+        _hmiCts?.Dispose();
+        _hmiCts = null;
+    }
+
+    private object[] BuildLoginPayload()
+    {
+        // Cognex HMI login expects username/password in body array
+        return [new Dictionary<string, string> { ["username"] = "admin", ["password"] = string.Empty }];
+    }
+
+    private void Log(string msg)
+    {
+        if (_opts.LogDiagnostics)
+            Console.WriteLine($"[CognexCamera:{_opts.CameraId}] {msg}");
     }
 }
