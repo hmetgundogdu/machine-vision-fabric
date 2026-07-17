@@ -6,5 +6,6 @@ public enum IntegrationCapabilityKind
     Gate = 1,
     Storage = 2,
     Telemetry = 3,
-    Processor = 4
+    Processor = 4,
+    Sink = 5
 }

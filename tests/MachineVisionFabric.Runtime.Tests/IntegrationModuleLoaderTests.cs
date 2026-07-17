@@ -17,6 +17,8 @@ public sealed class IntegrationModuleLoaderTests
             .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
+        Assert.Equal(moduleIds.Length, moduleIds.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+
         Assert.Contains("mvf.folder-source", moduleIds);
         Assert.Contains("mvf.resident-camera-stub", moduleIds);
         Assert.Contains("mvf.s7-gateway-gate", moduleIds);

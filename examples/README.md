@@ -7,6 +7,7 @@ This folder contains:
 - sample integration modules
 - simulator-backed source implementations
 - sample runtime packages
+- sample typed pipeline graph definitions
 - helper tools used for local validation
 
 Recommended starting point for a real camera adapter:
@@ -20,6 +21,10 @@ Useful sample packages:
 - `packages/dataset-capture-trigger-window`
 - `packages/dataset-capture-resident-camera-stub`
 
+Useful sample pipeline graph:
+
+- `pipelines/dataset-capture-typed-graph/pipeline.json`
+
 Rules:
 
 - do not treat `examples/` as platform core
@@ -32,6 +37,7 @@ Current layout:
 examples/
 |-- integrations/
 |-- packages/
+|-- pipelines/
 |-- sources/
 `-- tools/
 ```

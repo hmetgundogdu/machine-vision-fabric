@@ -666,3 +666,52 @@ Recommended second working flow:
 `PLC gate -> simulated source -> dataset capture output`
 
 This approach keeps the early runtime grounded in real operational value while preserving the future typed graph model.
+
+## 15. Graph Representation Direction (2026-07-17)
+
+The current package profile model is useful, but it is not yet a full pipeline graph representation.
+
+Current model:
+
+- one source binding
+- one product gate binding
+- one frame processor binding
+- one storage flow
+
+Target model:
+
+- typed nodes
+- typed input ports
+- typed output ports
+- data edges
+- control edges
+- branching
+- fan-out and fan-in
+
+The ownership split is now explicit:
+
+- embedded primitives such as `if`, `switch`, `fork`, `join`, `loop`, `retry`, and `buffer` belong to the platform engine
+- camera, PLC, inference, stream, storage, and process nodes remain external SDK integrations
+
+This means "branching logic" is not treated as just another vendor plugin.
+It is part of the engine language itself.
+
+The first contract layer for this direction now exists under `MachineVisionFabric.Contracts.Pipelines`.
+The first validation layer now exists through `IPipelineDefinitionValidator`.
+
+In addition, module and pipeline inspection must remain typed end-to-end.
+
+That means the platform must expose one inspectable point that returns:
+
+- resolved pipeline graph
+- typed node contracts
+- typed module port metadata
+- config schema references
+- validation issues
+
+This is necessary for the future frontend to safely build reusable pipeline catalogs without falling back to string-based guesses.
+
+Short-term rule:
+
+- keep the current dataset-first runtime active
+- use the new graph contracts as the foundation for the next execution model

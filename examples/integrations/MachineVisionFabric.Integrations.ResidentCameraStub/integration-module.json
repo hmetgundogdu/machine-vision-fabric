@@ -9,7 +9,18 @@
       "name": "resident-camera-source",
       "kind": 0,
       "schemaType": "MachineVisionFabric.Integrations.ResidentCameraStub.ResidentCameraStubOptions",
-      "description": "Streams frames from a resident, channel-backed camera stub session."
+      "description": "Streams frames from a resident, channel-backed camera stub session.",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "frame",
+          "channel": "data",
+          "dataType": "frame",
+          "required": true,
+          "allowMultipleEdges": false,
+          "description": "frame produced by the source module."
+        }
+      ]
     }
   ]
 }

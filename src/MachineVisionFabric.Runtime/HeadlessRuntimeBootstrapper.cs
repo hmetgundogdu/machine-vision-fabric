@@ -14,6 +14,8 @@ public sealed class HeadlessRuntimeBootstrapper(
     IFrameSourceResolver frameSourceResolver,
     IProductPresenceGateResolver productPresenceGateResolver,
     IFrameProcessorResolver frameProcessorResolver,
+    IPipelineDefinitionProvider pipelineDefinitionProvider,
+    IPipelineDefinitionValidator pipelineDefinitionValidator,
     IDatasetCollector datasetCollector,
     ILogger<HeadlessRuntimeBootstrapper> logger) : IHeadlessRuntimeBootstrapper
 {
@@ -32,6 +34,36 @@ public sealed class HeadlessRuntimeBootstrapper(
 
         var manifest = await packageManifestLoader.LoadAsync(packageRoot, cancellationToken);
         var profile = await entryProfileLoader.LoadAsync(packageRoot, manifest.EntryProfile, cancellationToken);
+        var resolvedPipeline = await pipelineDefinitionProvider.LoadAsync(packageRoot, manifest, profile, cancellationToken);
+        var pipelineValidation = pipelineDefinitionValidator.Validate(resolvedPipeline.Definition);
+
+        foreach (var issue in pipelineValidation.Issues)
+        {
+            if (string.Equals(issue.Severity, "error", StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogError(
+                    "Pipeline validation issue {Code}: {Message} (node={NodeId}, edge={EdgeId})",
+                    issue.Code,
+                    issue.Message,
+                    issue.NodeId ?? "-",
+                    issue.EdgeId ?? "-");
+            }
+            else
+            {
+                logger.LogWarning(
+                    "Pipeline validation issue {Code}: {Message} (node={NodeId}, edge={EdgeId})",
+                    issue.Code,
+                    issue.Message,
+                    issue.NodeId ?? "-",
+                    issue.EdgeId ?? "-");
+            }
+        }
+
+        if (!pipelineValidation.IsValid)
+        {
+            throw new InvalidOperationException(
+                $"Pipeline definition '{resolvedPipeline.Definition.Name}' is invalid. See validation logs for details.");
+        }
 
         foreach (var requiredDirectory in manifest.RequiredDirectories)
         {
@@ -87,7 +119,13 @@ public sealed class HeadlessRuntimeBootstrapper(
             gateResolution.Source,
             gateResolution.Strategy,
             frameSourceResolution.Source,
-            frameSourceResolution.Strategy);
+            frameSourceResolution.Strategy,
+            resolvedPipeline.Definition.Name,
+            resolvedPipeline.Source,
+            resolvedPipeline.IsSynthetic,
+            pipelineValidation.IsValid,
+            resolvedPipeline.Definition.Nodes.Count,
+            resolvedPipeline.Definition.Edges.Count);
     }
 
     private static string ResolveAgainstAppBase(string path)

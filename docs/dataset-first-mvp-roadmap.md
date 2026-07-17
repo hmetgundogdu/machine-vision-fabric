@@ -55,7 +55,7 @@ Recommended direction:
 
 - the runtime owns dataset capture capability
 - platform profiles define capture behavior and source settings
-- graph definitions are a future product layer, not the current runtime surface
+- graph definitions are now a foundation contract layer, but not yet the main execution surface
 
 ## Current Delivery Status
 
@@ -70,6 +70,13 @@ Current verified state on `2026-07-16`:
 - session-level `session.json` output is implemented
 - external `.NET` product presence gate loading is implemented
 - product-absent capture skipping is implemented
+
+Current foundation state on `2026-07-17`:
+
+- typed pipeline graph contracts are added
+- embedded primitive vs external integration node ownership is defined
+- first graph validator is added
+- graph execution is not yet the active runtime path
 
 ## Phase Breakdown
 
@@ -124,6 +131,16 @@ The external gate module pattern is implemented through the simulated gate sampl
 
 Status:
 Not started.
+
+### Phase 6: Typed Pipeline Graph
+
+- define node, port, and edge contracts
+- define embedded primitive categories
+- validate type-safe graph links before execution
+- keep dataset-first runtime alive while graph execution is introduced incrementally
+
+Status:
+Started. Contracts and validator are in place. Execution migration is still pending.
 
 ## Recommended Initial Dataset Layout
 

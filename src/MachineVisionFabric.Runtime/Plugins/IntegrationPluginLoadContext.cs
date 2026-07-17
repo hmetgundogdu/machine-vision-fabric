@@ -23,4 +23,10 @@ public sealed class IntegrationPluginLoadContext : AssemblyLoadContext
         var assemblyPath = _resolver.ResolveAssemblyToPath(assemblyName);
         return assemblyPath is null ? null : LoadFromAssemblyPath(assemblyPath);
     }
+
+    protected override nint LoadUnmanagedDll(string unmanagedDllName)
+    {
+        var libraryPath = _resolver.ResolveUnmanagedDllToPath(unmanagedDllName);
+        return libraryPath is null ? IntPtr.Zero : LoadUnmanagedDllFromPath(libraryPath);
+    }
 }

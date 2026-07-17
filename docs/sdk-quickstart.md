@@ -6,6 +6,9 @@
 
 If you want to add a real camera vendor such as Cognex later, start from this SDK layer instead of coding directly against the runtime.
 
+This SDK is for external work nodes.
+It is not the place for engine-owned control-flow primitives such as `if`, `switch`, `fork`, or `loop`.
+
 ## Main SDK Types
 
 - `FrameSourceModuleBase<TOptions>`
@@ -14,6 +17,19 @@ If you want to add a real camera vendor such as Cognex later, start from this SD
 - `FrameEnvelopeFactory`
 - `PackagePathResolver`
 - `IntegrationModuleDescriptorBuilder`
+
+## Typed Authoring Rule
+
+SDK-based module authors are expected to stay fully typed.
+
+That means:
+
+- options/config are typed
+- capability kind is typed
+- input/output ports are typed
+- module metadata remains inspectable by the platform
+
+This is a hard architectural requirement for future graph authoring UX.
 
 ## Recommended Starting Template
 
@@ -61,3 +77,5 @@ The runtime does not need to know anything about the vendor-specific API.
 
 If a file needs a vendor DLL, customer station assumptions, or camera-specific setup, it should not go into `src/`.
 It belongs in an external integration project built on top of `MachineVisionFabric.Sdk`.
+
+If a feature changes graph execution semantics rather than talking to a device or process, it belongs in the platform engine instead of the SDK.

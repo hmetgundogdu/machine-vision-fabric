@@ -9,7 +9,18 @@
       "name": "s7-gateway-product-presence-gate",
       "kind": 1,
       "schemaType": "MachineVisionFabric.Contracts.Control.S7GatewayGateOptions",
-      "description": "Reads an S7-style DB/byte/bit product presence signal through a TCP gateway."
+      "description": "Reads an S7-style DB/byte/bit product presence signal through a TCP gateway.",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "productPresent",
+          "channel": "control",
+          "dataType": "boolean-gate",
+          "required": true,
+          "allowMultipleEdges": false,
+          "description": "Product presence decision emitted by the gate."
+        }
+      ]
     }
   ]
 }

@@ -2,6 +2,11 @@
 
 MachineVisionFabric is an open-source edge vision platform for headless dataset collection, device integration, PLC-gated capture, and future machine-vision execution on edge devices.
 
+The repository now distinguishes between:
+
+- the current package-driven composition runtime
+- the future typed pipeline graph runtime
+
 ## Product Boundary
 
 - `MachineVisionFabric` is the platform product.
@@ -50,6 +55,11 @@ The first MVP goal is:
 - source and gate resolution through `.NET` modules
 - simulator-driven capture without hardware
 
+At the same time, the next architectural layer is now defined as a typed graph model with:
+
+- embedded engine-owned primitive nodes such as `if`, `switch`, `fork`, and `loop`
+- external SDK-based work nodes such as camera, PLC, inference, stream, and storage integrations
+
 UI comes later.
 
 ## Verified Status
@@ -74,6 +84,9 @@ Validated example packages:
 - `examples/packages/dataset-capture-conveyor-sim`
 - `examples/packages/dataset-capture-trigger-window`
 - `examples/packages/dataset-capture-resident-camera-stub`
+
+As of `2026-07-17`, the repository also includes the first pipeline graph contracts and validator for the future graph execution model.
+It also includes the first typed inspection surface for resolved pipelines and SDK module metadata.
 
 ## Run
 
@@ -100,6 +113,18 @@ Run the default example package:
 
 ```powershell
 dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll run
+```
+
+Validate the example typed pipeline graph:
+
+```powershell
+dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll validate-pipeline --path examples\pipelines\dataset-capture-typed-graph\pipeline.json
+```
+
+Inspect a package together with its resolved typed pipeline and module catalog:
+
+```powershell
+dotnet src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll inspect-runtime --package examples\packages\dataset-capture-starter --root .
 ```
 
 Run the product-absent example:
@@ -152,6 +177,7 @@ That means a real camera adapter belongs in its own project under `real-world-pr
 ## Documents
 
 - [Platform Product Boundary](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\platform-product-boundary.md)
+- [Pipeline Graph Foundation](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\pipeline-graph-foundation.md)
 - [Integration SDK Strategy](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\integration-sdk-strategy.md)
 - [SDK Quickstart](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\sdk-quickstart.md)
 - [Dataset-First MVP Roadmap](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\docs\dataset-first-mvp-roadmap.md)

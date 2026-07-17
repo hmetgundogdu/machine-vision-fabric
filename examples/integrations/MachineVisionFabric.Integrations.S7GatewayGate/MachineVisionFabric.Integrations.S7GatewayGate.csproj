@@ -8,6 +8,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\src\MachineVisionFabric.Contracts\MachineVisionFabric.Contracts.csproj" />
     <ProjectReference Include="..\..\..\src\MachineVisionFabric.Core\MachineVisionFabric.Core.csproj" />
+    <ProjectReference Include="..\..\..\src\MachineVisionFabric.Sdk\MachineVisionFabric.Sdk.csproj" />
   </ItemGroup>
 
   <ItemGroup>

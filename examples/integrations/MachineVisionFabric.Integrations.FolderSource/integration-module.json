@@ -9,7 +9,18 @@
       "name": "folder-sequence-source",
       "kind": 0,
       "schemaType": "MachineVisionFabric.Contracts.Simulation.FolderSequenceSourceOptions",
-      "description": "Enumerates image files from a package-relative folder as dataset frames."
+      "description": "Enumerates image files from a package-relative folder as dataset frames.",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "frame",
+          "channel": "data",
+          "dataType": "frame",
+          "required": true,
+          "allowMultipleEdges": false,
+          "description": "frame produced by the source module."
+        }
+      ]
     }
   ]
 }

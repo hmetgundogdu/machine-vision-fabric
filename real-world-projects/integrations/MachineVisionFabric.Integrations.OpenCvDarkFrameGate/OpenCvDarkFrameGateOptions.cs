@@ -9,4 +9,6 @@ public sealed class OpenCvDarkFrameGateOptions
     public string StrategyName { get; set; } = "mean-grayscale-threshold";
 
     public bool RejectOnDecodeFailure { get; set; } = true;
+
+    public bool LogDecisions { get; set; } = true;
 }

@@ -4,6 +4,8 @@ namespace MachineVisionFabric.Sdk;
 
 public static class IntegrationModuleDescriptorBuilder
 {
+    private static readonly IReadOnlyList<ModulePortDescriptor> NoPorts = [];
+
     public static IntegrationModuleDescriptor CreateSource<TOptions>(
         string moduleId,
         string displayName,
@@ -18,7 +20,9 @@ public static class IntegrationModuleDescriptorBuilder
             capabilityName,
             IntegrationCapabilityKind.Source,
             typeof(TOptions).FullName ?? typeof(TOptions).Name,
-            description);
+            description,
+            NoPorts,
+            [DataPort("frame", "frame produced by the source module.")]);
     }
 
     public static IntegrationModuleDescriptor CreateGate<TOptions>(
@@ -35,7 +39,28 @@ public static class IntegrationModuleDescriptorBuilder
             capabilityName,
             IntegrationCapabilityKind.Gate,
             typeof(TOptions).FullName ?? typeof(TOptions).Name,
-            description);
+            description,
+            NoPorts,
+            [ControlPort("productPresent", "boolean-gate", "Product presence decision emitted by the gate.")]);
+    }
+
+    public static IntegrationModuleDescriptor CreateSink<TOptions>(
+        string moduleId,
+        string displayName,
+        string version,
+        string capabilityName,
+        string description)
+    {
+        return Create(
+            moduleId,
+            displayName,
+            version,
+            capabilityName,
+            IntegrationCapabilityKind.Sink,
+            typeof(TOptions).FullName ?? typeof(TOptions).Name,
+            description,
+            [DataPort("frame", "frame received by the sink.")],
+            NoPorts);
     }
 
     public static IntegrationModuleDescriptor CreateProcessor<TOptions>(
@@ -52,7 +77,9 @@ public static class IntegrationModuleDescriptorBuilder
             capabilityName,
             IntegrationCapabilityKind.Processor,
             typeof(TOptions).FullName ?? typeof(TOptions).Name,
-            description);
+            description,
+            [DataPort("frame", "frame received by the processor.")],
+            [DataPort("frame", "frame emitted by the processor when accepted.")]);
     }
 
     private static IntegrationModuleDescriptor Create(
@@ -62,7 +89,9 @@ public static class IntegrationModuleDescriptorBuilder
         string capabilityName,
         IntegrationCapabilityKind kind,
         string schemaType,
-        string description)
+        string description,
+        IReadOnlyList<ModulePortDescriptor> inputs,
+        IReadOnlyList<ModulePortDescriptor> outputs)
     {
         return new IntegrationModuleDescriptor
         {
@@ -76,9 +105,33 @@ public static class IntegrationModuleDescriptorBuilder
                     Name = capabilityName,
                     Kind = kind,
                     SchemaType = schemaType,
-                    Description = description
+                    Description = description,
+                    Inputs = inputs,
+                    Outputs = outputs
                 }
             ]
+        };
+    }
+
+    private static ModulePortDescriptor DataPort(string name, string description)
+    {
+        return new ModulePortDescriptor
+        {
+            Name = name,
+            Channel = "data",
+            DataType = "frame",
+            Description = description
+        };
+    }
+
+    private static ModulePortDescriptor ControlPort(string name, string dataType, string description)
+    {
+        return new ModulePortDescriptor
+        {
+            Name = name,
+            Channel = "control",
+            DataType = dataType,
+            Description = description
         };
     }
 }

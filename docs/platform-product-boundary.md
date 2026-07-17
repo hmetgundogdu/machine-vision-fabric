@@ -15,6 +15,7 @@ The platform owns:
 
 - public contracts
 - runtime orchestration
+- embedded pipeline primitives and graph validation
 - package and profile loading
 - plugin/module loading
 - dataset session storage
@@ -31,6 +32,9 @@ The platform does not own:
 - customer inference wrappers
 - customer process launchers
 - station-specific business logic
+
+Control-flow nodes such as `if`, `switch`, `fork`, `join`, `loop`, `retry`, and `buffer` are platform primitives, not external integrations.
+They belong in `src/` because they define execution semantics rather than device behavior.
 
 In this repository, those belong under `examples/` only as samples.
 For actual project work in this repository, they should live under `real-world-projects/` in a separate solution boundary.
@@ -49,6 +53,7 @@ If a new component requires a vendor DLL or customer-specific assumptions, it sh
 For MachineVisionFabric:
 
 - the runtime stays generic
+- branching and flow-control primitives stay embedded in the engine
 - integrations happen through public `.NET` contracts
 - example integrations can ship in-repo for development
 - real project integrations should remain external to the platform core, even if they stay in the same repository

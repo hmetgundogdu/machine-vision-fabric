@@ -23,7 +23,7 @@ public sealed class IntegrationModuleLoader : IIntegrationModuleLoader
             return [];
         }
 
-        var modules = new List<IIntegrationModule>();
+        var candidatesByModuleId = new Dictionary<string, ModuleCandidate>(StringComparer.OrdinalIgnoreCase);
         foreach (var manifestPath in Directory.EnumerateFiles(fullPluginRoot, ManifestFileName, SearchOption.AllDirectories))
         {
             if (!IsRuntimeManifestPath(manifestPath))
@@ -49,11 +49,22 @@ public sealed class IntegrationModuleLoader : IIntegrationModuleLoader
                 continue;
             }
 
+            var candidate = new ModuleCandidate(manifest, manifestPath, assemblyPath);
+            if (!candidatesByModuleId.TryGetValue(manifest.ModuleId, out var existing)
+                || CompareCandidates(candidate, existing, fullPluginRoot) < 0)
+            {
+                candidatesByModuleId[manifest.ModuleId] = candidate;
+            }
+        }
+
+        var modules = new List<IIntegrationModule>();
+        foreach (var candidate in candidatesByModuleId.Values)
+        {
             Assembly assembly;
             try
             {
-                var loadContext = new IntegrationPluginLoadContext(assemblyPath);
-                assembly = loadContext.LoadFromAssemblyPath(assemblyPath);
+                var loadContext = new IntegrationPluginLoadContext(candidate.AssemblyPath);
+                assembly = loadContext.LoadFromAssemblyPath(candidate.AssemblyPath);
             }
             catch (BadImageFormatException)
             {
@@ -71,7 +82,7 @@ public sealed class IntegrationModuleLoader : IIntegrationModuleLoader
             }
 
             var exportedType = exportedTypes.FirstOrDefault(type =>
-                string.Equals(type.FullName, manifest.EntryType, StringComparison.Ordinal));
+                string.Equals(type.FullName, candidate.Manifest.EntryType, StringComparison.Ordinal));
 
             if (exportedType is null || exportedType.IsAbstract || exportedType.IsInterface)
             {
@@ -89,7 +100,7 @@ public sealed class IntegrationModuleLoader : IIntegrationModuleLoader
             }
 
             var descriptor = module.Describe();
-            if (!string.Equals(descriptor.ModuleId, manifest.ModuleId, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(descriptor.ModuleId, candidate.Manifest.ModuleId, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -148,4 +159,23 @@ public sealed class IntegrationModuleLoader : IIntegrationModuleLoader
             && !normalizedPath.Contains($"{Path.DirectorySeparatorChar}refint{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
             && !normalizedPath.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static int CompareCandidates(ModuleCandidate left, ModuleCandidate right, string pluginRoot)
+    {
+        var leftRelativeLength = Path.GetRelativePath(pluginRoot, left.ManifestPath).Length;
+        var rightRelativeLength = Path.GetRelativePath(pluginRoot, right.ManifestPath).Length;
+
+        var lengthComparison = leftRelativeLength.CompareTo(rightRelativeLength);
+        if (lengthComparison != 0)
+        {
+            return lengthComparison;
+        }
+
+        return StringComparer.OrdinalIgnoreCase.Compare(left.ManifestPath, right.ManifestPath);
+    }
+
+    private sealed record ModuleCandidate(
+        IntegrationModuleManifest Manifest,
+        string ManifestPath,
+        string AssemblyPath);
 }

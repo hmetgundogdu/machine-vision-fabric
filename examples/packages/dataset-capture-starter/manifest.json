@@ -2,6 +2,7 @@
   "name": "dataset-capture-starter",
   "version": "0.1.0",
   "entryProfile": "profile.json",
+  "pipelineDefinition": "pipeline.json",
   "scenario": "dataset-capture",
   "capturePolicy": {
     "enabled": true,

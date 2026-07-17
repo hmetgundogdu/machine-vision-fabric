@@ -12,4 +12,10 @@ public sealed record HeadlessBootstrapReport(
     string ProductPresenceSource,
     string ProductPresenceStrategy,
     string FrameSourceSource,
-    string FrameSourceStrategy);
+    string FrameSourceStrategy,
+    string PipelineName,
+    string PipelineSource,
+    bool PipelineIsSynthetic,
+    bool PipelineIsValid,
+    int PipelineNodeCount,
+    int PipelineEdgeCount);

@@ -4,6 +4,7 @@ using System.Text.Json;
 using MachineVisionFabric.Contracts.Control;
 using MachineVisionFabric.Contracts.Integrations;
 using MachineVisionFabric.Core.Abstractions;
+using MachineVisionFabric.Sdk;
 
 namespace MachineVisionFabric.Integrations.TcpPlcGate;
 
@@ -13,22 +14,12 @@ public sealed class TcpPlcGateIntegrationModule : IProductPresenceGateModule
 
     public IntegrationModuleDescriptor Describe()
     {
-        return new IntegrationModuleDescriptor
-        {
-            ModuleId = "mvf.tcp-plc-gate",
-            DisplayName = "TCP PLC Product Presence Gate",
-            Version = "0.1.0",
-            Capabilities =
-            [
-                new IntegrationCapabilityDescriptor
-                {
-                    Name = "tcp-product-presence-gate",
-                    Kind = IntegrationCapabilityKind.Gate,
-                    SchemaType = typeof(TcpSignalGateOptions).FullName ?? nameof(TcpSignalGateOptions),
-                    Description = "Reads a product presence signal from a simple TCP line-based endpoint."
-                }
-            ]
-        };
+        return IntegrationModuleDescriptorBuilder.CreateGate<TcpSignalGateOptions>(
+            "mvf.tcp-plc-gate",
+            "TCP PLC Product Presence Gate",
+            "0.1.0",
+            "tcp-product-presence-gate",
+            "Reads a product presence signal from a simple TCP line-based endpoint.");
     }
 
     public IProductPresenceGate CreateGate(JsonElement configuration)

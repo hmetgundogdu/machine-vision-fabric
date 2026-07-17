@@ -8,6 +8,8 @@ public sealed class FabricProfileManifest
 
     public string EntryProfile { get; set; } = "profile.json";
 
+    public string? PipelineDefinition { get; set; }
+
     public string Scenario { get; set; } = "dataset-capture";
 
     public DatasetCapturePolicy CapturePolicy { get; set; } = new();

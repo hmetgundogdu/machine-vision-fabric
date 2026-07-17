@@ -18,6 +18,9 @@ coverage/
 .env
 .env.*
 
+# Generated dataset output (runtime artifacts, not source)
+**/datasets/
+
 artifacts/
 temp/
 tmp/

@@ -4,6 +4,7 @@ using System.Text.Json;
 using MachineVisionFabric.Contracts.Control;
 using MachineVisionFabric.Contracts.Integrations;
 using MachineVisionFabric.Core.Abstractions;
+using MachineVisionFabric.Sdk;
 
 namespace MachineVisionFabric.Integrations.S7GatewayGate;
 
@@ -13,22 +14,12 @@ public sealed class S7GatewayGateIntegrationModule : IProductPresenceGateModule
 
     public IntegrationModuleDescriptor Describe()
     {
-        return new IntegrationModuleDescriptor
-        {
-            ModuleId = "mvf.s7-gateway-gate",
-            DisplayName = "S7 Gateway Product Presence Gate",
-            Version = "0.1.0",
-            Capabilities =
-            [
-                new IntegrationCapabilityDescriptor
-                {
-                    Name = "s7-gateway-product-presence-gate",
-                    Kind = IntegrationCapabilityKind.Gate,
-                    SchemaType = typeof(S7GatewayGateOptions).FullName ?? nameof(S7GatewayGateOptions),
-                    Description = "Reads an S7-style DB/byte/bit product presence signal through a TCP gateway."
-                }
-            ]
-        };
+        return IntegrationModuleDescriptorBuilder.CreateGate<S7GatewayGateOptions>(
+            "mvf.s7-gateway-gate",
+            "S7 Gateway Product Presence Gate",
+            "0.1.0",
+            "s7-gateway-product-presence-gate",
+            "Reads an S7-style DB/byte/bit product presence signal through a TCP gateway.");
     }
 
     public IProductPresenceGate CreateGate(JsonElement configuration)

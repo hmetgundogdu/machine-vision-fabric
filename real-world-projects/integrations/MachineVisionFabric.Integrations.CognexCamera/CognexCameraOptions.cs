@@ -18,6 +18,8 @@ public sealed class CognexCameraOptions
 
     public int ResponseTimeoutMs { get; set; } = 1500;
 
+    public int HmiReadyIntervalMs { get; set; } = 1000;
+
     public int BoundedCapacity { get; set; } = 8;
 
     public int? MaxFrames { get; set; } = 6;
@@ -33,4 +35,6 @@ public sealed class CognexCameraOptions
     public int StartupDelayMs { get; set; } = 0;
 
     public string HmiImageQuery { get; set; } = string.Empty;
+
+    public bool LogDiagnostics { get; set; } = true;
 }

@@ -1,6 +1,6 @@
 # MachineVisionFabric Project Status Summary
 
-Date: `2026-07-16`
+Date: `2026-07-17`
 
 ## What This Project Is
 
@@ -59,6 +59,39 @@ In the current headless MVP, those ideas map to runtime contracts:
 - control node -> `IProductPresenceGate`
 - output behavior -> `DatasetCollector` and capture policy
 
+Important clarification:
+
+- the current runtime is still a fixed composition runtime
+- it is not yet a full pipeline graph executor
+- a real graph representation now starts from typed node, port, and edge contracts
+
+## New Graph Foundation
+
+The repository now includes the first pipeline graph contract layer:
+
+- `PipelineDefinition`
+- `PipelineNodeDefinition`
+- `PipelinePortDefinition`
+- `PipelineEdgeDefinition`
+- `IPipelineDefinitionValidator`
+
+This establishes the new architectural split:
+
+- engine-owned embedded primitives such as `if`, `switch`, `fork`, `join`, and `loop`
+- SDK-based external work nodes such as camera, PLC, inference, stream, and storage modules
+
+The repository also now has a typed inspection direction:
+
+- typed capability metadata on integration descriptors
+- typed input/output port metadata for modules
+- a package/runtime inspection service for resolved pipeline inspection
+
+This closes an important future frontend risk:
+the graph builder can inspect modules and runtime-resolved pipelines without relying on ad hoc string parsing.
+
+This is the intended long-term direction for the platform.
+The current headless dataset runtime remains active while graph execution is introduced incrementally.
+
 ## SDK and Integration Strategy
 
 Real integrations are implemented as external modules using `MachineVisionFabric.Sdk`.
@@ -100,6 +133,11 @@ The local machine was able to reach a live Cognex HMI endpoint:
 That endpoint was validated as Cognex HMI and then used by the real-world Cognex source module.
 
 The runtime successfully captured real dataset frames from the camera.
+The current passive HMI path now uses:
+
+- `ready` heartbeat in passive mode
+- OpenCV dark-frame filtering
+- runtime-safe managed/native dependency loading for the external processor module
 
 ## Temporary Gate For Pipeline Testing
 
@@ -164,9 +202,12 @@ At this point the project already has:
 - a dynamic SDK-based integration model
 - real-world project separation inside the same repository
 - real Cognex HMI frame capture
+- passive Cognex auto-trigger dataset capture
+- OpenCV dark-frame processor integration
 - dataset persistence
 - temporary delayed gate behavior for no-PLC testing
 - portable release packaging script
+- first typed pipeline graph contracts and validation
 
 ## What Is Still Missing
 

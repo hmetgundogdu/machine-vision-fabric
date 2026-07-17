@@ -35,6 +35,11 @@ public sealed class OpenCvDarkFrameGateIntegrationModule : FrameProcessorModuleB
             using var image = Cv2.ImDecode(buffer, ImreadModes.Grayscale);
             if (image.Empty())
             {
+                if (options.LogDecisions)
+                {
+                    Console.WriteLine("[OpenCvDarkFrameGate] decode failed; frame rejected=" + options.RejectOnDecodeFailure);
+                }
+
                 return new FrameProcessorDecision(
                     !options.RejectOnDecodeFailure,
                     options.SourceName,
@@ -46,6 +51,11 @@ public sealed class OpenCvDarkFrameGateIntegrationModule : FrameProcessorModuleB
             var mean = Cv2.Mean(image).Val0;
             var accepted = mean >= options.MinimumMeanBrightness;
             var details = $"meanBrightness={mean:F2}; minimumMeanBrightness={options.MinimumMeanBrightness:F2}";
+
+            if (options.LogDecisions)
+            {
+                Console.WriteLine($"[OpenCvDarkFrameGate] accepted={accepted}; {details}");
+            }
 
             return new FrameProcessorDecision(
                 accepted,

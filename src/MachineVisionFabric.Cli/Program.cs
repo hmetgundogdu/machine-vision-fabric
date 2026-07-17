@@ -4,11 +4,16 @@ using System.Text.Json.Schema;
 using System.Text.Json.Serialization.Metadata;
 using MachineVisionFabric.Contracts.Control;
 using MachineVisionFabric.Contracts.Dataset;
+using MachineVisionFabric.Contracts.Execution;
 using MachineVisionFabric.Contracts.Integrations;
+using MachineVisionFabric.Contracts.Inspection;
 using MachineVisionFabric.Contracts.Packages;
+using MachineVisionFabric.Contracts.Pipelines;
 using MachineVisionFabric.Contracts.Simulation;
 using MachineVisionFabric.Core.Abstractions;
 using MachineVisionFabric.Runtime;
+using MachineVisionFabric.Runtime.Execution;
+using MachineVisionFabric.Runtime.Pipelines;
 using MachineVisionFabric.Runtime.Plugins;
 using MachineVisionFabric.Sources.Simulators;
 using MachineVisionFabric.Storage;
@@ -39,6 +44,9 @@ switch (invocation.Command)
     case "modules":
         await ListModulesAsync(invocation);
         break;
+    case "inspect-runtime":
+        await InspectRuntimeAsync(invocation);
+        break;
     case "sessions":
         await ListSessionsAsync(invocation);
         break;
@@ -47,6 +55,12 @@ switch (invocation.Command)
         break;
     case "schemas":
         await ExportSchemasAsync(invocation);
+        break;
+    case "validate-pipeline":
+        await ValidatePipelineAsync(invocation);
+        break;
+    case "execute-graph":
+        await ExecuteGraphAsync(invocation);
         break;
     case "run":
         await RunAsync(invocation);
@@ -94,6 +108,12 @@ async Task RunAsync(CliInvocation invocation)
     Console.WriteLine($"ProductGate: {report.ProductPresenceSource} ({report.ProductPresenceStrategy})");
     Console.WriteLine($"ProductPresent: {report.ProductPresent}");
     Console.WriteLine($"CapturedFrames: {report.CapturedFrameCount}");
+    Console.WriteLine($"Pipeline: {report.PipelineName}");
+    Console.WriteLine($"PipelineSource: {report.PipelineSource}");
+    Console.WriteLine($"PipelineSynthetic: {report.PipelineIsSynthetic}");
+    Console.WriteLine($"PipelineValid: {report.PipelineIsValid}");
+    Console.WriteLine($"PipelineNodes: {report.PipelineNodeCount}");
+    Console.WriteLine($"PipelineEdges: {report.PipelineEdgeCount}");
     Console.WriteLine($"SessionMetadata: {report.SessionMetadataPath}");
 }
 
@@ -114,11 +134,17 @@ async Task InspectPackageAsync(CliInvocation invocation)
 
     var manifest = await ReadJsonAsync<FabricProfileManifest>(manifestPath);
     var profile = await ReadJsonAsync<FabricRuntimeProfile>(profilePath);
+    using var host = BuildHost();
+    var pipelineProvider = host.Services.GetRequiredService<IPipelineDefinitionProvider>();
+    var validator = host.Services.GetRequiredService<IPipelineDefinitionValidator>();
+    var resolvedPipeline = await pipelineProvider.LoadAsync(packagePath, manifest, profile, CancellationToken.None);
+    var pipelineValidation = validator.Validate(resolvedPipeline.Definition);
 
     Console.WriteLine($"Package: {manifest.Name}");
     Console.WriteLine($"Version: {manifest.Version}");
     Console.WriteLine($"Scenario: {manifest.Scenario}");
     Console.WriteLine($"EntryProfile: {manifest.EntryProfile}");
+    Console.WriteLine($"PipelineDefinition: {manifest.PipelineDefinition ?? "(synthetic compatibility graph)"}");
     Console.WriteLine($"ProfileMode: {profile.Mode}");
     Console.WriteLine($"Capabilities: {string.Join(", ", profile.Capabilities)}");
     Console.WriteLine(
@@ -126,6 +152,7 @@ async Task InspectPackageAsync(CliInvocation invocation)
     Console.WriteLine($"ProductGate: mode={manifest.ProductPresenceGate.Mode}; moduleId={manifest.ProductPresenceGate.ModuleId ?? "-"}");
     Console.WriteLine($"FrameProcessor: mode={manifest.FrameProcessor.Mode}; moduleId={manifest.FrameProcessor.ModuleId ?? "-"}");
     Console.WriteLine($"FrameSource: mode={profile.Source.Mode}; moduleId={profile.Source.ModuleId ?? "-"}");
+    Console.WriteLine($"ResolvedPipeline: name={resolvedPipeline.Definition.Name}; source={resolvedPipeline.Source}; synthetic={resolvedPipeline.IsSynthetic}; valid={pipelineValidation.IsValid}; nodes={resolvedPipeline.Definition.Nodes.Count}; edges={resolvedPipeline.Definition.Edges.Count}");
     Console.WriteLine($"RequiredDirectories: {string.Join(", ", manifest.RequiredDirectories)}");
 }
 
@@ -230,6 +257,66 @@ Task ListModulesAsync(CliInvocation invocation)
     return Task.CompletedTask;
 }
 
+async Task InspectRuntimeAsync(CliInvocation invocation)
+{
+    var packagePath = invocation.Options.TryGetValue("package", out var packageRoot)
+        ? ResolveWorkingPath(packageRoot)
+        : ResolveWorkingPath("examples\\packages\\dataset-capture-starter");
+
+    using var host = BuildHost();
+    var options = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MachineVisionFabricRuntimeOptions>>().Value;
+    var integrationsRoot = ResolveWorkingPath(
+        invocation.Options.TryGetValue("root", out var root) ? root : options.IntegrationsRoot);
+    var inspectionService = host.Services.GetRequiredService<IPipelineInspectionService>();
+    var report = await inspectionService.InspectAsync(packagePath, integrationsRoot, CancellationToken.None);
+
+    Console.WriteLine($"Package: {report.Manifest.Name}");
+    Console.WriteLine($"PackageRoot: {report.PackageRoot}");
+    Console.WriteLine($"Pipeline: {report.Pipeline.Name}");
+    Console.WriteLine($"PipelineSource: {report.PipelineSource}");
+    Console.WriteLine($"PipelineSynthetic: {report.PipelineIsSynthetic}");
+    Console.WriteLine($"PipelineValid: {report.Validation.IsValid}");
+    Console.WriteLine($"AvailableModules: {report.AvailableModules.Count}");
+    Console.WriteLine("Nodes:");
+    foreach (var node in report.Pipeline.Nodes)
+    {
+        var binding = node.ModuleId ?? node.PrimitiveType ?? node.BuiltinType ?? "-";
+        Console.WriteLine($"  {node.Id} | {node.Kind} | {node.Category} | {binding}");
+    }
+
+    Console.WriteLine("Edges:");
+    foreach (var edge in report.Pipeline.Edges)
+    {
+        Console.WriteLine($"  {edge.Id} | {edge.Kind} | {edge.From.NodeId}.{edge.From.Port} -> {edge.To.NodeId}.{edge.To.Port}");
+    }
+
+    Console.WriteLine("Modules:");
+    foreach (var module in report.AvailableModules)
+    {
+        foreach (var capability in module.Capabilities)
+        {
+            var inputs = capability.Inputs.Count == 0
+                ? "-"
+                : string.Join(", ", capability.Inputs.Select(port => $"{port.Name}:{port.Channel}/{port.DataType}"));
+            var outputs = capability.Outputs.Count == 0
+                ? "-"
+                : string.Join(", ", capability.Outputs.Select(port => $"{port.Name}:{port.Channel}/{port.DataType}"));
+            Console.WriteLine($"  {module.ModuleId} | {capability.Kind} | schema={capability.SchemaType} | in=[{inputs}] | out=[{outputs}]");
+        }
+    }
+
+    if (!report.Validation.IsValid)
+    {
+        Console.WriteLine("ValidationIssues:");
+        foreach (var issue in report.Validation.Issues)
+        {
+            Console.WriteLine($"  {issue.Severity.ToUpperInvariant()} {issue.Code} | node={issue.NodeId ?? "-"} | edge={issue.EdgeId ?? "-"} | {issue.Message}");
+        }
+
+        Environment.ExitCode = 1;
+    }
+}
+
 Task ExportSchemasAsync(CliInvocation invocation)
 {
     var outputRoot = ResolveWorkingPath(
@@ -249,8 +336,15 @@ Task ExportSchemasAsync(CliInvocation invocation)
     WriteSchema<IntegrationModuleDescriptor>("integration-module-descriptor.schema.json");
     WriteSchema<IntegrationModuleManifest>("integration-module-manifest.schema.json");
     WriteSchema<IntegrationCapabilityDescriptor>("integration-capability-descriptor.schema.json");
+    WriteSchema<ModulePortDescriptor>("module-port-descriptor.schema.json");
+    WriteSchema<PipelineInspectionReport>("pipeline-inspection-report.schema.json");
     WriteSchema<ProductPresenceGateBinding>("product-presence-gate-binding.schema.json");
     WriteSchema<FrameProcessorBinding>("frame-processor-binding.schema.json");
+    WriteSchema<PipelineDefinition>("pipeline-definition.schema.json");
+    WriteSchema<PipelineNodeDefinition>("pipeline-node-definition.schema.json");
+    WriteSchema<PipelineEdgeDefinition>("pipeline-edge-definition.schema.json");
+    WriteSchema<PipelinePortDefinition>("pipeline-port-definition.schema.json");
+    WriteSchema<PipelineValidationResult>("pipeline-validation-result.schema.json");
     WriteSchema<S7GatewayGateOptions>("s7-gateway-gate-options.schema.json");
     WriteSchema<S7SignalAddress>("s7-signal-address.schema.json");
     WriteSchema<SimulatedPlcGateOptions>("simulated-plc-gate-options.schema.json");
@@ -264,6 +358,147 @@ Task ExportSchemasAsync(CliInvocation invocation)
     {
         JsonNode schema = JsonSchemaExporter.GetJsonSchemaAsNode(jsonOptions, typeof(T), exporterOptions: null);
         File.WriteAllText(Path.Combine(outputRoot, fileName), schema.ToJsonString(jsonOptions));
+    }
+}
+
+async Task ValidatePipelineAsync(CliInvocation invocation)
+{
+    if (!invocation.Options.TryGetValue("path", out var path))
+    {
+        Console.WriteLine("Missing required option: --path <pipeline.json>");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    var pipelinePath = ResolveWorkingPath(path);
+    if (!File.Exists(pipelinePath))
+    {
+        Console.WriteLine($"Pipeline definition not found: {pipelinePath}");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    await using var stream = File.OpenRead(pipelinePath);
+    var definition = await JsonSerializer.DeserializeAsync<PipelineDefinition>(stream, jsonOptions, CancellationToken.None);
+    if (definition is null)
+    {
+        Console.WriteLine($"Pipeline definition could not be parsed: {pipelinePath}");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    using var host = BuildHost();
+    var validator = host.Services.GetRequiredService<IPipelineDefinitionValidator>();
+    var result = validator.Validate(definition);
+
+    Console.WriteLine($"Pipeline: {definition.Name}");
+    Console.WriteLine($"Nodes: {definition.Nodes.Count}");
+    Console.WriteLine($"Edges: {definition.Edges.Count}");
+    Console.WriteLine($"IsValid: {result.IsValid}");
+
+    foreach (var issue in result.Issues)
+    {
+        Console.WriteLine($"{issue.Severity.ToUpperInvariant()} {issue.Code} | node={issue.NodeId ?? "-"} | edge={issue.EdgeId ?? "-"} | {issue.Message}");
+    }
+
+    if (!result.IsValid)
+    {
+        Environment.ExitCode = 1;
+    }
+}
+
+async Task ExecuteGraphAsync(CliInvocation invocation)
+{
+    var pipelinePath = invocation.Options.TryGetValue("path", out var path)
+        ? ResolveWorkingPath(path)
+        : ResolveWorkingPath("examples\\pipelines\\dataset-capture-typed-graph\\pipeline.json");
+
+    if (!File.Exists(pipelinePath))
+    {
+        Console.Error.WriteLine($"Pipeline definition not found: {pipelinePath}");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    await using var pipelineStream = File.OpenRead(pipelinePath);
+    var definition = await JsonSerializer.DeserializeAsync<PipelineDefinition>(pipelineStream, jsonOptions, CancellationToken.None);
+    if (definition is null)
+    {
+        Console.Error.WriteLine($"Pipeline definition could not be parsed: {pipelinePath}");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    using var host = BuildHost();
+    var runtimeOptions = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MachineVisionFabricRuntimeOptions>>().Value;
+    var integrationsRoot = ResolveWorkingPath(
+        invocation.Options.TryGetValue("integrations-root", out var intRoot) ? intRoot : runtimeOptions.IntegrationsRoot);
+
+    var packageRoot = invocation.Options.TryGetValue("package", out var pkg)
+        ? ResolveWorkingPath(pkg)
+        : ResolveWorkingPath("examples\\packages\\dataset-capture-starter");
+
+    var maxCycles = invocation.Options.TryGetValue("max-cycles", out var mc) && int.TryParse(mc, out var mcInt)
+        ? mcInt
+        : 0;
+
+    var options = new PipelineExecutionOptions
+    {
+        PackageRoot = packageRoot,
+        IntegrationsRoot = integrationsRoot,
+        MaxCycles = maxCycles
+    };
+
+    var validator = host.Services.GetRequiredService<IPipelineDefinitionValidator>();
+    var validation = validator.Validate(definition);
+
+    Console.WriteLine($"Pipeline: {definition.Name}");
+    Console.WriteLine($"Nodes: {definition.Nodes.Count}");
+    Console.WriteLine($"Edges: {definition.Edges.Count}");
+    Console.WriteLine($"Valid: {validation.IsValid}");
+    Console.WriteLine($"PackageRoot: {packageRoot}");
+    Console.WriteLine($"IntegrationsRoot: {integrationsRoot}");
+    Console.WriteLine($"MaxCycles: {(maxCycles > 0 ? maxCycles.ToString() : "unlimited")}");
+
+    if (!validation.IsValid)
+    {
+        foreach (var issue in validation.Issues)
+        {
+            Console.Error.WriteLine($"  {issue.Severity.ToUpperInvariant()} {issue.Code} | {issue.Message}");
+        }
+
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    var executionHost = host.Services.GetRequiredService<IPipelineExecutionHost>();
+    await using var _ = executionHost;
+    await executionHost.StartAsync(definition, options);
+    var report = await executionHost.WaitForCompletionAsync();
+
+    Console.WriteLine($"Succeeded: {report?.Succeeded}");
+    Console.WriteLine($"TotalCycles: {report?.TotalCycles}");
+    Console.WriteLine($"AcceptedCycles: {report?.AcceptedCycles}");
+    Console.WriteLine($"Duration: {report?.Duration.TotalSeconds:F2}s");
+
+    if (report?.NodeStats.Count > 0)
+    {
+        Console.WriteLine("NodeStats:");
+        foreach (var (nodeId, stats) in report.NodeStats.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"  {nodeId}: cycles={stats.TotalCycles} faults={stats.FaultedCycles} avg={stats.AverageDurationMs:F1}ms");
+        }
+    }
+
+    foreach (var warning in report?.Warnings ?? [])
+    {
+        Console.WriteLine($"  WARNING {warning}");
+    }
+
+    if (report is null || !report.Succeeded)
+    {
+        Console.Error.WriteLine($"Error: {report?.ErrorMessage ?? "unknown"}");
+        Environment.ExitCode = 1;
     }
 }
 
@@ -292,6 +527,13 @@ IHost BuildHost(IReadOnlyDictionary<string, string?>? overrides = null)
     builder.Services.AddSingleton<IFrameSourceResolver, ProfileFrameSourceResolver>();
     builder.Services.AddSingleton<IProductPresenceGateResolver, ProfileProductPresenceGateResolver>();
     builder.Services.AddSingleton<IFrameProcessorResolver, ProfileFrameProcessorResolver>();
+    builder.Services.AddSingleton<DatasetCaptureCompatibilityPipelineFactory>();
+    builder.Services.AddSingleton<IPipelineDefinitionProvider, PackagePipelineDefinitionProvider>();
+    builder.Services.AddSingleton<IPipelineDefinitionValidator, PipelineDefinitionValidator>();
+    builder.Services.AddSingleton<IPipelineInspectionService, PipelineInspectionService>();
+    builder.Services.AddSingleton<IPipelineNodeActivator, PipelineNodeActivator>();
+    builder.Services.AddSingleton<IPipelineGraphExecutor, PipelineGraphExecutor>();
+    builder.Services.AddTransient<IPipelineExecutionHost, PipelineExecutionHost>();
     builder.Services.AddSingleton<IHeadlessRuntimeBootstrapper, HeadlessRuntimeBootstrapper>();
 
     return builder.Build();
@@ -333,9 +575,12 @@ void PrintHelp()
     Console.WriteLine("  packages [--root <path>]");
     Console.WriteLine("  inspect-package [--package <path>]");
     Console.WriteLine("  modules [--root <path>]");
+    Console.WriteLine("  inspect-runtime [--package <path>] [--root <integrations-root>]");
     Console.WriteLine("  sessions [--root <path>]");
     Console.WriteLine("  inspect-session --path <session-folder-or-session.json>");
     Console.WriteLine("  schemas [--output <path>]");
+    Console.WriteLine("  validate-pipeline --path <pipeline.json>");
+    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>]");
 }
 
 async Task<T> ReadJsonAsync<T>(string path)

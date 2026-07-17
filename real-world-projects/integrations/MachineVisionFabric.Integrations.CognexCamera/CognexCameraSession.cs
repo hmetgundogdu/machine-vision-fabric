@@ -42,6 +42,7 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
         {
             if (options.StartupDelayMs > 0)
             {
+                Log($"Startup delay: {options.StartupDelayMs} ms");
                 await Task.Delay(options.StartupDelayMs, cancellationToken);
             }
 
@@ -53,7 +54,7 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
                 return;
             }
 
-            await WaitForCompletionAsync(cancellationToken);
+            await RunPassiveListenLoopAsync(cancellationToken);
         }
         finally
         {
@@ -73,10 +74,12 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
             ? options.HmiWebSocketPath
             : "/" + options.HmiWebSocketPath;
         var webSocketUri = new Uri($"{webSocketScheme}://{options.IpAddress}:{options.HmiPort}{webSocketPath}");
+        Log($"Connecting HMI WebSocket: {webSocketUri}");
 
         hmiCancellationSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         await socket.ConnectAsync(webSocketUri, cancellationToken);
         hmiWebSocket = socket;
+        Log("HMI WebSocket connected");
 
         var httpScheme = options.HmiUseTls ? "https" : "http";
         hmiHttpClient = new HttpClient
@@ -123,10 +126,13 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
         }
 
         hmiSessionUserPath = sessionPath;
+        Log($"HMI session opened: {hmiSessionUserPath}");
 
         await SendHmiRequestAsync("post", $"{sessionPath}/login", BuildHmiLoginPayload(), cancellationToken);
+        Log("HMI login completed");
         await SendHmiRequestAsync("listen", $"{sessionPath}/resultChanged", null, cancellationToken);
         await SendHmiRequestAsync("listen", "system/stateChanged", null, cancellationToken);
+        Log("HMI listeners registered: resultChanged, system/stateChanged");
     }
 
     private async Task ReopenSessionAsync(CancellationToken cancellationToken)
@@ -143,6 +149,7 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
         }
 
         await OpenSessionAsync(cancellationToken);
+        Log($"HMI session reopened: {hmiSessionUserPath}");
     }
 
     private async Task RunManualTriggerLoopAsync(CancellationToken cancellationToken)
@@ -167,6 +174,34 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
             {
                 await Task.Delay(options.ManualTriggerIntervalMs, cancellationToken);
             }
+        }
+
+        await WaitForCompletionAsync(cancellationToken);
+    }
+
+    private async Task RunPassiveListenLoopAsync(CancellationToken cancellationToken)
+    {
+        Log($"Passive listen mode started. Ready interval: {options.HmiReadyIntervalMs} ms");
+
+        if (!string.IsNullOrWhiteSpace(hmiSessionUserPath))
+        {
+            await TrySendReadyAsync(cancellationToken);
+        }
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            if (options.MaxFrames is int maxFrames && Volatile.Read(ref producedFrameCount) >= maxFrames)
+            {
+                completionSource.TrySetResult();
+                break;
+            }
+
+            if (options.HmiReadyIntervalMs > 0 && !string.IsNullOrWhiteSpace(hmiSessionUserPath))
+            {
+                await TrySendReadyAsync(cancellationToken);
+            }
+
+            await Task.Delay(Math.Max(250, options.HmiReadyIntervalMs), cancellationToken);
         }
 
         await WaitForCompletionAsync(cancellationToken);
@@ -275,6 +310,8 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
 
             if (string.Equals(messageType, "event", StringComparison.OrdinalIgnoreCase))
             {
+                var eventPath = root.TryGetProperty("path", out var pathElement) ? pathElement.GetString() : "<unknown>";
+                Log($"HMI event received: {eventPath}");
                 _ = Task.Run(() => HandleHmiEventAsync(root, cancellationToken), cancellationToken);
             }
         }
@@ -304,9 +341,11 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
     {
         if (!TryExtractHmiImageUrl(root, out var imageUrl))
         {
+            Log("HMI event did not contain an image URL");
             return;
         }
 
+        Log($"HMI image URL detected: {imageUrl}");
         await FetchAndPublishHmiImageAsync(imageUrl!, cancellationToken);
     }
 
@@ -351,6 +390,7 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
                 sourcePath);
 
             await PublishAsync(frame, cancellationToken);
+            Log($"Frame published: seq={sequenceNumber}; bytes={bytes.Length}; contentType={contentType}; source={sourcePath}");
 
             if (options.MaxFrames is int limit && sequenceNumber >= limit)
             {
@@ -443,6 +483,7 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
                 pendingRequests.Remove(requestId);
             }
 
+            Log($"HMI request timeout: type={type}; path={path}");
             throw new InvalidOperationException($"Cognex HMI request timeout: {type} {path}");
         }
 
@@ -644,5 +685,32 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
     private bool IsManualTriggerLoopMode()
     {
         return string.Equals(options.AcquisitionMode, "manual-trigger-loop", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task TrySendReadyAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await SendHmiRequestAsync("post", $"{hmiSessionUserPath}/ready", Array.Empty<object>(), cancellationToken, 900);
+            Log("HMI ready sent");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log($"HMI ready failed: {ex.Message}");
+        }
+    }
+
+    private void Log(string message)
+    {
+        if (!options.LogDiagnostics)
+        {
+            return;
+        }
+
+        Console.WriteLine($"[CognexCamera] {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}");
     }
 }

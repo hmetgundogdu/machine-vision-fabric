@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/examples/integrations/">
+    <Project Path="examples/integrations/MachineVisionFabric.Integrations.DatasetWriter/MachineVisionFabric.Integrations.DatasetWriter.csproj" />
     <Project Path="examples/integrations/MachineVisionFabric.Integrations.FolderSource/MachineVisionFabric.Integrations.FolderSource.csproj" />
     <Project Path="examples/integrations/MachineVisionFabric.Integrations.ResidentCameraStub/MachineVisionFabric.Integrations.ResidentCameraStub.csproj" />
     <Project Path="examples/integrations/MachineVisionFabric.Integrations.S7GatewayGate/MachineVisionFabric.Integrations.S7GatewayGate.csproj" />

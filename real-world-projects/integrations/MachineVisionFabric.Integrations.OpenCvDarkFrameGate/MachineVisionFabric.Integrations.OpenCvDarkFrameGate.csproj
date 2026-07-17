@@ -3,6 +3,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
@@ -10,11 +11,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="OpenCvSharp4" Version="4.10.0.20240616" />
-    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.10.0.20240616" />
+    <PackageReference Include="OpenCvSharp4" Version="4.10.0.20240616" GeneratePathProperty="true" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.10.0.20240616" GeneratePathProperty="true" />
   </ItemGroup>
 
   <ItemGroup>
     <None Update="integration-module.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(PkgOpenCvSharp4)\lib\net6.0\OpenCvSharp.dll" CopyToOutputDirectory="PreserveNewest" TargetPath="OpenCvSharp.dll" />
+    <None Include="$(PkgOpenCvSharp4_runtime_win)\runtimes\win-x64\native\OpenCvSharpExtern.dll" CopyToOutputDirectory="PreserveNewest" TargetPath="runtimes\win-x64\native\OpenCvSharpExtern.dll" />
+    <None Include="$(PkgOpenCvSharp4_runtime_win)\runtimes\win-x64\native\opencv_videoio_ffmpeg4100_64.dll" CopyToOutputDirectory="PreserveNewest" TargetPath="runtimes\win-x64\native\opencv_videoio_ffmpeg4100_64.dll" />
   </ItemGroup>
 </Project>

@@ -9,6 +9,9 @@ Purpose:
 - hold project-specific packages and dataset collection scenarios
 - evolve station or customer work without polluting the platform core
 
+This folder is for external work nodes and real scenarios.
+It is not the place for embedded pipeline primitives such as `if`, `switch`, `fork`, `join`, or `loop`.
+
 Solution rule:
 
 - `MachineVisionFabric.slnx` = platform solution

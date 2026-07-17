@@ -23,6 +23,11 @@ That surface defines:
 - package/profile contracts
 - dataset capture contracts
 
+It does not define engine-owned control-flow primitives.
+Those stay inside the platform because they are part of graph execution semantics.
+
+It now also carries typed inspectable module metadata through capability descriptors and typed port metadata.
+
 ## Runtime Model
 
 The platform runtime should:
@@ -47,6 +52,7 @@ Recommended implementation style:
 2. isolated module loading with `AssemblyLoadContext`
 3. schema export from `System.Text.Json`
 4. runtime composition at the host or CLI edge
+5. embedded primitive nodes for flow-control behavior such as `if`, `switch`, `fork`, and `loop`
 
 ## Practical Consequence
 
@@ -54,3 +60,26 @@ If someone wants to integrate a camera SDK, they should create a separate `.NET`
 
 They should not patch `MachineVisionFabric.Runtime` or add vendor references into `src/`.
 The default repository layout for this project is to place those modules under `real-world-projects/` with their own solution file.
+
+Practical split:
+
+- `embedded primitive` = engine feature
+- `integration module` = SDK extension
+
+## Typed Metadata Rule
+
+External module authors should not publish loose or uninspectable modules.
+
+They must expose:
+
+- typed config contract
+- typed capability kind
+- typed input port metadata
+- typed output port metadata
+
+This is required so that future frontend tooling can:
+
+- inspect a module catalog
+- show valid connections
+- reuse the same module across many pipelines
+- validate graph composition before execution
