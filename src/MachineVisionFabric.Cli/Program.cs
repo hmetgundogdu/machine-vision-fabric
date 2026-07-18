@@ -143,17 +143,17 @@ async Task InspectSessionAsync(CliInvocation invocation)
         return;
     }
 
-    var session = await ReadJsonAsync<DatasetSessionMetadata>(sessionMetadataPath);
+    var session = await ReadJsonAsync<DatasetSessionSummary>(sessionMetadataPath);
 
-    Console.WriteLine($"PackageName: {session.PackageName}");
     Console.WriteLine($"SessionRoot: {session.SessionRoot}");
-    Console.WriteLine($"CreatedAtUtc: {session.CreatedAtUtc:O}");
-    Console.WriteLine($"Scenario: {session.Scenario}");
-    Console.WriteLine($"CapturedFrameCount: {session.CapturedFrameCount}");
-    Console.WriteLine($"DeclaredCameraCount: {session.DeclaredCameraCount}");
-    Console.WriteLine($"ProductPresent: {session.ProductPresenceDecision.ProductPresent}");
-    Console.WriteLine($"ProductSource: {session.ProductPresenceDecision.Source}");
+    Console.WriteLine($"FrameCount: {session.FrameCount}");
+    Console.WriteLine($"FinalizedAtUtc: {session.FinalizedAtUtc:O}");
     Console.WriteLine($"Records: {session.Records.Count}");
+
+    foreach (var cameraGroup in session.Records.GroupBy(record => record.CameraId).OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase))
+    {
+        Console.WriteLine($"  {cameraGroup.Key}: {cameraGroup.Count()} frame(s)");
+    }
 }
 
 Task ListModulesAsync(CliInvocation invocation)

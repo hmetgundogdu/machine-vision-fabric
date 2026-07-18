@@ -4,13 +4,6 @@ using MachineVisionFabric.Core.Abstractions;
 
 namespace MachineVisionFabric.Integrations.DatasetWriter;
 
-/// <summary>Summary written to <c>session.json</c> when the sink is flushed.</summary>
-internal sealed record DatasetSessionSummary(
-    string SessionRoot,
-    int FrameCount,
-    DateTime FinalizedAtUtc,
-    IReadOnlyList<DatasetCaptureRecord> Records);
-
 /// <summary>
 /// Frame sink that persists each frame as an image file plus a per-frame JSON
 /// metadata record under a timestamped session directory:
