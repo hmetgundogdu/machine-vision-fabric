@@ -75,6 +75,9 @@ public sealed class PipelineNodeActivator(
             "compute" when module is IFrameProcessorModule processorModule =>
                 new FrameProcessorNodeRunner(node.Id, processorModule.CreateProcessor(config)),
 
+            "classify" when module is IFrameClassifierModule classifierModule =>
+                new FrameClassifierNodeRunner(node.Id, classifierModule.CreateClassifier(config)),
+
             "output" or "sink" when module is IFrameSinkModule sinkModule =>
                 new FrameSinkNodeRunner(node.Id, sinkModule.OpenSink(config, options.PackageRoot)),
 

@@ -1,13 +1,15 @@
 namespace MachineVisionFabric.Contracts.Execution;
 
 /// <summary>
-/// A typed control-channel value emitted by gate and control nodes.
+/// A typed control-channel value emitted by gate, classifier and control nodes.
+/// The control channel deliberately carries decisions and scalar measurements —
+/// never image data. Frames travel only on data edges.
 /// </summary>
 public sealed class ControlSignal
 {
     /// <summary>
     /// Identifies the signal contract.
-    /// Well-known values: <c>boolean-gate</c>, <c>classification</c>.
+    /// Well-known values: <c>boolean-gate</c>, <c>classification</c>, <c>measurement</c>.
     /// </summary>
     public required string SignalType { get; init; }
 
@@ -23,6 +25,16 @@ public sealed class ControlSignal
     /// Example: "accept", "reject", "quarantine".
     /// </summary>
     public string? ClassLabel { get; init; }
+
+    /// <summary>
+    /// Optional scalar measurement carried on the control channel, e.g. a mean brightness,
+    /// an object count, or a measured dimension derived from a frame. Used when SignalType is
+    /// <c>measurement</c>, and may also accompany a <c>classification</c> for downstream logic.
+    /// </summary>
+    public double? Measurement { get; init; }
+
+    /// <summary>Unit for <see cref="Measurement"/> (e.g. "px", "mm", "count"). Optional.</summary>
+    public string? Unit { get; init; }
 
     public string Source { get; init; } = string.Empty;
 

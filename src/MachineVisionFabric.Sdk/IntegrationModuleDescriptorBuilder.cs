@@ -82,6 +82,25 @@ public static class IntegrationModuleDescriptorBuilder
             [DataPort("frame", "frame emitted by the processor when accepted.")]);
     }
 
+    public static IntegrationModuleDescriptor CreateClassifier<TOptions>(
+        string moduleId,
+        string displayName,
+        string version,
+        string capabilityName,
+        string description)
+    {
+        return Create(
+            moduleId,
+            displayName,
+            version,
+            capabilityName,
+            IntegrationCapabilityKind.Classifier,
+            typeof(TOptions).FullName ?? typeof(TOptions).Name,
+            description,
+            [DataPort("frame", "frame whose content is classified.")],
+            [ControlPort("class", "classification", "Classification control signal for switch/if routing.")]);
+    }
+
     private static IntegrationModuleDescriptor Create(
         string moduleId,
         string displayName,
