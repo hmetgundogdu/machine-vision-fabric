@@ -7,7 +7,7 @@
   "capabilities": [
     {
       "name": "black-screen-check",
-      "kind": 4,
+      "kind": "processor",
       "schemaType": "MachineVisionFabric.Integrations.BlackScreenCheck.BlackScreenCheckOptions",
       "description": "Passes through frames whose mean grayscale brightness is at or below a threshold (very black), logging a warning for each.",
       "inputs": [

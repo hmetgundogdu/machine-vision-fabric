@@ -7,7 +7,7 @@
   "capabilities": [
     {
       "name": "dataset-writer",
-      "kind": 5,
+      "kind": "sink",
       "schemaType": "MachineVisionFabric.Integrations.DatasetWriter.DatasetWriterOptions",
       "description": "Writes each incoming frame as an image file with JSON metadata into a timestamped session directory.",
       "inputs": [

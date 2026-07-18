@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using MachineVisionFabric.Contracts.Integrations;
 using MachineVisionFabric.Core.Abstractions;
 using Microsoft.Extensions.Logging;
@@ -19,7 +20,13 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
     private readonly ILogger _logger = logger ?? NullLogger<IntegrationModuleLoader>.Instance;
 
     private const string ManifestFileName = "integration-module.json";
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    // Capability "kind" is written as a readable string ("source", "processor", ...) in
+    // manifests. JsonStringEnumConverter also still accepts the legacy integer form.
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() }
+    };
     private static readonly string[] IgnoredAssemblyNames =
     [
         "MachineVisionFabric.Contracts",

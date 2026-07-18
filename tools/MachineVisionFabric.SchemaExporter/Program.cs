@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Schema;
+using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using MachineVisionFabric.Contracts.Integrations;
 using MachineVisionFabric.Contracts.Control;
@@ -16,7 +17,8 @@ Directory.CreateDirectory(outputRoot);
 var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
 {
     WriteIndented = true,
-    TypeInfoResolver = new DefaultJsonTypeInfoResolver()
+    TypeInfoResolver = new DefaultJsonTypeInfoResolver(),
+    Converters = { new JsonStringEnumConverter() }
 };
 
 WriteSchema<IntegrationModuleDescriptor>("integration-module-descriptor.schema.json");

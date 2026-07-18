@@ -7,7 +7,7 @@
   "capabilities": [
     {
       "name": "dark-frame-filter",
-      "kind": 3,
+      "kind": "processor",
       "schemaType": "MachineVisionFabric.Integrations.DarkFrameFilter.DarkFrameFilterOptions",
       "description": "Rejects frames whose mean grayscale brightness falls below a threshold. Uses OpenCV.",
       "inputs": [

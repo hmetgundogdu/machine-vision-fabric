@@ -7,7 +7,7 @@
   "capabilities": [
     {
       "name": "cognex-camera-source",
-      "kind": 0,
+      "kind": "source",
       "schemaType": "MachineVisionFabric.Integrations.CognexCamera.CognexCameraOptions",
       "description": "Cognex In-Sight HMI WebSocket source. Connects to camera, triggers and streams frames continuously.",
       "inputs": [],
