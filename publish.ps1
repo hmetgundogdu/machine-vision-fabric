@@ -68,17 +68,17 @@ if (-not $NoClean -and (Test-Path $out)) {
 
 # ── 1. CLI ────────────────────────────────────────────────────────────────────
 Write-Host "[1/4] CLI" -ForegroundColor Yellow
-Invoke-Publish "src/MachineVisionFabric.Cli/MachineVisionFabric.Cli.csproj" $out
+Invoke-Publish "src/cli/Mvf.Cli/Mvf.Cli.csproj" $out
 
 # ── 2. Integration modules ────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "[2/4] Integration modules" -ForegroundColor Yellow
 
 $integrations = @(
-    @{ Project = "real-world-projects/integrations/MachineVisionFabric.Integrations.CognexCamera/MachineVisionFabric.Integrations.CognexCamera.csproj";     Id = "mvf.realworld-cognex-camera" },
-    @{ Project = "real-world-projects/integrations/MachineVisionFabric.Integrations.DarkFrameFilter/MachineVisionFabric.Integrations.DarkFrameFilter.csproj"; Id = "mvf.realworld-dark-frame-filter" },
-    @{ Project = "real-world-projects/integrations/MachineVisionFabric.Integrations.BlackScreenCheck/MachineVisionFabric.Integrations.BlackScreenCheck.csproj"; Id = "mvf.black-screen-check" },
-    @{ Project = "real-world-projects/integrations/MachineVisionFabric.Integrations.DatasetWriter/MachineVisionFabric.Integrations.DatasetWriter.csproj";       Id = "mvf.dataset-writer" }
+    @{ Project = "modules/MachineVisionFabric.Integrations.CognexCamera/MachineVisionFabric.Integrations.CognexCamera.csproj";     Id = "mvf.realworld-cognex-camera" },
+    @{ Project = "modules/MachineVisionFabric.Integrations.DarkFrameFilter/MachineVisionFabric.Integrations.DarkFrameFilter.csproj"; Id = "mvf.realworld-dark-frame-filter" },
+    @{ Project = "modules/MachineVisionFabric.Integrations.BlackScreenCheck/MachineVisionFabric.Integrations.BlackScreenCheck.csproj"; Id = "mvf.black-screen-check" },
+    @{ Project = "modules/MachineVisionFabric.Integrations.DatasetWriter/MachineVisionFabric.Integrations.DatasetWriter.csproj";       Id = "mvf.dataset-writer" }
 )
 
 foreach ($m in $integrations) {
@@ -92,9 +92,9 @@ Write-Host "[3/4] Packages" -ForegroundColor Yellow
 $packagesDest = Join-Path $out "packages"
 New-Item -ItemType Directory -Force -Path $packagesDest | Out-Null
 
-$packagesSource = Join-Path $Root "real-world-projects/packages"
+$packagesSource = Join-Path $Root "packages"
 if (Test-Path $packagesSource) {
-    Write-Host "  → real-world-projects/packages → $packagesDest" -ForegroundColor Cyan
+    Write-Host "  → packages → $packagesDest" -ForegroundColor Cyan
     # Copy the contents, not the folder itself: with an existing destination the latter
     # would nest a packages/packages directory on every run.
     Copy-Item -Path (Join-Path $packagesSource "*") -Destination $packagesDest -Recurse -Force

@@ -31,7 +31,8 @@ Temel hedefler:
 MachineVisionFabric/
 ├─ docs/
 ├─ src/
-├─ real-world-projects/
+├─ modules/
+├─ packages/
 └─ tools/
 ```
 

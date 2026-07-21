@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\core\Mvf.Graph\Mvf.Graph.csproj" />
+    <ProjectReference Include="..\..\src\core\Mvf.Abstractions\Mvf.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\sdk\dotnet\Mvf.Sdk\Mvf.Sdk.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Copy the manifest to output so the loader can discover it next to the DLL. -->
+    <None Include="integration-module.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

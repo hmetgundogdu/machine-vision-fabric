@@ -56,7 +56,7 @@ Most of this is a **move/regroup**, not new code. New: `protocol/`, `transports/
 
 | ID | Work item | Status |
 |----|-----------|--------|
-| M0 | Draw seams + folder/architecture; design docs | 🟡 In progress (this doc = first deliverable) |
+| M0 | Draw seams + folder/architecture; design docs | 🟡 In progress (docs + north-star folder/project rename done; ITransport/IModuleHost seams deferred to M1/M2) |
 | M1 | Out-of-process module host, Python-first — NO shared memory yet (frames copied over wire) | ⬜ Not started |
 | M2 | Shared-memory zero-copy data plane, graph-aware | ⛔ Blocked — **discuss design with user first** |
 | M3 | Hardening: backpressure, crash recovery, warm pools, cross-process observability | ⬜ Not started |
@@ -64,8 +64,12 @@ Most of this is a **move/regroup**, not new code. New: `protocol/`, `transports/
 
 ### M0 — Seams + structure (low risk, behavior unchanged)
 - [x] Roadmap + architecture + captured design knowledge (this doc)
-- [ ] Folder/project regroup toward the north-star structure *(pending Decision 1)*
-- [ ] `protocol/` skeleton (message + frame-descriptor schema stub)
+- [x] North-star folder/project rename: `Contracts→Mvf.Graph`, `Core→Mvf.Abstractions`,
+      `Runtime→Mvf.Engine`, `Sdk→Mvf.Sdk`, `Cli→Mvf.Cli`; `real-world-projects/*`→`modules/`
+      + `packages/`; solution `Mvf.slnx`. Module (plugin) namespaces kept as
+      `MachineVisionFabric.Integrations.*` to protect string-coupled manifests. Build clean,
+      tests 29/29, no-flag CLI verified.
+- [ ] `protocol/` skeleton (message + frame-descriptor schema stub) — start of M1
 - Note: `ITransport` / `IModuleHost` seams are extracted **when their shape is known**
   (M1/M2), to avoid premature abstraction — not built speculatively in M0.
 
@@ -121,8 +125,6 @@ it: **stop and design it with the user.** Reminder is also stored in memory.
   but **minimal and graph-aware** — a narrow, single-machine, topology-specific slot pool,
   not a general IPC middleware. Kept as a separate transport project the core never depends on.
 
-## Open decisions (pending user)
-- **Decision 1 (M0):** folder regroup — low-churn (keep names, add new folders for new
-  projects) **[assistant default]** vs full clean rename now (Contracts+Core → Mvf.Graph +
-  Mvf.Abstractions, real-world-projects/integrations → modules/).
-- **Decision 2 (M1):** control plane — **gRPC** vs **stdio + protobuf/JSON**.
+## Open decisions
+- **Decision 1 (M0):** ✅ Resolved — full clean rename to the north-star structure (done).
+- **Decision 2 (M1):** ⬜ Pending — control plane: **gRPC** vs **stdio + protobuf/JSON**.

@@ -17,28 +17,22 @@ The repository now reflects that split explicitly:
 
 ```text
 MachineVisionFabric/
-|-- src/                  platform product
-|   |-- MachineVisionFabric.Contracts/
-|   |-- MachineVisionFabric.Core/
-|   |-- MachineVisionFabric.Sdk/
-|   |-- MachineVisionFabric.Runtime/
-|   |-- MachineVisionFabric.Storage/
-|   |-- MachineVisionFabric.Cli/
-|   `-- MachineVisionFabric.Host/
-|-- real-world-projects/  project-specific integrations and scenarios
-|   |-- integrations/     .NET integration modules (Cognex camera, filters, writers)
-|   |-- packages/         runnable pipeline packages
-|   `-- MachineVisionFabric.RealWorld.slnx
-|-- tools/                platform-owned tooling
-|   `-- MachineVisionFabric.SchemaExporter/
+|-- src/                  platform core, layered so the engine stays minimal
+|   |-- core/             Mvf.Graph (typed graph model + validation), Mvf.Abstractions (contracts)
+|   |-- engine/           Mvf.Engine (scheduler + node runners)
+|   |-- sdk/dotnet/       Mvf.Sdk (.NET module authoring)
+|   `-- cli/              Mvf.Cli (headless host + ASCII TUI)
+|-- modules/              .NET integration modules (Cognex camera, filters, dataset writer)
+|-- packages/             runnable pipeline packages (pipeline.json)
+|-- tools/                Mvf.SchemaExporter
 |-- tests/
-`-- docs/
+`-- docs/                 architecture + roadmap (see docs/roadmap.md)
 ```
 
-`src/` is the platform.
-`real-world-projects/` is where project-specific camera and scenario work lives —
-integration modules and the pipeline packages that compose them. It is intentionally
-kept in the same repository, but under its own folder and solution boundary.
+The **core** (`src/core`) knows only what a pipeline is (typed graph) and what a node
+contract is; transports, module hosts and language SDKs attach at the edges so the core
+stays small. `modules/` holds pluggable integration modules; `packages/` holds the
+pipelines that compose them. See `docs/roadmap.md` for the architecture and roadmap.
 
 ## Current Direction
 
@@ -75,10 +69,10 @@ As of `2026-07-16`, the current MVP is verified to:
 As of `2026-07-17`, the typed pipeline graph is the primary execution model, driven by
 `execute-graph`. The repository ships one end-to-end graph package:
 
-- `real-world-projects/packages/cognex-dark-capture` — Cognex auto-trigger capture that
+- `packages/cognex-dark-capture` — Cognex auto-trigger capture that
   saves every frame and branches very dark frames into a separate dataset.
 
-The runtime discovers integration modules under `real-world-projects/integrations`
+The runtime discovers integration modules under `modules`
 (Cognex camera source, dark-frame filter, black-screen check, dataset writer) and exposes
 a typed inspection surface for resolved pipelines and SDK module metadata.
 
@@ -87,13 +81,12 @@ a typed inspection surface for resolved pipelines and SDK module metadata.
 Build the platform and the integration modules:
 
 ```powershell
-dotnet build MachineVisionFabric.slnx -v minimal
-dotnet build real-world-projects\MachineVisionFabric.RealWorld.slnx -v minimal
+dotnet build Mvf.slnx -v minimal
 ```
 
-The CLI resolves its default paths relative to the repository root, so the commands below
-work with no flags when run from a clone. `CLI` is
-`src\MachineVisionFabric.Cli\bin\Debug\net10.0\MachineVisionFabric.Cli.dll`.
+`Mvf.slnx` includes the platform, the modules and the tools. The CLI resolves its default
+paths relative to the repository root, so the commands below work with no flags when run
+from a clone. `CLI` is `src\cli\Mvf.Cli\bin\Debug\net10.0\Mvf.Cli.dll`.
 
 List the discovered integration modules:
 
@@ -110,10 +103,10 @@ dotnet $CLI packages
 Validate the shipped pipeline graph:
 
 ```powershell
-dotnet $CLI validate-pipeline --path real-world-projects\packages\cognex-dark-capture\pipeline.json
+dotnet $CLI validate-pipeline --path packages\cognex-dark-capture\pipeline.json
 ```
 
-Run the default pipeline (`real-world-projects\packages\cognex-dark-capture`). Add
+Run the default pipeline (`packages\cognex-dark-capture`). Add
 `--no-tui` for plain output and `--max-cycles <n>` to stop after n cycles:
 
 ```powershell
@@ -135,19 +128,19 @@ folder with `appsettings.json` patched for that layout:
 ```powershell
 ./publish.ps1                     # -> publish/mvf
 cd publish/mvf
-./MachineVisionFabric.Cli execute-graph --package packages/cognex-dark-capture
+./Mvf.Cli execute-graph --package packages/cognex-dark-capture
 ```
 
 ## Integrator Direction
 
 External developers should:
 
-- build `.NET` integration modules against `MachineVisionFabric.Sdk`
+- build `.NET` integration modules against `Mvf.Sdk`
 - load them through the platform runtime
 - validate config with exported JSON schema
 - keep vendor SDK code outside `src/`
 
-That means a real camera adapter belongs in its own project under `real-world-projects/` or another external solution, not inside the platform core.
+That means a real camera adapter belongs in its own project under `modules/` or another external solution, not inside the platform core.
 
 ## Documents
 

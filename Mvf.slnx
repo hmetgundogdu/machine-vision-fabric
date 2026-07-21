@@ -1,0 +1,27 @@
+<Solution>
+  <Folder Name="/src/core/">
+    <Project Path="src/core/Mvf.Graph/Mvf.Graph.csproj" />
+    <Project Path="src/core/Mvf.Abstractions/Mvf.Abstractions.csproj" />
+  </Folder>
+  <Folder Name="/src/engine/">
+    <Project Path="src/engine/Mvf.Engine/Mvf.Engine.csproj" />
+  </Folder>
+  <Folder Name="/src/sdk/">
+    <Project Path="src/sdk/dotnet/Mvf.Sdk/Mvf.Sdk.csproj" />
+  </Folder>
+  <Folder Name="/src/cli/">
+    <Project Path="src/cli/Mvf.Cli/Mvf.Cli.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Mvf.Engine.Tests/Mvf.Engine.Tests.csproj" />
+  </Folder>
+  <Folder Name="/modules/">
+    <Project Path="modules/MachineVisionFabric.Integrations.CognexCamera/MachineVisionFabric.Integrations.CognexCamera.csproj" />
+    <Project Path="modules/MachineVisionFabric.Integrations.DarkFrameFilter/MachineVisionFabric.Integrations.DarkFrameFilter.csproj" />
+    <Project Path="modules/MachineVisionFabric.Integrations.DatasetWriter/MachineVisionFabric.Integrations.DatasetWriter.csproj" />
+    <Project Path="modules/MachineVisionFabric.Integrations.BlackScreenCheck/MachineVisionFabric.Integrations.BlackScreenCheck.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Mvf.SchemaExporter/Mvf.SchemaExporter.csproj" />
+  </Folder>
+</Solution>

@@ -1,6 +1,0 @@
-<Solution>
-  <Folder Name="/integrations/">
-    <Project Path="integrations/MachineVisionFabric.Integrations.CognexCamera/MachineVisionFabric.Integrations.CognexCamera.csproj" />
-    <Project Path="integrations/MachineVisionFabric.Integrations.DarkFrameFilter/MachineVisionFabric.Integrations.DarkFrameFilter.csproj" />
-  </Folder>
-</Solution>
