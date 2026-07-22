@@ -13,38 +13,11 @@ namespace Mvf.Engine.Tests;
 public sealed class WorkerFrameClassifierTests
 {
     [Fact]
-    public async Task PythonWorker_ClassifiesFramesOverStdio()
-    {
-        var repo = FindRepoRoot();
-        var moduleDir = Path.Combine(repo, "modules", "py-brightness-classifier");
-        var info = new WorkerLaunchInfo(
-            Command: "python3",
-            Args: [Path.Combine(moduleDir, "classifier.py")],
-            WorkingDirectory: moduleDir,
-            PythonPath: Path.Combine(repo, "src", "sdk", "python"));
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        await using var worker = await StdioWorkerProcess.StartAsync(info, cts.Token);
-        Assert.Equal("py.brightness-classifier", worker.ModuleId);
-
-        var classifier = new WorkerFrameClassifier(worker);
-
-        var dark = await classifier.ClassifyAsync(Frame(1, new byte[64]), cts.Token); // all-zero → black
-        Assert.Equal("black", dark.Label);
-        Assert.Equal(0d, dark.Measurement);
-
-        var bright = await classifier.ClassifyAsync(
-            Frame(2, Enumerable.Repeat((byte)255, 64).ToArray()), cts.Token); // all-255 → ok
-        Assert.Equal("ok", bright.Label);
-        Assert.Equal(255d, bright.Measurement);
-        Assert.StartsWith("worker:py.brightness-classifier", bright.Source);
-    }
-
-    [Fact]
     public async Task PythonWorker_ClassifiesFramesOverSharedMemory()
     {
-        // Same proof as above, but the frame bytes cross via the shared-memory arena (handle over
-        // stdio) instead of base64 — the M2 data-plane path end to end with a real Python worker.
+        // End-to-end with a real Python worker: the frame crosses as a typed payload in the
+        // shared-memory arena (a handle over stdio, descriptor in the slot header) — no base64. The
+        // Python SDK reads the bytes in place and the classifier drops into the same IFrameClassifier.
         var repo = FindRepoRoot();
         var moduleDir = Path.Combine(repo, "modules", "py-brightness-classifier");
 
@@ -58,6 +31,8 @@ public sealed class WorkerFrameClassifierTests
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await using var worker = await StdioWorkerProcess.StartAsync(info, cts.Token);
+        Assert.Equal("py.brightness-classifier", worker.ModuleId);
+
         var classifier = new WorkerFrameClassifier(worker, arena);
 
         var dark = await classifier.ClassifyAsync(Frame(1, new byte[64]), cts.Token); // all-zero → black
@@ -68,6 +43,7 @@ public sealed class WorkerFrameClassifierTests
             Frame(2, Enumerable.Repeat((byte)255, 64).ToArray()), cts.Token); // all-255 → ok
         Assert.Equal("ok", bright.Label);
         Assert.Equal(255d, bright.Measurement);
+        Assert.StartsWith("worker:py.brightness-classifier", bright.Source);
     }
 
     private static IFrameEnvelope Frame(int seq, byte[] data) =>

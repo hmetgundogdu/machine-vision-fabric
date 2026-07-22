@@ -4,14 +4,12 @@ Language-agnostic contract between the engine (parent) and an out-of-process mod
 (child), spoken over the child's **stdio** — local only, **no network**. One JSON object
 per line (newline-delimited). Targets: Python, Node.js, .NET.
 
-Big frame/tensor data is NOT part of this contract long-term — it belongs to the
-shared-memory data plane (M2). A frame payload is carried one of two ways:
-- **shared memory (M2, preferred):** the engine sets the child's `MVF_ARENA_PATH` env var to a
-  memory-mapped file. The frame's `shm` handle `{offset,length}` points into it; the child maps the
-  same file and reads the bytes **in place** (no copy off the pipe, no base64). See
-  `docs/data-plane-design.md`.
-- **inline (M1 fallback):** `dataBase64` carries the bytes when no arena is present, or when a frame
-  is larger than a slot.
+Payload bytes are NOT part of this contract — they live in the **shared-memory data plane**. The
+engine sets the child's `MVF_ARENA_PATH` env var to a memory-mapped file; a payload's `shm` handle
+`{offset}` points at a slot. Each slot is `[descriptor header | payload bytes]`: the child reads the
+**typed descriptor** (media type, dtype, shape, length — see `PayloadDescriptor` /
+`docs/data-plane-design.md`) from the header at `offset`, then reads the payload at
+`offset + 192` **in place** (zero copy). There is **no base64**; bytes never travel inline.
 
 ## Messages
 
@@ -20,14 +18,9 @@ Child → engine, on start (handshake):
 {"type":"hello","protocol":1,"moduleId":"py.brightness-classifier","capability":"classifier"}
 ```
 
-Engine → child, run one node cycle (shared-memory frame):
+Engine → child, run one node cycle:
 ```json
-{"type":"execute","id":1,"frame":{"cameraId":"cam1","sequence":42,"contentType":"image/bmp","length":64,"shm":{"offset":0,"length":64}}}
-```
-
-Engine → child, run one node cycle (inline fallback):
-```json
-{"type":"execute","id":1,"frame":{"cameraId":"cam1","sequence":42,"contentType":"image/bmp","length":64,"dataBase64":"<...>"}}
+{"type":"execute","id":1,"frame":{"cameraId":"cam1","sequence":42,"contentType":"image/bmp","shm":{"offset":0}}}
 ```
 
 Child → engine, result (classifier capability):

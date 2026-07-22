@@ -67,7 +67,7 @@ public sealed class SharedMemoryArena : IDataPlane, IDisposable
         }
     }
 
-    public bool TryPublish(ReadOnlySpan<byte> payload, int referenceCount, out ArenaHandle handle)
+    public bool TryPublish(in PayloadDescriptor descriptor, ReadOnlySpan<byte> payload, int referenceCount, out ArenaHandle handle)
     {
         handle = default;
         if (referenceCount < 1)
@@ -75,7 +75,9 @@ public sealed class SharedMemoryArena : IDataPlane, IDisposable
             throw new ArgumentOutOfRangeException(nameof(referenceCount), "A published payload needs at least one consumer.");
         }
 
-        if (payload.Length > _options.SlotSize)
+        // The descriptor must describe exactly these bytes, and header + payload must fit a slot.
+        if (descriptor.PayloadLength != payload.Length
+            || PayloadDescriptor.HeaderSize + (long)payload.Length > _options.SlotSize)
         {
             return false;
         }
@@ -96,11 +98,32 @@ public sealed class SharedMemoryArena : IDataPlane, IDisposable
         var offset = (long)slot * _options.SlotSize;
         unsafe
         {
-            payload.CopyTo(new Span<byte>(_base + offset, payload.Length));
+            var slotSpan = new Span<byte>(_base + offset, _options.SlotSize);
+            descriptor.WriteHeader(slotSpan);
+            payload.CopyTo(slotSpan[PayloadDescriptor.HeaderSize..]);
         }
 
         handle = new ArenaHandle(offset, payload.Length);
         return true;
+    }
+
+    public bool TryReadDescriptor(ArenaHandle handle, out PayloadDescriptor descriptor)
+    {
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_mmf is null)
+            {
+                descriptor = default;
+                return false;
+            }
+
+            unsafe
+            {
+                var header = new ReadOnlySpan<byte>(_base + handle.Offset, PayloadDescriptor.HeaderSize);
+                return PayloadDescriptor.TryReadHeader(header, out descriptor);
+            }
+        }
     }
 
     public Stream OpenRead(ArenaHandle handle)
@@ -113,9 +136,11 @@ public sealed class SharedMemoryArena : IDataPlane, IDisposable
                 throw new InvalidOperationException("Cannot read from an arena that has not been initialized.");
             }
 
+            // Expose only the payload — past the descriptor header.
             unsafe
             {
-                return new UnmanagedMemoryStream(_base + handle.Offset, handle.Length, handle.Length, FileAccess.Read);
+                return new UnmanagedMemoryStream(
+                    _base + handle.Offset + PayloadDescriptor.HeaderSize, handle.Length, handle.Length, FileAccess.Read);
             }
         }
     }

@@ -341,7 +341,10 @@ public sealed class PipelineGraphExecutor(
             bytes = buffer.ToArray();
         }
 
-        return dataPlane.TryPublish(bytes, referenceCount, out var handle)
+        // An encoded frame is an opaque byte blob (u8, length N); its media type/decoding is the
+        // consumer's concern. Raw tensors get a richer descriptor when those payload types land.
+        var descriptor = new PayloadDescriptor(PayloadMediaType.Blob, PayloadElementType.UInt8, [bytes.Length]);
+        return dataPlane.TryPublish(descriptor, bytes, referenceCount, out var handle)
             ? PortValue.FromFrame(new ArenaFrameEnvelope(dataPlane, handle, frame))
             : null;
     }

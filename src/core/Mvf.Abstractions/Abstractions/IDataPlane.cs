@@ -11,9 +11,12 @@ public readonly record struct ArenaHandle(long Offset, int Length);
 
 /// <summary>
 /// The engine-owned data plane for co-located, out-of-process modules: an arena of shared memory that
-/// carries **opaque bytes** by <see cref="ArenaHandle"/> instead of copying them down a pipe. The
-/// engine references only this seam; the concrete (file-backed) arena lives in a transport project the
-/// core never references. Local only; no network.
+/// carries a **typed payload** — a <see cref="PayloadDescriptor"/> header plus opaque bytes — by
+/// <see cref="ArenaHandle"/> instead of copying it down a pipe. A consumer wraps the bytes as a native
+/// object with zero copy using the descriptor; the plane itself never parses the bytes. There is no
+/// base64/inline fallback — payloads always travel through the arena. The engine references only this
+/// seam; the concrete (file-backed) arena lives in a transport project the core never references.
+/// Local only; no network.
 ///
 /// <para>Ownership follows the graph: a payload is published <b>once</b> with a reference count equal
 /// to its number of consumers (known statically); each consumer <see cref="Release"/>s when done and
@@ -28,17 +31,22 @@ public interface IDataPlane
     /// </summary>
     string BackingPath { get; }
 
-    /// <summary>Maximum payload bytes that fit one slot; a larger payload cannot be published.</summary>
+    /// <summary>Maximum bytes (descriptor header + payload) that fit one slot.</summary>
     int SlotSize { get; }
 
     /// <summary>
-    /// Copies <paramref name="payload"/> into a free slot with an initial <paramref name="referenceCount"/>
-    /// (= its number of consumers) and returns a handle. Returns <c>false</c> — leaving the caller to
-    /// fall back to inline transport — when the payload exceeds a slot or the arena is momentarily full.
+    /// Writes <paramref name="descriptor"/> (as the slot header) followed by <paramref name="payload"/>
+    /// into a free slot, with an initial <paramref name="referenceCount"/> (= its number of consumers),
+    /// and returns a handle. Returns <c>false</c> when the payload does not fit a slot, the arena is
+    /// momentarily full, or the payload length disagrees with the descriptor. There is no fallback — the
+    /// caller must treat <c>false</c> as an error.
     /// </summary>
-    bool TryPublish(ReadOnlySpan<byte> payload, int referenceCount, out ArenaHandle handle);
+    bool TryPublish(in PayloadDescriptor descriptor, ReadOnlySpan<byte> payload, int referenceCount, out ArenaHandle handle);
 
-    /// <summary>Opens a zero-copy, read-only stream over the payload bytes for an in-process consumer.</summary>
+    /// <summary>Reads the typed descriptor from the slot header for <paramref name="handle"/>.</summary>
+    bool TryReadDescriptor(ArenaHandle handle, out PayloadDescriptor descriptor);
+
+    /// <summary>Opens a zero-copy, read-only stream over the <b>payload</b> bytes (past the header).</summary>
     Stream OpenRead(ArenaHandle handle);
 
     /// <summary>Decrements the reference count for <paramref name="handle"/>; reclaims the slot at zero.</summary>

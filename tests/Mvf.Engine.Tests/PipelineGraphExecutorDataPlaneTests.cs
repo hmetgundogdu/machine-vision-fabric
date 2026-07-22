@@ -146,6 +146,7 @@ public sealed class PipelineGraphExecutorDataPlaneTests
     {
         private long _nextOffset;
         private readonly Dictionary<long, int> _refByOffset = [];
+        private readonly Dictionary<long, PayloadDescriptor> _descriptorByOffset = [];
 
         public int PublishCount { get; private set; }
         public int ReleaseCount { get; private set; }
@@ -155,16 +156,20 @@ public sealed class PipelineGraphExecutorDataPlaneTests
         public string BackingPath => "/tmp/recording-arena";
         public int SlotSize => int.MaxValue;
 
-        public bool TryPublish(ReadOnlySpan<byte> payload, int referenceCount, out ArenaHandle handle)
+        public bool TryPublish(in PayloadDescriptor descriptor, ReadOnlySpan<byte> payload, int referenceCount, out ArenaHandle handle)
         {
             var offset = _nextOffset;
             _nextOffset += payload.Length + 1;
             handle = new ArenaHandle(offset, payload.Length);
             _refByOffset[offset] = referenceCount;
+            _descriptorByOffset[offset] = descriptor;
             PublishCount++;
             LastReferenceCount = referenceCount;
             return true;
         }
+
+        public bool TryReadDescriptor(ArenaHandle handle, out PayloadDescriptor descriptor) =>
+            _descriptorByOffset.TryGetValue(handle.Offset, out descriptor);
 
         public Stream OpenRead(ArenaHandle handle) => new MemoryStream();
 

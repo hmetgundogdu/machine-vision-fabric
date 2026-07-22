@@ -42,6 +42,10 @@ public sealed class ArenaFrameEnvelope : IFrameEnvelope
     /// <summary>The location of this frame's bytes in the arena — hand this to a co-located worker.</summary>
     public ArenaHandle Handle { get; }
 
+    /// <summary>The typed descriptor for the payload, read from the arena slot header.</summary>
+    public PayloadDescriptor Descriptor =>
+        _dataPlane.TryReadDescriptor(Handle, out var descriptor) ? descriptor : default;
+
     public string CameraId { get; }
 
     public int SequenceNumber { get; }
