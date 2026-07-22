@@ -14,6 +14,7 @@ using Mvf.Abstractions;
 using Mvf.Engine;
 using Mvf.Engine.Execution;
 using Spectre.Console;
+using Mvf.Engine.Modules;
 using Mvf.Engine.Pipelines;
 using Mvf.Engine.Plugins;
 using Microsoft.Extensions.Configuration;
@@ -230,16 +231,17 @@ async Task ValidatePipelineAsync(CliInvocation invocation)
         return;
     }
 
-    await using var stream = File.OpenRead(pipelinePath);
-    var definition = await JsonSerializer.DeserializeAsync<PipelineDefinition>(stream, jsonOptions, CancellationToken.None);
+    using var host = BuildHost();
+    var runtimeOptions = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MachineVisionFabricRuntimeOptions>>().Value;
+    var integrationsRoot = ResolveWorkingPath(
+        invocation.Options.TryGetValue("integrations-root", out var intRoot) ? intRoot : runtimeOptions.IntegrationsRoot);
+
+    var definition = await LoadPipelineAsync(pipelinePath, integrationsRoot, host);
     if (definition is null)
     {
-        Console.WriteLine($"Pipeline definition could not be parsed: {pipelinePath}");
-        Environment.ExitCode = 1;
         return;
     }
 
-    using var host = BuildHost();
     var validator = host.Services.GetRequiredService<IPipelineDefinitionValidator>();
     var result = validator.Validate(definition);
 
@@ -288,12 +290,9 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         return;
     }
 
-    await using var pipelineStream = File.OpenRead(pipelinePath);
-    var definition = await JsonSerializer.DeserializeAsync<PipelineDefinition>(pipelineStream, jsonOptions, CancellationToken.None);
+    var definition = await LoadPipelineAsync(pipelinePath, integrationsRoot, host);
     if (definition is null)
     {
-        Console.Error.WriteLine($"Pipeline definition could not be parsed: {pipelinePath}");
-        Environment.ExitCode = 1;
         return;
     }
 
@@ -355,6 +354,26 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
     }
 }
 
+// Reads a pipeline.json (lean or rich) and expands it into the rich model the validator and
+// executor consume. Lean authoring lives entirely in the expander; both commands share this.
+async Task<PipelineDefinition?> LoadPipelineAsync(string pipelinePath, string integrationsRoot, IHost host)
+{
+    var json = await File.ReadAllTextAsync(pipelinePath);
+    var catalog = host.Services.GetRequiredService<ModuleCatalog>().Load(integrationsRoot);
+    var expander = host.Services.GetRequiredService<PipelineExpander>();
+
+    try
+    {
+        return expander.Expand(json, catalog);
+    }
+    catch (PipelineExpansionException ex)
+    {
+        Console.Error.WriteLine($"Pipeline could not be expanded: {ex.Message}");
+        Environment.ExitCode = 1;
+        return null;
+    }
+}
+
 IHost BuildHost(IReadOnlyDictionary<string, string?>? overrides = null)
 {
     var builder = Host.CreateApplicationBuilder([]);
@@ -374,6 +393,8 @@ IHost BuildHost(IReadOnlyDictionary<string, string?>? overrides = null)
     builder.Services.AddSingleton<ISimulatorSourceCatalog, EmptySimulatorSourceCatalog>();
     builder.Services.AddSingleton<IIntegrationModuleLoader, IntegrationModuleLoader>();
     builder.Services.AddSingleton<IPipelineDefinitionValidator, PipelineDefinitionValidator>();
+    builder.Services.AddSingleton<ModuleCatalog>();
+    builder.Services.AddSingleton<PipelineExpander>();
     builder.Services.AddSingleton<IPipelineNodeActivator, PipelineNodeActivator>();
     builder.Services.AddSingleton<IPipelineGraphExecutor, PipelineGraphExecutor>();
     builder.Services.AddTransient<IPipelineExecutionHost, PipelineExecutionHost>();
@@ -443,7 +464,7 @@ void PrintHelp()
     Console.WriteLine("Mvf.Cli");
     Console.WriteLine("Commands:");
     Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--no-tui]");
-    Console.WriteLine("  validate-pipeline --path <pipeline.json>");
+    Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");
     Console.WriteLine("  modules [--root <path>]");
     Console.WriteLine("  packages [--root <path>]");
     Console.WriteLine("  sessions [--root <path>]");

@@ -58,6 +58,20 @@ Most of this is a **move/regroup**, not new code. New: `protocol/`, `transports/
 - Manifests use readable string `kind`; `inspect-session` reads the module's real session.json.
 - First-class **frame→control classifier** (perception→control) + `ControlSignal.Measurement`.
 
+## Authoring: lean pipeline format (done)
+Authors write only what is not derivable; a `PipelineExpander` fills in the rich model
+**before validation**, so the validator and executor stay unchanged.
+- module node: `{ "id": "blackCheck1", "module": "mvf.black-screen-check", "config": {…} }`
+- primitive node: `{ "id": "fork1", "primitive": "fork" }` (fork/switch outputs derived from the
+  ports on its leaving edges; `if` outputs are fixed)
+- edge: `{ "from": "camera1.frame", "to": "fork1.frame" }` (id auto; kind = source port channel)
+
+Ports + category come from the module's `kind` via a metadata-only `ModuleCatalog` (reads
+`module.json`, **no DLL load**): source→source, processor→compute, classifier→classify,
+gate→control, sink→output. Rich nodes/edges still pass through unchanged (mixed files work).
+Wired into CLI `validate-pipeline` + `execute-graph`; `packages/cognex-dark-capture/pipeline.json`
+is now lean. Tests 39/39.
+
 ---
 
 ## Milestones (work items + status)
