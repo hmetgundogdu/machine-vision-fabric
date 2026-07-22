@@ -12,16 +12,22 @@ namespace Mvf.Hosting.Worker;
 /// engine-side. The output is an arena-born <see cref="ArenaFrameEnvelope"/> whose lifetime the executor
 /// then owns (it holds one producer reference until routed).
 /// </summary>
-public sealed class WorkerFrameTransformer(StdioWorkerProcess worker, IDataPlane dataPlane)
+public sealed class WorkerFrameTransformer(IWorkerChannel worker, IDataPlane dataPlane)
     : IFrameTransformer, ICheckpointable, IAsyncDisposable
 {
     private int _requestId;
 
+    // A supervised channel owns checkpoint/restore (it must hold the last state to recover with);
+    // a plain channel falls back to a one-shot capture/restore.
     public Task<byte[]?> CheckpointAsync(CancellationToken cancellationToken) =>
-        WorkerCheckpoint.CheckpointAsync(worker, dataPlane, ++_requestId, cancellationToken);
+        worker is ICheckpointable checkpointable
+            ? checkpointable.CheckpointAsync(cancellationToken)
+            : WorkerCheckpoint.CheckpointAsync(worker, dataPlane, ++_requestId, cancellationToken);
 
     public Task RestoreAsync(ReadOnlyMemory<byte> state, CancellationToken cancellationToken) =>
-        WorkerCheckpoint.RestoreAsync(worker, dataPlane, ++_requestId, state, cancellationToken);
+        worker is ICheckpointable checkpointable
+            ? checkpointable.RestoreAsync(state, cancellationToken)
+            : WorkerCheckpoint.RestoreAsync(worker, dataPlane, ++_requestId, state, cancellationToken);
 
     public async Task<IFrameEnvelope?> TransformAsync(IFrameEnvelope frame, CancellationToken cancellationToken)
     {

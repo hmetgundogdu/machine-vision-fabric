@@ -11,4 +11,10 @@
     <ProjectReference Include="..\..\core\Mvf.Graph\Mvf.Graph.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Mvf.Engine.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>

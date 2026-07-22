@@ -12,7 +12,7 @@ namespace Mvf.Hosting.Worker;
 internal static class WorkerCheckpoint
 {
     public static async Task<byte[]?> CheckpointAsync(
-        StdioWorkerProcess worker,
+        IWorkerChannel worker,
         IDataPlane dataPlane,
         int requestId,
         CancellationToken cancellationToken)
@@ -71,7 +71,7 @@ internal static class WorkerCheckpoint
     }
 
     public static async Task RestoreAsync(
-        StdioWorkerProcess worker,
+        IWorkerChannel worker,
         IDataPlane dataPlane,
         int requestId,
         ReadOnlyMemory<byte> state,

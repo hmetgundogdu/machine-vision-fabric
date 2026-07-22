@@ -11,7 +11,7 @@ namespace Mvf.Hosting.Worker;
 /// per cycle, so this matches the scheduling model. Frame data is carried inline for
 /// M1; the shared-memory data plane (M2) replaces it with a handle.
 /// </summary>
-public sealed class StdioWorkerProcess : IAsyncDisposable
+public sealed class StdioWorkerProcess : IWorkerChannel
 {
     private readonly Process _process;
     private readonly StreamWriter _stdin;
@@ -26,6 +26,27 @@ public sealed class StdioWorkerProcess : IAsyncDisposable
     }
 
     public string ModuleId { get; private set; } = string.Empty;
+
+    /// <summary>True once the child process has exited — the signal a supervisor uses to restart it.</summary>
+    public bool HasExited
+    {
+        get
+        {
+            try { return _process.HasExited; }
+            catch { return true; }
+        }
+    }
+
+    /// <summary>Test hook: forcibly kills the child to simulate a crash.</summary>
+    internal void KillForTest()
+    {
+        try
+        {
+            _process.Kill(entireProcessTree: true);
+            _process.WaitForExit(2000);
+        }
+        catch { /* already gone */ }
+    }
 
     public static async Task<StdioWorkerProcess> StartAsync(WorkerLaunchInfo info, CancellationToken cancellationToken)
     {

@@ -18,7 +18,7 @@ public sealed class StdioModuleHost(IDataPlane dataPlane) : IOutOfProcessModuleH
         OutOfProcessModuleActivation activation,
         CancellationToken cancellationToken)
     {
-        var worker = await StdioWorkerProcess.StartAsync(BuildLaunchInfo(activation), cancellationToken);
+        var worker = await SupervisedWorker.StartAsync(Spawn(activation), dataPlane, cancellationToken);
         return new WorkerFrameClassifier(worker, dataPlane);
     }
 
@@ -26,8 +26,15 @@ public sealed class StdioModuleHost(IDataPlane dataPlane) : IOutOfProcessModuleH
         OutOfProcessModuleActivation activation,
         CancellationToken cancellationToken)
     {
-        var worker = await StdioWorkerProcess.StartAsync(BuildLaunchInfo(activation), cancellationToken);
+        var worker = await SupervisedWorker.StartAsync(Spawn(activation), dataPlane, cancellationToken);
         return new WorkerFrameTransformer(worker, dataPlane);
+    }
+
+    // A restartable spawn: the supervisor calls this to (re)launch the same module.
+    private Func<CancellationToken, Task<StdioWorkerProcess>> Spawn(OutOfProcessModuleActivation activation)
+    {
+        var launch = BuildLaunchInfo(activation);
+        return token => StdioWorkerProcess.StartAsync(launch, token);
     }
 
     private WorkerLaunchInfo BuildLaunchInfo(OutOfProcessModuleActivation activation) =>
