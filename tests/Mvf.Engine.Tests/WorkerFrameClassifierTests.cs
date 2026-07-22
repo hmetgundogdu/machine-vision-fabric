@@ -48,13 +48,13 @@ public sealed class WorkerFrameClassifierTests
         var repo = FindRepoRoot();
         var moduleDir = Path.Combine(repo, "modules", "py-brightness-classifier");
 
-        using var arena = SharedMemoryArena.Create(new SharedMemoryArenaOptions { SlotSize = 4096, SlotCount = 4 });
+        using var arena = new SharedMemoryArena(new SharedMemoryArenaOptions { SlotSize = 4096, SlotCount = 4 });
         var info = new WorkerLaunchInfo(
             Command: "python3",
             Args: [Path.Combine(moduleDir, "classifier.py")],
             WorkingDirectory: moduleDir,
             PythonPath: Path.Combine(repo, "src", "sdk", "python"),
-            ArenaPath: arena.FilePath);
+            ArenaPath: arena.BackingPath);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await using var worker = await StdioWorkerProcess.StartAsync(info, cts.Token);

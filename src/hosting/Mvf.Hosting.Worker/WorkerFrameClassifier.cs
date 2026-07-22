@@ -1,7 +1,6 @@
 using System.Text.Json.Nodes;
 using Mvf.Abstractions;
 using Mvf.Graph.Processing;
-using Mvf.Transport.SharedMemory;
 
 namespace Mvf.Hosting.Worker;
 
@@ -10,12 +9,12 @@ namespace Mvf.Hosting.Worker;
 /// It drops into the existing FrameClassifierNodeRunner unchanged — the engine does not
 /// know or care that the classifier runs in another language/process.
 ///
-/// <para>When an <see cref="SharedMemoryArena"/> is supplied (M2), the frame is copied into the arena
-/// once and only a <see cref="FrameHandle"/> travels over stdio; the worker reads the bytes in place.
-/// Without an arena — or for a frame larger than a slot — it falls back to the inline base64 path
-/// (M1), so the transport is a transparent optimization.</para>
+/// <para>When an <see cref="IDataPlane"/> is supplied (M2), the frame is copied into the arena once and
+/// only an <see cref="ArenaHandle"/> travels over stdio; the worker reads the bytes in place. Without a
+/// data plane — or for a frame larger than a slot — it falls back to the inline base64 path (M1), so
+/// the transport is a transparent optimization.</para>
 /// </summary>
-public sealed class WorkerFrameClassifier(StdioWorkerProcess worker, SharedMemoryArena? arena = null)
+public sealed class WorkerFrameClassifier(StdioWorkerProcess worker, IDataPlane? dataPlane = null)
     : IFrameClassifier, IAsyncDisposable
 {
     private int _requestId;
@@ -35,13 +34,17 @@ public sealed class WorkerFrameClassifier(StdioWorkerProcess worker, SharedMemor
             ["cameraId"] = frame.CameraId,
             ["sequence"] = frame.SequenceNumber,
             ["contentType"] = frame.ContentType,
+            // The graph is typed; data/frame is the only payload today. Sending it keeps the wire
+            // self-describing as tensors and other data types join the data plane later.
+            ["dataType"] = "data/frame",
             ["length"] = bytes.Length,
         };
 
-        // Prefer the shared-memory handle; fall back to inline base64 when there is no arena or the
-        // frame does not fit a slot. The rented slot is held only for the duration of this one RPC.
-        var handle = default(FrameHandle);
-        var usedArena = arena is not null && arena.TryWrite(bytes, out handle);
+        // Prefer the shared-memory handle; fall back to inline base64 when there is no data plane or
+        // the frame does not fit a slot. Refcount is 1 (single consumer) and the slot is held only for
+        // the duration of this one RPC.
+        var handle = default(ArenaHandle);
+        var usedArena = dataPlane is not null && dataPlane.TryPublish(bytes, referenceCount: 1, out handle);
         if (usedArena)
         {
             frameMessage["shm"] = new JsonObject
@@ -71,7 +74,7 @@ public sealed class WorkerFrameClassifier(StdioWorkerProcess worker, SharedMemor
         {
             if (usedArena)
             {
-                arena!.Release(handle);
+                dataPlane!.Release(handle);
             }
         }
 

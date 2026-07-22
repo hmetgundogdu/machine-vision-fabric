@@ -6,6 +6,7 @@ using Mvf.Engine.Execution;
 using Mvf.Engine.Modules;
 using Mvf.Engine.Plugins;
 using Mvf.Hosting.Worker;
+using Mvf.Transport.SharedMemory;
 
 namespace Mvf.Engine.Tests;
 
@@ -23,11 +24,12 @@ public sealed class PythonModuleAutoWireTests
     {
         var repo = FindRepoRoot();
 
+        using var dataPlane = new SharedMemoryArena();
         var activator = new PipelineNodeActivator(
             new IntegrationModuleLoader(),
             new EmptySimulatorSourceCatalog(),
             new ModuleCatalog(),
-            new StdioModuleHost());
+            new StdioModuleHost(dataPlane));
 
         // A lean `{ "id": "bright1", "module": "py.brightness-classifier" }` expands to exactly this.
         var node = new PipelineNodeDefinition

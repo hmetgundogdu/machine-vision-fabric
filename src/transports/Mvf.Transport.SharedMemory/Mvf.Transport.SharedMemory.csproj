@@ -7,4 +7,8 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\core\Mvf.Abstractions\Mvf.Abstractions.csproj" />
+  </ItemGroup>
+
 </Project>

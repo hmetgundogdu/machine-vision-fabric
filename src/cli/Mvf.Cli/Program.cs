@@ -17,6 +17,7 @@ using Spectre.Console;
 using Mvf.Engine.Modules;
 using Mvf.Engine.Pipelines;
 using Mvf.Engine.Plugins;
+using Mvf.Transport.SharedMemory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -395,6 +396,9 @@ IHost BuildHost(IReadOnlyDictionary<string, string?>? overrides = null)
     builder.Services.AddSingleton<IPipelineDefinitionValidator, PipelineDefinitionValidator>();
     builder.Services.AddSingleton<ModuleCatalog>();
     builder.Services.AddSingleton<PipelineExpander>();
+    // One engine-owned data plane per run, behind the IDataPlane seam. The backing file is created
+    // lazily, so commands with no out-of-process modules pay nothing.
+    builder.Services.AddSingleton<IDataPlane>(_ => new SharedMemoryArena(new SharedMemoryArenaOptions()));
     builder.Services.AddSingleton<IOutOfProcessModuleHost, Mvf.Hosting.Worker.StdioModuleHost>();
     builder.Services.AddSingleton<IPipelineNodeActivator, PipelineNodeActivator>();
     builder.Services.AddSingleton<IPipelineGraphExecutor, PipelineGraphExecutor>();

@@ -1,5 +1,4 @@
 using Mvf.Abstractions;
-using Mvf.Transport.SharedMemory;
 
 namespace Mvf.Hosting.Worker;
 
@@ -9,35 +8,21 @@ namespace Mvf.Hosting.Worker;
 /// the module's runtime, starts the child process, and wraps it as an
 /// <see cref="IFrameClassifier"/>. Local only — no network.
 ///
-/// <para>Owns one <see cref="SharedMemoryArena"/>, created lazily on first use and shared by every
-/// worker it spawns, so frames cross to the child as handles rather than base64. The arena (and its
-/// backing file) is released when the host is disposed.</para>
+/// <para>Uses the engine-owned <see cref="IDataPlane"/> (injected) so frames cross to the child as
+/// handles rather than base64; the child maps the arena via the exported <c>MVF_ARENA_PATH</c>. The
+/// host does not own the data plane — composition creates and disposes it.</para>
 /// </summary>
-public sealed class StdioModuleHost : IOutOfProcessModuleHost, IDisposable
+public sealed class StdioModuleHost(IDataPlane dataPlane) : IOutOfProcessModuleHost
 {
-    private readonly Lock _arenaGate = new();
-    private SharedMemoryArena? _arena;
-    private bool _disposed;
-
     public async Task<IFrameClassifier> CreateClassifierAsync(
         OutOfProcessModuleActivation activation,
         CancellationToken cancellationToken)
     {
-        var arena = GetOrCreateArena();
-        var worker = await StdioWorkerProcess.StartAsync(BuildLaunchInfo(activation, arena), cancellationToken);
-        return new WorkerFrameClassifier(worker, arena);
+        var worker = await StdioWorkerProcess.StartAsync(BuildLaunchInfo(activation), cancellationToken);
+        return new WorkerFrameClassifier(worker, dataPlane);
     }
 
-    private SharedMemoryArena GetOrCreateArena()
-    {
-        lock (_arenaGate)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            return _arena ??= SharedMemoryArena.Create(new SharedMemoryArenaOptions());
-        }
-    }
-
-    private static WorkerLaunchInfo BuildLaunchInfo(OutOfProcessModuleActivation activation, SharedMemoryArena arena) =>
+    private WorkerLaunchInfo BuildLaunchInfo(OutOfProcessModuleActivation activation) =>
         activation.Runtime.ToLowerInvariant() switch
         {
             "python" => new WorkerLaunchInfo(
@@ -45,32 +30,17 @@ public sealed class StdioModuleHost : IOutOfProcessModuleHost, IDisposable
                 Args: [activation.EntryPath],
                 WorkingDirectory: activation.WorkingDirectory,
                 PythonPath: ResolvePythonSdkPath(activation.WorkingDirectory),
-                ArenaPath: arena.FilePath),
+                ArenaPath: dataPlane.BackingPath),
 
             "node" => new WorkerLaunchInfo(
                 Command: Environment.GetEnvironmentVariable("MVF_NODE") ?? "node",
                 Args: [activation.EntryPath],
                 WorkingDirectory: activation.WorkingDirectory,
-                ArenaPath: arena.FilePath),
+                ArenaPath: dataPlane.BackingPath),
 
             _ => throw new NotSupportedException(
                 $"Runtime '{activation.Runtime}' is not supported by the stdio worker host. Supported: python, node.")
         };
-
-    public void Dispose()
-    {
-        lock (_arenaGate)
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _disposed = true;
-            _arena?.Dispose();
-            _arena = null;
-        }
-    }
 
     private static string PythonCommand() =>
         Environment.GetEnvironmentVariable("MVF_PYTHON")

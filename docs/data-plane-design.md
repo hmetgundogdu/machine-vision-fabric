@@ -133,6 +133,36 @@ Slice A touchpoints: new `Mvf.Transport.SharedMemory` (arena + `FrameHandle`); `
 uses it (arena path passed to the child via env at spawn; handle in the execute message); Python SDK
 maps the arena and reads at the handle; `protocol/README.md` documents the shm frame form.
 
-### Slice B — .NET producers/consumers in the arena
-Module-requested allocation (processor/sink data outputs), graph-derived refcounts for fan-out, the
-`IDataPlane` seam in Abstractions, context slot. **Slice C = M2.5**: module state slot + snapshot + resume.
+### Slice B — engine-owned arena + graph-aware routing (decisions agreed 2026-07-22)
+Chosen appetite: **the depth machinery** (the graph-aware differentiator), not just more polyglot
+breadth. Agreed decisions:
+- **`IDataPlane` seam in `Mvf.Abstractions`.** The engine owns one data plane per run and references
+  only the interface; the concrete file-backed arena stays in the transport project (core never
+  references it). Composition wires one instance, shared by the executor and the worker host.
+- **Payload-generic, not frame-locked.** The arena stores **opaque bytes**; the **type comes from the
+  static typed graph** (`data/frame` today, `data/tensor` etc. later) — nothing in the arena is
+  frame-specific. `FrameHandle` → **`ArenaHandle(offset,length)`**; the frame-specific
+  `ArenaFrameEnvelope` is just one typed adapter over a handle. The `dataType` also rides the stdio
+  handle message so a worker knows what it is reading.
+- **Transport selection is per-edge, from the static graph.** Both endpoints in-process .NET →
+  **identity** (heap reference, zero copy). A port with **≥1 worker consumer** → publish the payload
+  into the arena **once** and route the same arena-backed value to *all* consumers of that port.
+- **Refcount = number of consumers of that port** (precomputed from the graph), set at publish. Each
+  consumer's completion decrements; **reclaim at 0** (cycle boundary at the latest). The free-list +
+  refcount table stay **engine-side (.NET managed)** — Python still never allocates; it only reads an
+  input handle (and, later, writes a pre-assigned output handle).
+
+**Staging (build infra first, per user):**
+- **B.1 — infra, behavior-preserving:** `IDataPlane` + `ArenaHandle` in Abstractions; arena implements
+  it and gains a refcount (publish-with-count / release-to-zero) + lazy backing file; the data plane is
+  injected (engine-owned) rather than self-created by the host. Slice A's path keeps working through
+  the seam.
+- **B.2 — graph-aware routing:** precompute per-port consumer counts + worker-vs-inproc; publish-once +
+  route an `ArenaFrameEnvelope` to all consumers; executor decrements after each consumer. Demo: one
+  .NET source frame fans out to **two** Python nodes sharing **one** arena copy (refcount 2), reclaimed
+  at cycle end.
+
+**Deferred (after the infra):** the **transformer** capability (a worker that emits a *new* frame — a
+new capability .NET itself lacks; engine pre-allocates the output slot and passes both handles in
+`execute`, so no child-side allocator) and the **context slot**. **Slice C = M2.5**: module state slot
++ snapshot + resume.
