@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Mvf.Engine.Modules;
 using Mvf.Graph.Integrations;
 using Mvf.Graph.Pipelines;
 
@@ -27,7 +28,7 @@ public sealed class PipelineExpander
     private const string ClassificationSignalType = "control/classification";
     private const string BooleanGateSignalType = "control/boolean-gate";
 
-    public PipelineDefinition Expand(string pipelineJson, IReadOnlyDictionary<string, ModuleManifest> catalog)
+    public PipelineDefinition Expand(string pipelineJson, IReadOnlyDictionary<string, ModuleCatalogEntry> catalog)
     {
         ArgumentNullException.ThrowIfNull(pipelineJson);
         ArgumentNullException.ThrowIfNull(catalog);
@@ -111,7 +112,7 @@ public sealed class PipelineExpander
 
     private static PipelineNodeDefinition ExpandNode(
         JsonObject nodeObj,
-        IReadOnlyDictionary<string, ModuleManifest> catalog,
+        IReadOnlyDictionary<string, ModuleCatalogEntry> catalog,
         IReadOnlyDictionary<string, IReadOnlyList<string>> leavingPortsByNode)
     {
         // Already rich? Pass it straight through the serializer.
@@ -141,22 +142,22 @@ public sealed class PipelineExpander
     private static PipelineNodeDefinition ExpandModuleNode(
         string id,
         JsonObject nodeObj,
-        IReadOnlyDictionary<string, ModuleManifest> catalog)
+        IReadOnlyDictionary<string, ModuleCatalogEntry> catalog)
     {
         var moduleId = GetString(nodeObj, "module")!;
-        if (!catalog.TryGetValue(moduleId, out var manifest))
+        if (!catalog.TryGetValue(moduleId, out var entry))
         {
             throw new PipelineExpansionException(
                 $"Node '{id}' references unknown module '{moduleId}'. " +
                 "Ensure a module.json with that id exists under the integrations root.");
         }
 
-        var (category, inputs, outputs) = StandardModulePorts(id, manifest.Kind);
+        var (category, inputs, outputs) = StandardModulePorts(id, entry.Manifest.Kind);
 
         return new PipelineNodeDefinition
         {
             Id = id,
-            DisplayName = GetString(nodeObj, "displayName") ?? manifest.Name,
+            DisplayName = GetString(nodeObj, "displayName") ?? entry.Manifest.Name,
             Kind = "integration-module",
             Category = category,
             ModuleId = moduleId,

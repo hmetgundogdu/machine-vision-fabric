@@ -1,0 +1,59 @@
+{
+  "name": "py-brightness-demo",
+  "version": "1.0.0",
+  "description": "Polyglot demo: camera frames are classified by an OUT-OF-PROCESS Python brightness classifier (py.brightness-classifier), and a switch routes 'black' vs 'ok' frames into separate datasets. The classifier runs in Python over stdio; the source, fork, switch and sinks run in .NET — all in one typed graph. The engine auto-wires the Python worker from the module's runtime; the pipeline never mentions processes or stdio.",
+  "nodes": [
+    {
+      "id": "camera1",
+      "module": "mvf.realworld-cognex-camera",
+      "displayName": "Cognex Camera",
+      "config": {
+        "ipAddress": "10.159.130.87",
+        "cameraId": "cognex-cam-1",
+        "hmiPort": 8087,
+        "acquisitionMode": "passive-listen"
+      }
+    },
+    {
+      "id": "fork1",
+      "primitive": "fork",
+      "displayName": "Fork"
+    },
+    {
+      "id": "bright1",
+      "module": "py.brightness-classifier",
+      "displayName": "Brightness Classifier (Python)"
+    },
+    {
+      "id": "route1",
+      "primitive": "switch",
+      "displayName": "Route by brightness"
+    },
+    {
+      "id": "saveBlack",
+      "module": "mvf.dataset-writer",
+      "displayName": "Save Black Frames",
+      "config": {
+        "outputRoot": "datasets/black",
+        "sessionPrefix": "black"
+      }
+    },
+    {
+      "id": "saveOk",
+      "module": "mvf.dataset-writer",
+      "displayName": "Save OK Frames",
+      "config": {
+        "outputRoot": "datasets/ok",
+        "sessionPrefix": "ok"
+      }
+    }
+  ],
+  "edges": [
+    { "from": "camera1.frame", "to": "fork1.frame" },
+    { "from": "fork1.toClass", "to": "bright1.frame" },
+    { "from": "fork1.toRoute", "to": "route1.frame" },
+    { "from": "bright1.class",  "to": "route1.class" },
+    { "from": "route1.black",   "to": "saveBlack.frame" },
+    { "from": "route1.ok",      "to": "saveOk.frame" }
+  ]
+}

@@ -395,6 +395,7 @@ IHost BuildHost(IReadOnlyDictionary<string, string?>? overrides = null)
     builder.Services.AddSingleton<IPipelineDefinitionValidator, PipelineDefinitionValidator>();
     builder.Services.AddSingleton<ModuleCatalog>();
     builder.Services.AddSingleton<PipelineExpander>();
+    builder.Services.AddSingleton<IOutOfProcessModuleHost, Mvf.Hosting.Worker.StdioModuleHost>();
     builder.Services.AddSingleton<IPipelineNodeActivator, PipelineNodeActivator>();
     builder.Services.AddSingleton<IPipelineGraphExecutor, PipelineGraphExecutor>();
     builder.Services.AddTransient<IPipelineExecutionHost, PipelineExecutionHost>();

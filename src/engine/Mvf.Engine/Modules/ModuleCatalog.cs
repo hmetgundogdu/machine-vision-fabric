@@ -4,12 +4,18 @@ using Mvf.Graph.Integrations;
 
 namespace Mvf.Engine.Modules;
 
+/// <summary>One module's metadata plus the directory its <c>module.json</c> lives in.</summary>
+/// <param name="Manifest">The parsed manifest.</param>
+/// <param name="Directory">Absolute directory containing the manifest (and the module's entry).</param>
+public sealed record ModuleCatalogEntry(ModuleManifest Manifest, string Directory);
+
 /// <summary>
 /// Reads <c>module.json</c> manifests under a plugin root WITHOUT loading any assembly.
 /// Lean pipeline expansion needs only each module's <see cref="ModuleManifest.Kind"/> and
-/// <see cref="ModuleManifest.Runtime"/> to derive standard ports; it must not pay the cost
-/// (or the failure risk) of loading .NET plugins. This is the read-only, metadata-only
-/// sibling of <c>IntegrationModuleLoader</c>.
+/// <see cref="ModuleManifest.Runtime"/> to derive standard ports; out-of-process activation
+/// additionally needs the module's directory and entry — all of which come from the manifest,
+/// no plugin load required. This is the read-only, metadata-only sibling of
+/// <c>IntegrationModuleLoader</c>.
 /// </summary>
 public sealed class ModuleCatalog
 {
@@ -21,14 +27,14 @@ public sealed class ModuleCatalog
     };
 
     /// <summary>
-    /// Scans <paramref name="pluginRoot"/> recursively and returns each module's manifest
-    /// keyed by its id (case-insensitive). Build-artifact directories (obj/ref/refint) are
-    /// skipped; when a module appears under both the source tree and a <c>bin/</c> copy, the
-    /// shallower path wins so the result is deterministic.
+    /// Scans <paramref name="pluginRoot"/> recursively and returns each module's entry keyed by
+    /// its id (case-insensitive). Build-artifact directories (obj/ref/refint) are skipped; when a
+    /// module appears under both the source tree and a <c>bin/</c> copy, the shallower path wins
+    /// so the result is deterministic.
     /// </summary>
-    public IReadOnlyDictionary<string, ModuleManifest> Load(string pluginRoot)
+    public IReadOnlyDictionary<string, ModuleCatalogEntry> Load(string pluginRoot)
     {
-        var byId = new Dictionary<string, ModuleManifest>(StringComparer.OrdinalIgnoreCase);
+        var byId = new Dictionary<string, ModuleCatalogEntry>(StringComparer.OrdinalIgnoreCase);
         var chosenPathById = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         var fullRoot = Path.GetFullPath(pluginRoot);
@@ -56,7 +62,8 @@ public sealed class ModuleCatalog
                 continue;
             }
 
-            byId[manifest.Id] = manifest;
+            var directory = Path.GetDirectoryName(Path.GetFullPath(manifestPath)) ?? fullRoot;
+            byId[manifest.Id] = new ModuleCatalogEntry(manifest, directory);
             chosenPathById[manifest.Id] = manifestPath;
         }
 

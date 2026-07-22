@@ -43,5 +43,18 @@ internal sealed class FrameClassifierNodeRunner(string nodeId, IFrameClassifier 
         return NodeExecutionResult.Single("class", PortValue.FromControl(signal));
     }
 
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    // The classifier may own external resources — an out-of-process worker (Python/Node)
+    // holds a child process — so dispose it when it is disposable.
+    public async ValueTask DisposeAsync()
+    {
+        switch (classifier)
+        {
+            case IAsyncDisposable asyncDisposable:
+                await asyncDisposable.DisposeAsync();
+                break;
+            case IDisposable disposable:
+                disposable.Dispose();
+                break;
+        }
+    }
 }

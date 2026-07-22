@@ -6,17 +6,17 @@ namespace Mvf.Engine.Tests;
 
 public sealed class PipelineExpanderTests
 {
-    private static readonly IReadOnlyDictionary<string, ModuleManifest> Catalog = new Dictionary<string, ModuleManifest>(StringComparer.OrdinalIgnoreCase)
+    private static readonly IReadOnlyDictionary<string, ModuleCatalogEntry> Catalog = new Dictionary<string, ModuleCatalogEntry>(StringComparer.OrdinalIgnoreCase)
     {
-        ["mvf.cam"] = Manifest("mvf.cam", IntegrationCapabilityKind.Source),
-        ["mvf.filter"] = Manifest("mvf.filter", IntegrationCapabilityKind.Processor),
-        ["mvf.classify"] = Manifest("mvf.classify", IntegrationCapabilityKind.Classifier),
-        ["mvf.gate"] = Manifest("mvf.gate", IntegrationCapabilityKind.Gate),
-        ["mvf.sink"] = Manifest("mvf.sink", IntegrationCapabilityKind.Sink)
+        ["mvf.cam"] = Entry("mvf.cam", IntegrationCapabilityKind.Source),
+        ["mvf.filter"] = Entry("mvf.filter", IntegrationCapabilityKind.Processor),
+        ["mvf.classify"] = Entry("mvf.classify", IntegrationCapabilityKind.Classifier),
+        ["mvf.gate"] = Entry("mvf.gate", IntegrationCapabilityKind.Gate),
+        ["mvf.sink"] = Entry("mvf.sink", IntegrationCapabilityKind.Sink)
     };
 
-    private static ModuleManifest Manifest(string id, IntegrationCapabilityKind kind) =>
-        new() { Id = id, Name = id, Version = "1.0.0", Kind = kind, Entry = $"{id}.dll" };
+    private static ModuleCatalogEntry Entry(string id, IntegrationCapabilityKind kind) =>
+        new(new ModuleManifest { Id = id, Name = id, Version = "1.0.0", Kind = kind, Entry = $"{id}.dll" }, Directory: id);
 
     private static PipelineExpander Expander => new();
 
@@ -206,8 +206,8 @@ public sealed class PipelineExpanderTests
         var catalog = new ModuleCatalog().Load(Path.Combine(repoRoot, "modules"));
 
         Assert.True(catalog.ContainsKey("mvf.black-screen-check"));
-        Assert.Equal(IntegrationCapabilityKind.Processor, catalog["mvf.black-screen-check"].Kind);
-        Assert.Equal("python", catalog["py.brightness-classifier"].Runtime);
+        Assert.Equal(IntegrationCapabilityKind.Processor, catalog["mvf.black-screen-check"].Manifest.Kind);
+        Assert.Equal("python", catalog["py.brightness-classifier"].Manifest.Runtime);
     }
 
     private static string FindRepoRoot()

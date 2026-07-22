@@ -6,6 +6,7 @@ using Mvf.Graph.Pipelines;
 using Mvf.Graph.Simulation;
 using Mvf.Abstractions;
 using Mvf.Engine.Execution.NodeRunners;
+using Mvf.Engine.Modules;
 
 namespace Mvf.Engine.Execution;
 
@@ -14,14 +15,18 @@ namespace Mvf.Engine.Execution;
 ///
 /// Resolution rules (by node kind):
 /// <list type="bullet">
-///   <item><c>integration-module</c> — finds the module by ModuleId, casts to the correct interface</item>
+///   <item><c>integration-module</c> — finds the module by ModuleId, casts to the correct interface.
+///     A non-<c>dotnet</c> runtime (Python/Node) is hosted out-of-process via
+///     <see cref="IOutOfProcessModuleHost"/> instead of being loaded as an assembly.</item>
 ///   <item><c>embedded-primitive</c> — creates a built-in runner for <c>if</c>, <c>switch</c>, etc.</item>
 ///   <item><c>runtime-builtin</c> — creates a built-in runner for dataset-writer, folder-sequence-source, etc.</item>
 /// </list>
 /// </summary>
 public sealed class PipelineNodeActivator(
     IIntegrationModuleLoader integrationModuleLoader,
-    ISimulatorSourceCatalog simulatorSourceCatalog) : IPipelineNodeActivator
+    ISimulatorSourceCatalog simulatorSourceCatalog,
+    ModuleCatalog moduleCatalog,
+    IOutOfProcessModuleHost? outOfProcessModuleHost = null) : IPipelineNodeActivator
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -32,7 +37,7 @@ public sealed class PipelineNodeActivator(
     {
         INodeRunner runner = node.Kind switch
         {
-            "integration-module" => CreateIntegrationModuleRunner(node, options),
+            "integration-module" => await CreateIntegrationModuleRunnerAsync(node, options, cancellationToken),
             "embedded-primitive" => CreateEmbeddedPrimitiveRunner(node),
             "runtime-builtin" => CreateRuntimeBuiltinRunner(node, options),
             _ => throw new InvalidOperationException(
@@ -44,12 +49,24 @@ public sealed class PipelineNodeActivator(
         return runner;
     }
 
-    private INodeRunner CreateIntegrationModuleRunner(PipelineNodeDefinition node, PipelineExecutionOptions options)
+    private async Task<INodeRunner> CreateIntegrationModuleRunnerAsync(
+        PipelineNodeDefinition node,
+        PipelineExecutionOptions options,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(node.ModuleId))
         {
             throw new InvalidOperationException(
                 $"Integration-module node '{node.Id}' is missing ModuleId.");
+        }
+
+        // A non-.NET module is hosted out-of-process. Its runtime is read from the manifest
+        // catalog (metadata only, no assembly load), so we never try to load it as a plugin.
+        var catalog = moduleCatalog.Load(options.IntegrationsRoot);
+        if (catalog.TryGetValue(node.ModuleId, out var entry)
+            && !string.Equals(entry.Manifest.Runtime, "dotnet", StringComparison.OrdinalIgnoreCase))
+        {
+            return await CreateOutOfProcessRunnerAsync(node, entry, cancellationToken);
         }
 
         var modules = integrationModuleLoader.LoadModules(options.IntegrationsRoot);
@@ -83,6 +100,36 @@ public sealed class PipelineNodeActivator(
 
             _ => throw new InvalidOperationException(
                 $"Node '{node.Id}' has category '{node.Category}' but the loaded module type is not compatible.")
+        };
+    }
+
+    private async Task<INodeRunner> CreateOutOfProcessRunnerAsync(
+        PipelineNodeDefinition node,
+        ModuleCatalogEntry entry,
+        CancellationToken cancellationToken)
+    {
+        if (outOfProcessModuleHost is null)
+        {
+            throw new InvalidOperationException(
+                $"Node '{node.Id}' uses module '{entry.Manifest.Id}' (runtime '{entry.Manifest.Runtime}'), " +
+                "which needs an out-of-process module host, but none is registered.");
+        }
+
+        var activation = new OutOfProcessModuleActivation(
+            ModuleId: entry.Manifest.Id,
+            Runtime: entry.Manifest.Runtime,
+            EntryPath: Path.Combine(entry.Directory, entry.Manifest.Entry),
+            WorkingDirectory: entry.Directory);
+
+        return node.Category switch
+        {
+            "classify" => new FrameClassifierNodeRunner(
+                node.Id,
+                await outOfProcessModuleHost.CreateClassifierAsync(activation, cancellationToken)),
+
+            _ => throw new InvalidOperationException(
+                $"Out-of-process module '{entry.Manifest.Id}' (node '{node.Id}') currently supports only the " +
+                $"'classify' category, not '{node.Category}'. Other capabilities arrive in later slices.")
         };
     }
 

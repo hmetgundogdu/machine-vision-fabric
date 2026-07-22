@@ -79,7 +79,7 @@ is now lean. Tests 39/39.
 | ID | Work item | Status |
 |----|-----------|--------|
 | M0 | Draw seams + folder/architecture; design docs | 🟡 In progress (docs + north-star folder/project rename done; ITransport/IModuleHost seams deferred to M1/M2) |
-| M1 | Out-of-process module host (Python), control plane over local **stdio** | 🟡 Slice 1 done — Python classifier runs out-of-process, plugs into IFrameClassifier; e2e test green |
+| M1 | Out-of-process module host (Python), control plane over local **stdio** | 🟢 Slices 1–2 done — Python classifier auto-wired from its manifest `runtime`; `IOutOfProcessModuleHost` seam + `StdioModuleHost`; real-python e2e test green |
 | M2 | Our own **shared-memory** zero-copy data plane, graph-aware (no network) — see `data-plane-design.md` | 🟢 Design agreed; impl not started |
 | M2.5 | **Snapshot + module-state recovery** (engine-allocated state + context slot, cycle-boundary snapshots, resume-after-crash) | ⬜ Not started (ambitious; after M2 core) |
 | M3 | Hardening: backpressure, crash recovery, warm pools, cross-process observability | ⬜ Not started |
@@ -106,9 +106,15 @@ is now lean. Tests 39/39.
   `WorkerFrameClassifier : IFrameClassifier` that spawns the Python process and drops into the
   existing FrameClassifierNodeRunner unchanged. End-to-end test spawns python3 and asserts
   black/ok classification. Targets: Python + Node.js + out-of-proc .NET (same JSON protocol).
-- **Slice 2 (next):** manifest `runtime`/`entry` discovery + activator wiring so a
-  `runtime: "python"` module is picked up automatically in a pipeline.json (today the worker
-  host is exercised directly by the test, not yet auto-wired by the loader).
+- **Slice 2 (done):** a `runtime: "python"` classify node is auto-wired. The activator reads the
+  module's `runtime`/`entry` from the metadata-only `ModuleCatalog` (no DLL load); for a non-`dotnet`
+  runtime it goes through the `IOutOfProcessModuleHost` seam (impl `Mvf.Hosting.Worker.StdioModuleHost`),
+  which spawns the worker and returns a `WorkerFrameClassifier` that drops into the existing
+  `FrameClassifierNodeRunner`. The core scheduler/activator never reference stdio/Python — hosting is
+  an adapter behind the seam. `FrameClassifierNodeRunner` now disposes a worker-backed classifier so the
+  child process is shut down. Demo: `packages/py-brightness-demo/pipeline.json` (lean) routes Python
+  `black`/`ok` labels through a `switch`; a real-python e2e test asserts classification via the activator.
+  Next capabilities (processor/sink over a worker) reuse the same seam.
 - **Decision 2:** ✅ Resolved — control plane = **stdio + JSON** (protobuf later), no network/gRPC.
 
 ### M2 — Shared-memory data plane ⛔ GATE
