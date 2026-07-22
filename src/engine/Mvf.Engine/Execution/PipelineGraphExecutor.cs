@@ -170,8 +170,10 @@ public sealed class PipelineGraphExecutor(
 
                     if (arenaActive)
                     {
+                        // Phase 1 — route outputs, AddRef arena buffers for the edges they now occupy.
                         await RouteOutputsWithDataPlaneAsync(
-                            node.Id, result, portBus, outgoingByPort!, workerNodeIds, dataPlane!, cancellationToken);
+                            node.Id, result, inputs, portBus, outgoingByPort!, workerNodeIds, dataPlane!, cancellationToken);
+                        // Phase 2 — this node has run, so it no longer occupies its arena input edges.
                         ReleaseArenaInputs(inputs, dataPlane!);
                     }
                     else
@@ -282,29 +284,71 @@ public sealed class PipelineGraphExecutor(
     private static string PortKey(string nodeId, string port) => $"{nodeId} {port}";
 
     /// <summary>
-    /// Routes a node's outputs with graph-aware transport selection: a heap frame that fans out to one
-    /// or more worker consumers is published into the arena once (refcount = worker edges), and the
-    /// arena handle is routed to workers while in-process consumers keep the heap frame. Everything else
-    /// (control signals, in-process-only frames, already-arena frames, a full/oversized arena) is routed
-    /// by reference, unchanged.
+    /// Routes a node's outputs with graph-aware transport selection and <b>live-edge-occupancy</b>
+    /// reference counting — a buffer's refcount equals the number of edges currently carrying it.
+    /// <list type="bullet">
+    ///   <item><b>Heap frame</b> that fans out to workers: published into the arena once (refcount =
+    ///   worker edges); the arena handle goes to workers, in-process consumers keep the heap frame.</item>
+    ///   <item><b>Arena frame</b> (a worker's output, or a pass-through node re-emitting an arena input):
+    ///   every consumer reads the arena, so it is <see cref="IDataPlane.AddRef"/>'d by the number of
+    ///   outgoing edges and delivered to all of them.</item>
+    ///   <item>Control signals and in-process-only frames are routed by reference, unchanged.</item>
+    /// </list>
+    /// A newly produced arena buffer (not one of this node's inputs) carries a producer hold from
+    /// reservation; once routed, that hold is dropped so its refcount is exactly its live edge count.
+    /// AddRef runs here (Phase 1), before the caller releases this node's arena inputs (Phase 2), so a
+    /// forwarded buffer never transiently reaches zero.
     /// </summary>
     private static async Task RouteOutputsWithDataPlaneAsync(
         string sourceNodeId,
         NodeExecutionResult result,
+        NodeExecutionInputs inputs,
         GraphPortBus portBus,
         IReadOnlyDictionary<string, List<PipelineEdgeDefinition>> outgoingByPort,
         IReadOnlySet<string> workerNodeIds,
         IDataPlane dataPlane,
         CancellationToken cancellationToken)
     {
+        // Arena buffers this node received as inputs — an output carrying one of these is a forwarded
+        // pass-through, not a newly produced buffer, so it keeps no producer hold to drop.
+        var inputArenaHandles = new HashSet<ArenaHandle>();
+        foreach (var (_, value) in inputs.All)
+        {
+            if (value.Frame is ArenaFrameEnvelope arenaInput)
+            {
+                inputArenaHandles.Add(arenaInput.Handle);
+            }
+        }
+
+        var producedArenaHandles = new HashSet<ArenaHandle>();
+
         foreach (var (portName, value) in result.All)
         {
-            if (!outgoingByPort.TryGetValue(PortKey(sourceNodeId, portName), out var edges))
+            var edges = outgoingByPort.TryGetValue(PortKey(sourceNodeId, portName), out var e) ? e : null;
+
+            if (value.Frame is ArenaFrameEnvelope arenaFrame)
+            {
+                // Arena-born or forwarded: every consumer reads the arena in place.
+                var edgeCount = edges?.Count ?? 0;
+                dataPlane.AddRef(arenaFrame.Handle, edgeCount);
+                if (edges is not null)
+                {
+                    foreach (var edge in edges)
+                    {
+                        portBus.Set(edge.To.NodeId, edge.To.Port, value);
+                    }
+                }
+
+                producedArenaHandles.Add(arenaFrame.Handle);
+                continue;
+            }
+
+            if (edges is null)
             {
                 continue;
             }
 
-            if (value.Frame is not null and not ArenaFrameEnvelope)
+            if (value.Frame is not null)
             {
                 var workerEdgeCount = edges.Count(edge => workerNodeIds.Contains(edge.To.NodeId));
                 if (workerEdgeCount > 0
@@ -323,6 +367,16 @@ public sealed class PipelineGraphExecutor(
             foreach (var edge in edges)
             {
                 portBus.Set(edge.To.NodeId, edge.To.Port, value);
+            }
+        }
+
+        // Drop the producer hold on buffers born at this node (a worker's output). Forwarded input
+        // buffers keep their occupancy and are released in Phase 2 instead.
+        foreach (var handle in producedArenaHandles)
+        {
+            if (!inputArenaHandles.Contains(handle))
+            {
+                dataPlane.Release(handle);
             }
         }
     }

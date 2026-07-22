@@ -74,6 +74,80 @@ public sealed class PipelineGraphExecutorDataPlaneTests
         Assert.True(dataPlane.AllReclaimed);
     }
 
+    [Fact]
+    public async Task Execute_TransformerOutputThroughForkToTwoSinks_RefcountsBalance()
+    {
+        // Live-edge-occupancy: a worker transformer produces an arena-born frame that a fork re-emits to
+        // two sinks. AddRef (for the edges a buffer now occupies) runs before the consumed input is
+        // released, so a forwarded buffer never transiently hits zero — and everything is reclaimed with
+        // no double-free.
+        var repo = FindRepoRoot();
+        var dataPlane = new RecordingDataPlane();
+
+        var frame = (IFrameEnvelope)new Mvf.Abstractions.Frames.BinaryFrameEnvelope("cam1", 1, "f1.bmp", [10, 20, 30], "image/bmp");
+        var activator = new FakeActivator(
+            ("source1", new FakeSourceRunner("source1", [frame])),
+            ("trans1", new FakeTransformerRunner("trans1", dataPlane)),
+            ("fork1", new FakeForkRunner("fork1")),
+            ("sinkA", new FrameConsumingRunner("sinkA")),
+            ("sinkB", new FrameConsumingRunner("sinkB")));
+
+        var executor = new PipelineGraphExecutor(activator, dataPlane, new ModuleCatalog());
+        var options = new PipelineExecutionOptions
+        {
+            PackageRoot = ".",
+            IntegrationsRoot = Path.Combine(repo, "modules"),
+            MaxCycles = 1
+        };
+
+        var report = await executor.ExecuteAsync(BuildTransformerForkToSinks(), options, CancellationToken.None);
+
+        Assert.True(report.Succeeded);
+        Assert.Equal(1, dataPlane.ReserveCount);      // the transformer reserved one output slot
+        Assert.False(dataPlane.DoubleFreeDetected);   // never released a reclaimed slot
+        Assert.True(dataPlane.AllReclaimed);          // input copy and transformer output both back at zero
+    }
+
+    private static PipelineDefinition BuildTransformerForkToSinks() => new()
+    {
+        Name = "transform-fork-sinks",
+        Nodes =
+        [
+            SourceNode("source1"),
+            new PipelineNodeDefinition
+            {
+                Id = "trans1", Kind = "integration-module", Category = "compute", ModuleId = "py.invert-transformer",
+                Inputs = [new PipelinePortDefinition { Name = "frame", Channel = "data", DataType = "data/frame" }],
+                Outputs = [new PipelinePortDefinition { Name = "frame", Channel = "data", DataType = "data/frame" }]
+            },
+            new PipelineNodeDefinition
+            {
+                Id = "fork1", Kind = "embedded-primitive", Category = "flow-control", PrimitiveType = "fork",
+                Inputs = [new PipelinePortDefinition { Name = "frame", Channel = "data", DataType = "data/frame" }],
+                Outputs =
+                [
+                    new PipelinePortDefinition { Name = "a", Channel = "data", DataType = "data/frame", AllowMultipleEdges = true },
+                    new PipelinePortDefinition { Name = "b", Channel = "data", DataType = "data/frame", AllowMultipleEdges = true }
+                ]
+            },
+            SinkNode("sinkA"),
+            SinkNode("sinkB")
+        ],
+        Edges =
+        [
+            DataEdge("e1", "source1", "frame", "trans1", "frame"),
+            DataEdge("e2", "trans1", "frame", "fork1", "frame"),
+            DataEdge("e3", "fork1", "a", "sinkA", "frame"),
+            DataEdge("e4", "fork1", "b", "sinkB", "frame")
+        ]
+    };
+
+    private static PipelineNodeDefinition SinkNode(string id) => new()
+    {
+        Id = id, Kind = "integration-module", Category = "output", ModuleId = "mvf.dataset-writer",
+        Inputs = [new PipelinePortDefinition { Name = "frame", Channel = "data", DataType = "data/frame" }]
+    };
+
     private static PipelineDefinition BuildFanoutToTwoWorkers() => new()
     {
         Name = "fanout",
@@ -149,9 +223,11 @@ public sealed class PipelineGraphExecutorDataPlaneTests
         private readonly Dictionary<long, PayloadDescriptor> _descriptorByOffset = [];
 
         public int PublishCount { get; private set; }
+        public int ReserveCount { get; private set; }
         public int ReleaseCount { get; private set; }
         public int LastReferenceCount { get; private set; }
-        public bool AllReclaimed => _refByOffset.Values.All(r => r <= 0);
+        public bool DoubleFreeDetected { get; private set; }
+        public bool AllReclaimed => _refByOffset.Values.All(r => r == 0);
 
         public string BackingPath => "/tmp/recording-arena";
         public int SlotSize => int.MaxValue;
@@ -168,6 +244,24 @@ public sealed class PipelineGraphExecutorDataPlaneTests
             return true;
         }
 
+        public bool TryReserve(out ArenaHandle handle)
+        {
+            var offset = _nextOffset;
+            _nextOffset += (1 << 20);
+            handle = new ArenaHandle(offset, 1 << 20);
+            _refByOffset[offset] = 1; // producer hold
+            ReserveCount++;
+            return true;
+        }
+
+        public void AddRef(ArenaHandle handle, int count)
+        {
+            if (count > 0 && _refByOffset.TryGetValue(handle.Offset, out var current) && current > 0)
+            {
+                _refByOffset[handle.Offset] = current + count;
+            }
+        }
+
         public bool TryReadDescriptor(ArenaHandle handle, out PayloadDescriptor descriptor) =>
             _descriptorByOffset.TryGetValue(handle.Offset, out descriptor);
 
@@ -178,6 +272,12 @@ public sealed class PipelineGraphExecutorDataPlaneTests
             ReleaseCount++;
             if (_refByOffset.TryGetValue(handle.Offset, out var count))
             {
+                if (count <= 0)
+                {
+                    DoubleFreeDetected = true;
+                    return;
+                }
+
                 _refByOffset[handle.Offset] = count - 1;
             }
         }
@@ -219,6 +319,43 @@ public sealed class PipelineGraphExecutorDataPlaneTests
         {
             _ = inputs.Get("frame"); // reads its input; the engine releases the handle after this returns
             return Task.FromResult(NodeExecutionResult.NoOutput);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>Mimics a worker transformer: reserves an output slot and emits an arena-born frame.</summary>
+    private sealed class FakeTransformerRunner(string nodeId, IDataPlane dataPlane) : INodeRunner
+    {
+        public string NodeId { get; } = nodeId;
+        public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task<NodeExecutionResult> ExecuteAsync(NodeExecutionInputs inputs, CancellationToken cancellationToken)
+        {
+            if (inputs.Get("frame")?.Frame is not { } input || !dataPlane.TryReserve(out var handle))
+            {
+                return Task.FromResult(NodeExecutionResult.NoOutput);
+            }
+
+            var output = new ArenaFrameEnvelope(dataPlane, new ArenaHandle(handle.Offset, 3), input);
+            return Task.FromResult(NodeExecutionResult.Single("frame", PortValue.FromFrame(output)));
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>Pass-through fork: re-emits its input frame on both output ports.</summary>
+    private sealed class FakeForkRunner(string nodeId) : INodeRunner
+    {
+        public string NodeId { get; } = nodeId;
+        public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task<NodeExecutionResult> ExecuteAsync(NodeExecutionInputs inputs, CancellationToken cancellationToken)
+        {
+            var frame = inputs.Get("frame");
+            return Task.FromResult(frame?.Frame is null
+                ? NodeExecutionResult.NoOutput
+                : NodeExecutionResult.FromPairs(("a", frame), ("b", frame)));
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

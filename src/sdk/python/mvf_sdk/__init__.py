@@ -16,7 +16,7 @@ import json
 import mmap
 import struct
 
-__all__ = ["run_classifier", "Payload", "MediaType", "ElementType"]
+__all__ = ["run_classifier", "run_processor", "Payload", "Output", "blob", "tensor", "MediaType", "ElementType"]
 
 # ---- typed-payload descriptor (must match Mvf.Abstractions.PayloadDescriptor) ----
 
@@ -55,6 +55,14 @@ _NUMPY_DTYPE = {
     ElementType.UINT32: "u4", ElementType.INT32: "i4",
     ElementType.UINT64: "u8", ElementType.INT64: "i8",
     ElementType.FLOAT16: "f2", ElementType.FLOAT32: "f4", ElementType.FLOAT64: "f8",
+}
+
+_ELEMENT_SIZE = {
+    ElementType.UINT8: 1, ElementType.INT8: 1,
+    ElementType.UINT16: 2, ElementType.INT16: 2,
+    ElementType.UINT32: 4, ElementType.INT32: 4,
+    ElementType.UINT64: 8, ElementType.INT64: 8,
+    ElementType.FLOAT16: 2, ElementType.BFLOAT16: 2, ElementType.FLOAT32: 4, ElementType.FLOAT64: 8,
 }
 
 
@@ -97,6 +105,69 @@ def _read_descriptor(buffer, offset):
     return media_type, element_type, shape, payload_length
 
 
+def _write_descriptor(buffer, offset, media_type, element_type, shape, payload, capacity):
+    """Write a descriptor header + payload at ``offset`` (must match Mvf.Abstractions.PayloadDescriptor)."""
+    rank = len(shape)
+    if rank > _MAX_RANK:
+        raise ValueError("output rank {} exceeds max".format(rank))
+    element_size = _ELEMENT_SIZE[element_type]
+    length = element_size
+    for dim in shape:
+        length *= dim
+    if length != len(payload):
+        raise ValueError("output payload is {} bytes but the descriptor implies {}".format(len(payload), length))
+    if length > capacity:
+        raise ValueError("output payload {} exceeds the reserved slot capacity {}".format(length, capacity))
+
+    strides = [0] * rank
+    running = element_size
+    for i in range(rank - 1, -1, -1):
+        strides[i] = running
+        running *= shape[i]
+
+    struct.pack_into("<I", buffer, offset, _MAGIC)
+    struct.pack_into("<H", buffer, offset + 4, _VERSION)
+    buffer[offset + 6] = 1  # flags: C-contiguous
+    struct.pack_into("<I", buffer, offset + 8, 0)  # epoch
+    struct.pack_into("<H", buffer, offset + 12, media_type)
+    buffer[offset + 14] = element_type
+    buffer[offset + 15] = rank
+    struct.pack_into("<q", buffer, offset + 16, length)
+    for i in range(rank):
+        struct.pack_into("<q", buffer, offset + 24 + i * 8, shape[i])
+        struct.pack_into("<q", buffer, offset + 88 + i * 8, strides[i])
+    buffer[offset + HEADER_SIZE:offset + HEADER_SIZE + length] = payload
+
+
+class Output:
+    """A typed payload a transformer emits. Use :func:`blob` or :func:`tensor` to build one."""
+
+    __slots__ = ("data", "media_type", "element_type", "shape")
+
+    def __init__(self, data, media_type, element_type, shape):
+        self.data = data  # bytes-like
+        self.media_type = media_type
+        self.element_type = element_type
+        self.shape = tuple(shape)
+
+
+def _as_bytes(data):
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data)
+    return bytes(memoryview(data).cast("B"))
+
+
+def blob(data):
+    """A raw byte blob (u8)."""
+    payload = _as_bytes(data)
+    return Output(payload, MediaType.BLOB, ElementType.UINT8, (len(payload),))
+
+
+def tensor(data, element_type, shape, media_type=MediaType.TENSOR):
+    """A typed tensor: bytes-like ``data`` with an ``element_type`` and ``shape``."""
+    return Output(_as_bytes(data), media_type, element_type, tuple(shape))
+
+
 # ---- stdio control loop ----
 
 def _send(obj):
@@ -104,15 +175,27 @@ def _send(obj):
     sys.stdout.flush()
 
 
-def _open_arena():
+def _open_arena(writable=False):
     path = os.environ.get("MVF_ARENA_PATH")
     if not path:
         return None
-    fd = os.open(path, os.O_RDONLY)
+    flags = os.O_RDWR if writable else os.O_RDONLY
+    access = mmap.ACCESS_WRITE if writable else mmap.ACCESS_READ
+    fd = os.open(path, flags)
     try:
-        return mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+        return mmap.mmap(fd, 0, access=access)
     finally:
         os.close(fd)
+
+
+def _read_input(arena_view, frame):
+    shm = frame.get("shm")
+    if shm is None:
+        raise ValueError("frame is missing its shared-memory handle")
+    offset = int(shm["offset"])
+    media_type, element_type, shape, length = _read_descriptor(arena_view, offset)
+    start = offset + HEADER_SIZE
+    return media_type, element_type, shape, arena_view[start:start + length]
 
 
 def run_classifier(module_id, classify):
@@ -141,13 +224,7 @@ def run_classifier(module_id, classify):
             request_id = msg.get("id")
             try:
                 frame = msg.get("frame") or {}
-                shm = frame.get("shm")
-                if shm is None:
-                    raise ValueError("frame is missing its shared-memory handle")
-                offset = int(shm["offset"])
-                media_type, element_type, shape, length = _read_descriptor(arena_view, offset)
-                start = offset + HEADER_SIZE
-                cell = arena_view[start:start + length]
+                media_type, element_type, shape, cell = _read_input(arena_view, frame)
                 try:
                     payload = Payload(media_type, element_type, shape, cell)
                     label, measurement, unit, details = classify(payload, frame)
@@ -164,6 +241,56 @@ def run_classifier(module_id, classify):
                         "details": details,
                     },
                 })
+            except Exception as exc:  # report per-request failure, keep serving
+                _send({"type": "error", "id": request_id, "message": str(exc)})
+    finally:
+        arena_view.release()
+        arena.close()
+
+
+def run_processor(module_id, transform):
+    """Run the stdio loop for a transformer module (frame in -> new frame out).
+
+    ``transform(payload, meta)`` must return an :class:`Output` (see :func:`blob` / :func:`tensor`)
+    or ``None`` to drop the frame. The new frame is written straight into the shared-memory arena.
+    """
+    arena = _open_arena(writable=True)
+    if arena is None:
+        raise RuntimeError("MVF_ARENA_PATH is not set — the shared-memory data plane is required.")
+    arena_view = memoryview(arena)
+    try:
+        _send({"type": "hello", "protocol": 1, "moduleId": module_id, "capability": "processor"})
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            msg = json.loads(line)
+            msg_type = msg.get("type")
+            if msg_type == "shutdown":
+                break
+            if msg_type != "execute":
+                continue
+
+            request_id = msg.get("id")
+            try:
+                frame = msg.get("frame") or {}
+                media_type, element_type, shape, cell = _read_input(arena_view, frame)
+                try:
+                    payload = Payload(media_type, element_type, shape, cell)
+                    output = transform(payload, frame)
+                finally:
+                    cell.release()
+
+                if output is None:
+                    _send({"type": "result", "id": request_id, "frame": None})
+                    continue
+
+                out = msg.get("out") or {}
+                out_offset = int(out["offset"])
+                capacity = int(out["capacity"])
+                data = _as_bytes(output.data)
+                _write_descriptor(arena_view, out_offset, output.media_type, output.element_type, output.shape, data, capacity)
+                _send({"type": "result", "id": request_id, "frame": {"shm": {"offset": out_offset}}})
             except Exception as exc:  # report per-request failure, keep serving
                 _send({"type": "error", "id": request_id, "message": str(exc)})
     finally:

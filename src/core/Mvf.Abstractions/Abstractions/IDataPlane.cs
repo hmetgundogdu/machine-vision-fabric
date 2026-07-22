@@ -49,6 +49,22 @@ public interface IDataPlane
     /// <summary>Opens a zero-copy, read-only stream over the <b>payload</b> bytes (past the header).</summary>
     Stream OpenRead(ArenaHandle handle);
 
+    /// <summary>
+    /// Reserves a free slot for a worker to write its <i>output</i> into, with an initial reference count
+    /// of one (a producer hold). The handle's <c>Length</c> is the maximum payload the worker may write
+    /// (the slot capacity minus the descriptor header). The worker writes <c>[descriptor | payload]</c>
+    /// itself; the engine reads the descriptor back afterwards. Returns <c>false</c> when the arena is
+    /// full. Used for the transformer path (frame-out); the free-list stays engine-side.
+    /// </summary>
+    bool TryReserve(out ArenaHandle handle);
+
+    /// <summary>
+    /// Adds <paramref name="count"/> to the reference count of a still-live <paramref name="handle"/> —
+    /// how many more edges now carry this buffer. Used by graph-aware routing when an arena-backed frame
+    /// is delivered to (or re-emitted onto) consumer edges. A no-op for a reclaimed slot.
+    /// </summary>
+    void AddRef(ArenaHandle handle, int count);
+
     /// <summary>Decrements the reference count for <paramref name="handle"/>; reclaims the slot at zero.</summary>
     void Release(ArenaHandle handle);
 }

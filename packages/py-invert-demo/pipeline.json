@@ -1,0 +1,36 @@
+{
+  "name": "py-invert-demo",
+  "version": "1.0.0",
+  "description": "Polyglot transformer demo: camera frames pass through an OUT-OF-PROCESS Python transformer (py.invert-transformer) that produces a NEW frame, then a .NET sink saves it. The Python module reads the frame and writes its output straight into shared memory — no bytes cross the pipe, no base64. The engine auto-wires the worker from the module's runtime.",
+  "nodes": [
+    {
+      "id": "camera1",
+      "module": "mvf.realworld-cognex-camera",
+      "displayName": "Cognex Camera",
+      "config": {
+        "ipAddress": "10.159.130.87",
+        "cameraId": "cognex-cam-1",
+        "hmiPort": 8087,
+        "acquisitionMode": "passive-listen"
+      }
+    },
+    {
+      "id": "invert1",
+      "module": "py.invert-transformer",
+      "displayName": "Invert (Python)"
+    },
+    {
+      "id": "save",
+      "module": "mvf.dataset-writer",
+      "displayName": "Save Inverted Frames",
+      "config": {
+        "outputRoot": "datasets/inverted",
+        "sessionPrefix": "inverted"
+      }
+    }
+  ],
+  "edges": [
+    { "from": "camera1.frame", "to": "invert1.frame" },
+    { "from": "invert1.frame", "to": "save.frame" }
+  ]
+}

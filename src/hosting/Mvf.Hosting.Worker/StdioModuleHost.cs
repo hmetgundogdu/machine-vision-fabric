@@ -22,6 +22,14 @@ public sealed class StdioModuleHost(IDataPlane dataPlane) : IOutOfProcessModuleH
         return new WorkerFrameClassifier(worker, dataPlane);
     }
 
+    public async Task<IFrameTransformer> CreateTransformerAsync(
+        OutOfProcessModuleActivation activation,
+        CancellationToken cancellationToken)
+    {
+        var worker = await StdioWorkerProcess.StartAsync(BuildLaunchInfo(activation), cancellationToken);
+        return new WorkerFrameTransformer(worker, dataPlane);
+    }
+
     private WorkerLaunchInfo BuildLaunchInfo(OutOfProcessModuleActivation activation) =>
         activation.Runtime.ToLowerInvariant() switch
         {

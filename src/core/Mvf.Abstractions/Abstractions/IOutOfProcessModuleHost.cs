@@ -31,4 +31,13 @@ public interface IOutOfProcessModuleHost
     Task<IFrameClassifier> CreateClassifierAsync(
         OutOfProcessModuleActivation activation,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Launches the worker described by <paramref name="activation"/> and returns an
+    /// <see cref="IFrameTransformer"/> that sends each frame to it and reads back a new frame from the
+    /// data plane. The returned transformer owns the worker process and shuts it down on dispose.
+    /// </summary>
+    Task<IFrameTransformer> CreateTransformerAsync(
+        OutOfProcessModuleActivation activation,
+        CancellationToken cancellationToken);
 }

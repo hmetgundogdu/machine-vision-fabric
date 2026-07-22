@@ -145,6 +145,50 @@ public sealed class SharedMemoryArena : IDataPlane, IDisposable
         }
     }
 
+    public bool TryReserve(out ArenaHandle handle)
+    {
+        handle = default;
+        int slot;
+        lock (_gate)
+        {
+            EnsureInitialized();
+            if (_disposed || _freeSlots!.Count == 0)
+            {
+                return false;
+            }
+
+            slot = _freeSlots.Pop();
+            _refCounts![slot] = 1; // producer hold
+        }
+
+        var offset = (long)slot * _options.SlotSize;
+        handle = new ArenaHandle(offset, _options.SlotSize - PayloadDescriptor.HeaderSize);
+        return true;
+    }
+
+    public void AddRef(ArenaHandle handle, int count)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        var slot = (int)(handle.Offset / _options.SlotSize);
+        lock (_gate)
+        {
+            if (_disposed || _refCounts is null || slot < 0 || slot >= _options.SlotCount)
+            {
+                return;
+            }
+
+            // Only grow a live slot; a reclaimed (zero) slot must not be resurrected.
+            if (_refCounts[slot] > 0)
+            {
+                _refCounts[slot] += count;
+            }
+        }
+    }
+
     public void Release(ArenaHandle handle)
     {
         var slot = (int)(handle.Offset / _options.SlotSize);

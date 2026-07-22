@@ -22,44 +22,8 @@ public sealed class WorkerFrameClassifier(StdioWorkerProcess worker, IDataPlane 
 
     public async Task<FrameClassification> ClassifyAsync(IFrameEnvelope frame, CancellationToken cancellationToken)
     {
-        var frameMessage = new JsonObject
-        {
-            ["cameraId"] = frame.CameraId,
-            ["sequence"] = frame.SequenceNumber,
-            ["contentType"] = frame.ContentType,
-        };
-
-        var ownHandle = default(ArenaHandle);
-        var releaseOwn = false;
-
-        if (frame is ArenaFrameEnvelope arenaFrame)
-        {
-            // Already in the arena (engine-published): forward the handle, no copy, no release. The
-            // child reads the typed descriptor from the slot header at this offset.
-            frameMessage["shm"] = ShmHandle(arenaFrame.Handle);
-        }
-        else
-        {
-            byte[] bytes;
-            await using (var stream = await frame.OpenReadAsync(cancellationToken))
-            using (var buffer = new MemoryStream())
-            {
-                await stream.CopyToAsync(buffer, cancellationToken);
-                bytes = buffer.ToArray();
-            }
-
-            // An encoded frame is an opaque byte blob (u8). Publish for this one RPC (refcount 1); no
-            // base64 fallback — a failure to publish is a hard error.
-            var descriptor = new PayloadDescriptor(PayloadMediaType.Blob, PayloadElementType.UInt8, [bytes.Length]);
-            if (!dataPlane.TryPublish(descriptor, bytes, referenceCount: 1, out ownHandle))
-            {
-                throw new InvalidOperationException(
-                    $"Frame of {bytes.Length} bytes could not be published to the data plane (slot capacity {dataPlane.SlotSize}).");
-            }
-
-            releaseOwn = true;
-            frameMessage["shm"] = ShmHandle(ownHandle);
-        }
+        var frameMessage = new JsonObject();
+        var ownHandle = await WorkerFrameMarshal.AttachInputAsync(frameMessage, frame, dataPlane, cancellationToken);
 
         var request = new JsonObject
         {
@@ -75,9 +39,9 @@ public sealed class WorkerFrameClassifier(StdioWorkerProcess worker, IDataPlane 
         }
         finally
         {
-            if (releaseOwn)
+            if (ownHandle is { } handle)
             {
-                dataPlane.Release(ownHandle);
+                dataPlane.Release(handle);
             }
         }
 
@@ -97,13 +61,6 @@ public sealed class WorkerFrameClassifier(StdioWorkerProcess worker, IDataPlane 
             Unit: (string?)classification["unit"],
             Details: (string?)classification["details"]);
     }
-
-    // Only the offset travels; the child reads the typed descriptor (media type, dtype, shape, length)
-    // from the slot header at this offset — the single cross-language source of truth.
-    private static JsonObject ShmHandle(ArenaHandle handle) => new()
-    {
-        ["offset"] = handle.Offset,
-    };
 
     public ValueTask DisposeAsync() => worker.DisposeAsync();
 }

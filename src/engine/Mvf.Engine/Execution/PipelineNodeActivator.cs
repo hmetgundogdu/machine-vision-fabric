@@ -127,9 +127,13 @@ public sealed class PipelineNodeActivator(
                 node.Id,
                 await outOfProcessModuleHost.CreateClassifierAsync(activation, cancellationToken)),
 
+            "compute" => new FrameTransformerNodeRunner(
+                node.Id,
+                await outOfProcessModuleHost.CreateTransformerAsync(activation, cancellationToken)),
+
             _ => throw new InvalidOperationException(
-                $"Out-of-process module '{entry.Manifest.Id}' (node '{node.Id}') currently supports only the " +
-                $"'classify' category, not '{node.Category}'. Other capabilities arrive in later slices.")
+                $"Out-of-process module '{entry.Manifest.Id}' (node '{node.Id}') supports the 'classify' and " +
+                $"'compute' categories, not '{node.Category}'. Other capabilities arrive in later slices.")
         };
     }
 

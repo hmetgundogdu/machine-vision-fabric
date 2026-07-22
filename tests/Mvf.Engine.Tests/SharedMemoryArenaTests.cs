@@ -96,4 +96,29 @@ public sealed class SharedMemoryArenaTests
 
         Assert.False(arena.TryPublish(Blob(10), new byte[7], referenceCount: 1, out _));
     }
+
+    [Fact]
+    public void Reserve_AddRef_Release_BalanceReclaimsSlotOnlyAtZero()
+    {
+        using var arena = new SharedMemoryArena(new SharedMemoryArenaOptions { SlotSize = 4096, SlotCount = 1 });
+
+        Assert.True(arena.TryReserve(out var handle)); // producer hold → refcount 1
+        arena.AddRef(handle, 2);                        // now 3 (two more consumer edges)
+
+        arena.Release(handle);                          // 2
+        arena.Release(handle);                          // 1
+        Assert.False(arena.TryPublish(Blob(1), [1], referenceCount: 1, out _)); // still held
+
+        arena.Release(handle);                          // 0 → reclaimed
+        Assert.True(arena.TryPublish(Blob(1), [1], referenceCount: 1, out _));
+    }
+
+    [Fact]
+    public void TryReserve_HandsBackTheSlotPayloadCapacity()
+    {
+        using var arena = new SharedMemoryArena(new SharedMemoryArenaOptions { SlotSize = 4096, SlotCount = 1 });
+
+        Assert.True(arena.TryReserve(out var handle));
+        Assert.Equal(4096 - PayloadDescriptor.HeaderSize, handle.Length);
+    }
 }

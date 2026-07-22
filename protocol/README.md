@@ -28,6 +28,18 @@ Child → engine, result (classifier capability):
 {"type":"result","id":1,"classification":{"label":"black","measurement":3.2,"unit":"mean-byte","details":"n=64"}}
 ```
 
+Engine → child, run one cycle (processor/transformer capability): same as `execute` plus a
+pre-reserved output slot the child writes its new frame into (`[descriptor | payload]`, payload ≤
+`capacity`). The child never allocates.
+```json
+{"type":"execute","id":1,"frame":{"cameraId":"cam1","sequence":42,"contentType":"image/bmp","shm":{"offset":0}},"out":{"offset":8388608,"capacity":8388416}}
+```
+
+Child → engine, result (processor capability) — a new frame in the output slot, or `null` to drop:
+```json
+{"type":"result","id":1,"frame":{"shm":{"offset":8388608}}}
+```
+
 Child → engine, failure for a request:
 ```json
 {"type":"error","id":1,"message":"..."}
