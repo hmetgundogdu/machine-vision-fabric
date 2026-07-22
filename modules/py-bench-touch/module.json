@@ -1,0 +1,8 @@
+{
+  "id": "py.bench-touch",
+  "name": "Benchmark: touch (Python)",
+  "version": "1.0.0",
+  "kind": "classifier",
+  "runtime": "python",
+  "entry": "classifier.py"
+}

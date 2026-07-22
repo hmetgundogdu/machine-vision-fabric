@@ -1,0 +1,12 @@
+{
+  "name": "bench-touch",
+  "version": "1.0.0",
+  "description": "Data-plane benchmark: a looping folder source feeds a Python classifier that only touches the frame (no compute). Measures shared-memory handoff + stdio round-trip throughput. No sinks (no disk-write noise).",
+  "nodes": [
+    { "id": "cam",   "module": "mvf.folder-source", "config": { "sourceFolder": "assets/frames", "loop": true } },
+    { "id": "bench", "module": "py.bench-touch" }
+  ],
+  "edges": [
+    { "from": "cam.frame", "to": "bench.frame" }
+  ]
+}

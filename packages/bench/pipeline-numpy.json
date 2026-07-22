@@ -1,0 +1,12 @@
+{
+  "name": "bench-numpy",
+  "version": "1.0.0",
+  "description": "Data-plane benchmark: a looping folder source feeds a Python classifier that reads the WHOLE frame via a zero-copy numpy view and means it. Measures realistic full-frame processing over shared memory. No sinks.",
+  "nodes": [
+    { "id": "cam",   "module": "mvf.folder-source", "config": { "sourceFolder": "assets/frames", "loop": true } },
+    { "id": "bench", "module": "py.bench-numpy" }
+  ],
+  "edges": [
+    { "from": "cam.frame", "to": "bench.frame" }
+  ]
+}
