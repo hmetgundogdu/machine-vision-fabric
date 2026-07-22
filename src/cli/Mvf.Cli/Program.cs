@@ -360,7 +360,7 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         if (report is { DroppedFrames: > 0 })
             Console.WriteLine($"  backpressure: dropped {report.DroppedFrames} frame(s) (policy=drop, arena full)");
         foreach (var (nid, ns) in report?.NodeStats ?? new Dictionary<string, Mvf.Graph.Execution.NodeExecutionStats>())
-            Console.WriteLine($"  {nid}: cycles={ns.TotalCycles} faults={ns.FaultedCycles} avg={ns.AverageDurationMs:F1}ms");
+            Console.WriteLine($"  {nid}: mode={ns.ActivationMode} warmup={ns.WarmupMs}ms cycles={ns.TotalCycles} faults={ns.FaultedCycles} avg={ns.AverageDurationMs:F1}ms");
         if (report is null || !report.Succeeded)
         {
             Console.Error.WriteLine($"Error: {report?.ErrorMessage ?? "unknown"}");

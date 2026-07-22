@@ -21,4 +21,12 @@ public sealed class ModuleManifest
 
     /// <summary>For <c>dotnet</c>: the assembly file (e.g. <c>Foo.dll</c>). For a process runtime: the script/entry.</summary>
     public required string Entry { get; init; }
+
+    /// <summary>
+    /// Module-declared default loading profile ("resident" | "on-demand"). Null → resident. A pipeline
+    /// node's <c>activationMode</c> overrides it. Part of the lifecycle contract
+    /// (see <c>docs/module-lifecycle-design.md</c>); richer lifecycle fields (readiness, warmup budget)
+    /// land in later L-track slices.
+    /// </summary>
+    public string? Lifecycle { get; init; }
 }

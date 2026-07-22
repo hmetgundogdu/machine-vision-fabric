@@ -4,5 +4,6 @@
   "version": "1.0.0",
   "kind": "source",
   "runtime": "dotnet",
-  "entry": "MachineVisionFabric.Integrations.CognexCamera.dll"
+  "entry": "MachineVisionFabric.Integrations.CognexCamera.dll",
+  "lifecycle": "resident"
 }

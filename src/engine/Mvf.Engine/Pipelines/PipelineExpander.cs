@@ -161,7 +161,7 @@ public sealed class PipelineExpander
             Kind = "integration-module",
             Category = category,
             ModuleId = moduleId,
-            ActivationMode = GetString(nodeObj, "activationMode") ?? "resident",
+            ActivationMode = GetString(nodeObj, "activationMode"),
             Config = CloneConfig(nodeObj),
             Inputs = inputs,
             Outputs = outputs
@@ -201,7 +201,7 @@ public sealed class PipelineExpander
             Kind = "embedded-primitive",
             Category = "flow-control",
             PrimitiveType = primitiveType,
-            ActivationMode = GetString(nodeObj, "activationMode") ?? "resident",
+            ActivationMode = GetString(nodeObj, "activationMode"),
             Config = CloneConfig(nodeObj),
             Inputs = inputs,
             Outputs = outputs

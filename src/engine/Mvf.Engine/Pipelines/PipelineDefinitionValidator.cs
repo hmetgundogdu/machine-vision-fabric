@@ -1,4 +1,5 @@
 using Mvf.Graph.Pipelines;
+using Mvf.Graph.Runtime;
 using Mvf.Abstractions;
 
 namespace Mvf.Engine.Pipelines;
@@ -60,6 +61,18 @@ public sealed class PipelineDefinitionValidator : IPipelineDefinitionValidator
                 Code = "pipeline.node.missing-id",
                 Severity = "error",
                 Message = "A node is missing an id."
+            });
+        }
+
+        // Lifecycle contract: a specified activationMode must be a known loading profile (L.1).
+        if (node.ActivationMode is { Length: > 0 } mode && !NodeActivationModes.TryParse(mode, out _))
+        {
+            issues.Add(new PipelineValidationIssue
+            {
+                Code = "pipeline.node.invalid-activation-mode",
+                Severity = "error",
+                Message = $"Node '{node.Id}' has an unknown activationMode '{mode}'. Supported: {NodeActivationModes.Supported}.",
+                NodeId = node.Id
             });
         }
 

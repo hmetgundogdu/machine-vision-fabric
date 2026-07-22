@@ -4,6 +4,7 @@ using Mvf.Abstractions;
 using Mvf.Abstractions.Frames;
 using Mvf.Engine.Modules;
 using Mvf.Engine.Recovery;
+using Mvf.Graph.Runtime;
 
 namespace Mvf.Engine.Execution;
 
@@ -52,13 +53,25 @@ public sealed class PipelineGraphExecutor(
             return Failure(ex.Message, startedAt);
         }
 
+        // Module catalog (metadata only, no DLL load) resolves each node's declared lifecycle + which
+        // nodes run out-of-process. Loaded once and reused.
+        var loadedCatalog = moduleCatalog?.Load(options.IntegrationsRoot);
+
+        // Lifecycle contract made observable (L.1): time each node's activation (warmup — model load,
+        // device connect, init) and record its resolved loading profile. No behavior change yet.
+        var warmupByNode = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        var activationModeByNode = new Dictionary<string, NodeActivationMode>(StringComparer.OrdinalIgnoreCase);
+
         // Activate all nodes
         var runners = new List<INodeRunner>(executionOrder.Count);
         try
         {
             foreach (var node in executionOrder)
             {
+                var activateStart = DateTime.UtcNow;
                 var runner = await nodeActivator.ActivateAsync(node, options, cancellationToken);
+                warmupByNode[node.Id] = (long)(DateTime.UtcNow - activateStart).TotalMilliseconds;
+                activationModeByNode[node.Id] = ResolveActivationMode(node, loadedCatalog);
                 runners.Add(runner);
             }
         }
@@ -94,7 +107,7 @@ public sealed class PipelineGraphExecutor(
 
         // Static, graph-aware data-plane routing. Inactive (heap-only, original behavior) when there is
         // no data plane or the graph has no out-of-process worker nodes.
-        var workerNodeIds = BuildWorkerNodeIds(definition, moduleCatalog, options);
+        var workerNodeIds = BuildWorkerNodeIds(definition, loadedCatalog);
         var arenaActive = dataPlane is not null && workerNodeIds.Count > 0;
         var outgoingByPort = arenaActive ? BuildOutgoingByPort(definition) : null;
 
@@ -295,7 +308,9 @@ public sealed class PipelineGraphExecutor(
                 NodeId = kvp.Key,
                 TotalCycles = kvp.Value.TotalCycles,
                 FaultedCycles = kvp.Value.FaultedCycles,
-                TotalDurationMs = kvp.Value.TotalDurationMs
+                TotalDurationMs = kvp.Value.TotalDurationMs,
+                WarmupMs = warmupByNode.GetValueOrDefault(kvp.Key),
+                ActivationMode = activationModeByNode.GetValueOrDefault(kvp.Key, NodeActivationMode.Resident)
             },
             StringComparer.OrdinalIgnoreCase);
 
@@ -311,19 +326,42 @@ public sealed class PipelineGraphExecutor(
         };
     }
 
+    /// <summary>
+    /// Resolves a node's loading profile: an explicit per-node <c>activationMode</c> wins, then the
+    /// module-declared <c>lifecycle</c> default, then resident. An unparseable value (already rejected by
+    /// the validator) falls back to the next source.
+    /// </summary>
+    private static NodeActivationMode ResolveActivationMode(
+        PipelineNodeDefinition node,
+        IReadOnlyDictionary<string, ModuleCatalogEntry>? catalog)
+    {
+        if (node.ActivationMode is { Length: > 0 } nodeMode && NodeActivationModes.TryParse(nodeMode, out var mode))
+        {
+            return mode;
+        }
+
+        if (node.ModuleId is { } id
+            && catalog is not null
+            && catalog.TryGetValue(id, out var entry)
+            && NodeActivationModes.TryParse(entry.Manifest.Lifecycle, out var moduleMode))
+        {
+            return moduleMode;
+        }
+
+        return NodeActivationMode.Resident;
+    }
+
     /// <summary>Node ids whose module runs out-of-process (a non-<c>dotnet</c> runtime in the catalog).</summary>
     private static IReadOnlySet<string> BuildWorkerNodeIds(
         PipelineDefinition definition,
-        ModuleCatalog? moduleCatalog,
-        PipelineExecutionOptions options)
+        IReadOnlyDictionary<string, ModuleCatalogEntry>? catalog)
     {
         var workers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (moduleCatalog is null)
+        if (catalog is null)
         {
             return workers;
         }
 
-        var catalog = moduleCatalog.Load(options.IntegrationsRoot);
         foreach (var node in definition.Nodes)
         {
             if (node.ModuleId is not null
