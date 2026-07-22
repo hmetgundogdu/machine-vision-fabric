@@ -62,17 +62,65 @@ public sealed class PipelineGraphExecutor(
         var warmupByNode = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         var activationModeByNode = new Dictionary<string, NodeActivationMode>(StringComparer.OrdinalIgnoreCase);
 
-        // Activate all nodes
+        // Resolve every node's loading profile first (cheap — no activation). Resident nodes are
+        // preloaded before cycle 0; on-demand nodes are activated lazily on first use (L.3).
+        foreach (var node in executionOrder)
+        {
+            activationModeByNode[node.Id] = ResolveActivationMode(node, loadedCatalog);
+        }
+
+        // Durable checkpoints (engine-crash resume) when a directory is configured; otherwise captures
+        // stay in memory (worker-crash recovery only). Restore states are loaded up front so a node can
+        // be restored the moment it activates — whether eagerly (resident) or lazily (on-demand).
+        ICheckpointStore? checkpointStore = options.CheckpointDirectory is { Length: > 0 } checkpointDir
+            ? new FileCheckpointStore(checkpointDir)
+            : null;
+        IReadOnlyDictionary<string, byte[]> restoredStates = checkpointStore is not null
+            ? await checkpointStore.LoadAsync(cancellationToken)
+            : new Dictionary<string, byte[]>();
+
         var runners = new List<INodeRunner>(executionOrder.Count);
+        var runnerById = new Dictionary<string, INodeRunner>(StringComparer.OrdinalIgnoreCase);
+
+        // Runners whose (worker-backed) state can be captured for resume-after-crash. Filled as nodes
+        // activate (eagerly or lazily). A runner that reports no state is later remembered and skipped.
+        var checkpointableRunners = new List<INodeRunner>();
+
+        // Activates one node: times its warmup, registers it, and restores its persisted state (if any)
+        // the moment it comes up. Shared by the eager (resident) pass and lazy on-demand activation.
+        async Task<INodeRunner> ActivateNodeAsync(PipelineNodeDefinition node)
+        {
+            var activateStart = DateTime.UtcNow;
+            var runner = await nodeActivator.ActivateAsync(node, options, cancellationToken);
+            warmupByNode[node.Id] = (long)(DateTime.UtcNow - activateStart).TotalMilliseconds;
+            runners.Add(runner);
+            runnerById[node.Id] = runner;
+
+            if (runner is ICheckpointable checkpointable)
+            {
+                checkpointableRunners.Add(runner);
+                if (restoredStates.TryGetValue(node.Id, out var state))
+                {
+                    try { await checkpointable.RestoreAsync(state, cancellationToken); }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        warnings.Add($"Restore failed for node '{node.Id}': {ex.Message}");
+                    }
+                }
+            }
+
+            return runner;
+        }
+
+        // Preload resident nodes before the first cycle (models, cameras, PLCs stay warm).
         try
         {
             foreach (var node in executionOrder)
             {
-                var activateStart = DateTime.UtcNow;
-                var runner = await nodeActivator.ActivateAsync(node, options, cancellationToken);
-                warmupByNode[node.Id] = (long)(DateTime.UtcNow - activateStart).TotalMilliseconds;
-                activationModeByNode[node.Id] = ResolveActivationMode(node, loadedCatalog);
-                runners.Add(runner);
+                if (activationModeByNode[node.Id] != NodeActivationMode.OnDemand)
+                {
+                    await ActivateNodeAsync(node);
+                }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -81,23 +129,9 @@ public sealed class PipelineGraphExecutor(
             return Failure($"Node activation failed: {ex.Message}", startedAt);
         }
 
-        // Build a nodeId → runner lookup
-        var runnerById = runners.ToDictionary(
-            r => r.NodeId,
-            r => r,
-            StringComparer.OrdinalIgnoreCase);
-
-        // Runners whose (worker-backed) state can be captured for resume-after-crash. A runner that
-        // reports no state is remembered and skipped so we don't keep paying a round-trip for it.
-        var checkpointableRunners = runners.Where(r => r is ICheckpointable).ToList();
         var statelessRunners = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var lastStates = new Dictionary<string, byte[]>(StringComparer.Ordinal);
-
-        // Durable checkpoints (engine-crash resume) when a directory is configured; otherwise captures
-        // stay in memory (worker-crash recovery only).
-        ICheckpointStore? checkpointStore = options.CheckpointDirectory is { Length: > 0 } checkpointDir
-            ? new FileCheckpointStore(checkpointDir)
-            : null;
+        var failedOnDemand = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Per-node mutable stats accumulators
         var statsMap = executionOrder.ToDictionary(
@@ -120,24 +154,8 @@ public sealed class PipelineGraphExecutor(
 
         try
         {
-            // Resume: restore each node's persisted state (incl. a checkpointable source's position)
-            // before the first cycle, so an interrupted run continues where it left off.
-            if (checkpointStore is not null)
-            {
-                var restored = await checkpointStore.LoadAsync(cancellationToken);
-                foreach (var runner in checkpointableRunners)
-                {
-                    if (restored.TryGetValue(runner.NodeId, out var state) && runner is ICheckpointable checkpointable)
-                    {
-                        try { await checkpointable.RestoreAsync(state, cancellationToken); }
-                        catch (Exception ex) when (ex is not OperationCanceledException)
-                        {
-                            warnings.Add($"Restore failed for node '{runner.NodeId}': {ex.Message}");
-                        }
-                    }
-                }
-            }
-
+            // Resume happens as each node activates (see ActivateNodeAsync): a resident node is restored
+            // during the eager pass above, an on-demand node the moment it is first used.
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -161,19 +179,46 @@ public sealed class PipelineGraphExecutor(
 
                 foreach (var node in executionOrder)
                 {
-                    if (!runnerById.TryGetValue(node.Id, out var runner))
+                    var isOnDemand = activationModeByNode.GetValueOrDefault(node.Id) == NodeActivationMode.OnDemand;
+                    var runnerKnown = runnerById.TryGetValue(node.Id, out var runner);
+
+                    // An unknown node that is not a (still-viable) on-demand one can't run — resident nodes
+                    // are always preloaded, so this only skips a failed-to-activate on-demand helper.
+                    if (!runnerKnown && (!isOnDemand || failedOnDemand.Contains(node.Id)))
                     {
                         continue;
                     }
 
                     var inputs = portBus.CollectInputs(node.Id, node.Inputs, context);
+
+                    // On-demand (short helper): only warm it up and run it when a frame actually reaches it
+                    // — a gated helper costs nothing on the cycles it is idle (lazy activation + idle skip).
+                    if (isOnDemand && !inputs.All.Any())
+                    {
+                        continue;
+                    }
+
+                    if (!runnerKnown)
+                    {
+                        try
+                        {
+                            runner = await ActivateNodeAsync(node);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            warnings.Add($"On-demand activation failed for node '{node.Id}': {ex.Message}");
+                            failedOnDemand.Add(node.Id);
+                            continue;
+                        }
+                    }
+
                     NodeExecutionResult result;
                     var nodeStart = DateTime.UtcNow;
                     var faulted = false;
 
                     try
                     {
-                        result = await runner.ExecuteAsync(inputs, cancellationToken);
+                        result = await runner!.ExecuteAsync(inputs, cancellationToken);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
