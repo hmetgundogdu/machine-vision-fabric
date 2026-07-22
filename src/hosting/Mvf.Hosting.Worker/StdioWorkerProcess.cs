@@ -46,6 +46,10 @@ public sealed class StdioWorkerProcess : IAsyncDisposable
         {
             psi.Environment["PYTHONPATH"] = info.PythonPath;
         }
+        if (!string.IsNullOrEmpty(info.ArenaPath))
+        {
+            psi.Environment["MVF_ARENA_PATH"] = info.ArenaPath;
+        }
 
         var process = Process.Start(psi)
             ?? throw new InvalidOperationException($"Failed to start worker '{info.Command}'.");

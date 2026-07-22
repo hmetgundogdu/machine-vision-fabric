@@ -5,8 +5,13 @@ Language-agnostic contract between the engine (parent) and an out-of-process mod
 per line (newline-delimited). Targets: Python, Node.js, .NET.
 
 Big frame/tensor data is NOT part of this contract long-term — it belongs to the
-shared-memory data plane (M2). For M1 a frame may be carried inline (base64) over stdio as a
-temporary measure; M2 replaces the payload with a shared-memory handle.
+shared-memory data plane (M2). A frame payload is carried one of two ways:
+- **shared memory (M2, preferred):** the engine sets the child's `MVF_ARENA_PATH` env var to a
+  memory-mapped file. The frame's `shm` handle `{offset,length}` points into it; the child maps the
+  same file and reads the bytes **in place** (no copy off the pipe, no base64). See
+  `docs/data-plane-design.md`.
+- **inline (M1 fallback):** `dataBase64` carries the bytes when no arena is present, or when a frame
+  is larger than a slot.
 
 ## Messages
 
@@ -15,9 +20,14 @@ Child → engine, on start (handshake):
 {"type":"hello","protocol":1,"moduleId":"py.brightness-classifier","capability":"classifier"}
 ```
 
-Engine → child, run one node cycle:
+Engine → child, run one node cycle (shared-memory frame):
 ```json
-{"type":"execute","id":1,"frame":{"cameraId":"cam1","sequence":42,"contentType":"image/bmp","dataBase64":"<...>"}}
+{"type":"execute","id":1,"frame":{"cameraId":"cam1","sequence":42,"contentType":"image/bmp","length":64,"shm":{"offset":0,"length":64}}}
+```
+
+Engine → child, run one node cycle (inline fallback):
+```json
+{"type":"execute","id":1,"frame":{"cameraId":"cam1","sequence":42,"contentType":"image/bmp","length":64,"dataBase64":"<...>"}}
 ```
 
 Child → engine, result (classifier capability):

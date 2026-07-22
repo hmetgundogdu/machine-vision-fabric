@@ -9,6 +9,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\core\Mvf.Abstractions\Mvf.Abstractions.csproj" />
     <ProjectReference Include="..\..\core\Mvf.Graph\Mvf.Graph.csproj" />
+    <ProjectReference Include="..\..\transports\Mvf.Transport.SharedMemory\Mvf.Transport.SharedMemory.csproj" />
   </ItemGroup>
 
 </Project>

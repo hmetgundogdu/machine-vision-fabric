@@ -80,7 +80,7 @@ is now lean. Tests 39/39.
 |----|-----------|--------|
 | M0 | Draw seams + folder/architecture; design docs | 🟡 In progress (docs + north-star folder/project rename done; ITransport/IModuleHost seams deferred to M1/M2) |
 | M1 | Out-of-process module host (Python), control plane over local **stdio** | 🟢 Slices 1–2 done — Python classifier auto-wired from its manifest `runtime`; `IOutOfProcessModuleHost` seam + `StdioModuleHost`; real-python e2e test green |
-| M2 | Our own **shared-memory** zero-copy data plane, graph-aware (no network) — see `data-plane-design.md` | 🟢 Design agreed; impl not started |
+| M2 | Our own **shared-memory** zero-copy data plane, graph-aware (no network) — see `data-plane-design.md` | 🟡 Slice A done — file-backed arena; Python frame path uses shm handles instead of base64 (real-python e2e green). Slices B/C next |
 | M2.5 | **Snapshot + module-state recovery** (engine-allocated state + context slot, cycle-boundary snapshots, resume-after-crash) | ⬜ Not started (ambitious; after M2 core) |
 | M3 | Hardening: backpressure, crash recovery, warm pools, cross-process observability | ⬜ Not started |
 | M4 | Later frontiers: WASM tier, GPU handles (DLPack/CUDA-IPC) — **distributed is a non-goal** | ⬜ Not started |
@@ -117,11 +117,14 @@ is now lean. Tests 39/39.
   Next capabilities (processor/sink over a worker) reuse the same seam.
 - **Decision 2:** ✅ Resolved — control plane = **stdio + JSON** (protobuf later), no network/gRPC.
 
-### M2 — Shared-memory data plane ⛔ GATE
-**Do NOT implement before an explicit design discussion with the user.** The user will
-decide, together with the assistant, how the pool / handle / lifetime model works. The
-current design knowledge (below) is kept "in the pocket" and must be re-surfaced when we
-reach this milestone.
+### M2 — Shared-memory data plane ⛔ GATE (cleared for Slice A)
+**Gate:** don't implement before an explicit design discussion with the user. **That discussion
+happened (2026-07-22) and the user approved the impl decisions** (file-backed MMF arena; segregated
+free-list; separate transport project the core never references) — see the "Implementation decisions"
+section of `data-plane-design.md`. **Slice A is built** (arena + Python frame path over shm handles).
+Re-open the gate before **Slice B** (module-requested allocation, graph refcounts, the `IDataPlane`
+seam, context slot) and **Slice C = M2.5** (module state slot + snapshot + resume) — those introduce
+the harder lifetime/ownership choices and should be talked through as they come up.
 
 ### M3 / M4
 Hardening then optional frontiers (see table).

@@ -9,6 +9,9 @@
   <Folder Name="/src/hosting/">
     <Project Path="src/hosting/Mvf.Hosting.Worker/Mvf.Hosting.Worker.csproj" />
   </Folder>
+  <Folder Name="/src/transports/">
+    <Project Path="src/transports/Mvf.Transport.SharedMemory/Mvf.Transport.SharedMemory.csproj" />
+  </Folder>
   <Folder Name="/src/sdk/">
     <Project Path="src/sdk/dotnet/Mvf.Sdk/Mvf.Sdk.csproj" />
   </Folder>

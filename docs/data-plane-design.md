@@ -89,3 +89,50 @@ the rehydration contract is the one honest piece modules must implement.
 - **Snapshot + module-state recovery** = its own milestone (M2.5 / folded into M3 hardening),
   after the core data plane works. It is the ambitious, differentiating capability — sequence
   it after the basics are solid.
+
+---
+
+## Implementation decisions (agreed with user, 2026-07-22)
+These turn the design above into buildable choices. Confirmed together:
+1. **Arena backing = file-backed MMF.** One real file that both .NET (`MemoryMappedFile.CreateFromFile`)
+   and Python (`mmap`) map. Chosen for interop (named OS shm doesn't interoperate cleanly between
+   .NET and Python, especially on Windows) and because snapshot = copy the file. On Linux back it
+   with tmpfs; on Windows the file stays in the page cache (RAM). All internal references are
+   **offsets from the arena base, never raw pointers** (each process maps at a different address).
+2. **Allocator = segregated free-list (slab / size-classes).** O(1) alloc/free, snapshot-friendly
+   (offsets never move — no compaction). Start with a **single size-class** and generalize later.
+   Buddy/bump+compaction rejected (compaction would move handles).
+3. **Execution is serial within a cycle** (engine runs nodes one at a time, topologically), so a
+   produced buffer has one writer and its readers run later in the same cycle — **no payload locks**.
+   Only the free-list/refcount table needs guarding, and only if we ever parallelize.
+4. **Transport is a separate project** `src/transports/Mvf.Transport.SharedMemory`; the **core
+   (Graph/Abstractions/Engine) never references it**. Hosting/composition layers wire it in.
+
+### Slice A — smallest valuable cut (in progress)
+Replace the **base64-over-stdio frame payload** on the Python worker path with a **shared-memory
+handle**. Today `WorkerFrameClassifier` base64-encodes the frame and ships it down the pipe (several
+copies + encoding). Slice A: the .NET side copies the frame into the arena **once**, sends a small
+`{offset,length}` handle over stdio; Python `mmap`s the arena file and reads in place — no base64.
+
+Deliberate Slice-A simplifications (each lifted in a later slice):
+- **Arena lives in the worker-hosting layer for now**, not the engine — Slice A is the *only* path
+  that needs shared memory (a .NET source produces a heap frame; only the polyglot hop copies it in).
+  When .NET producers/consumers also use the arena (Slice B), the arena is lifted behind an
+  `IDataPlane` seam in `Mvf.Abstractions` — its shape then known from real use, not guessed.
+- **Refcount is trivially 1**: the frame has exactly one consumer (the classifier), rented and
+  returned around a single RPC. Graph-derived refcounts arrive with fan-out in Slice B.
+- **Descriptor rides the stdio execute message** (cameraId/sequence/contentType are small); the slot
+  holds only payload bytes. Full descriptor-in-slot-header lands when a .NET↔.NET hop (no stdio)
+  needs it.
+- **Free-list/refcount stay in .NET managed memory** (only .NET allocates in Slice A; Python only
+  reads). They move into the shared metadata region when a second process allocates, or for snapshot.
+- **base64 stays as a fallback** when no arena is present or a frame exceeds the slot size, so the
+  direct-construction path keeps working.
+
+Slice A touchpoints: new `Mvf.Transport.SharedMemory` (arena + `FrameHandle`); `Mvf.Hosting.Worker`
+uses it (arena path passed to the child via env at spawn; handle in the execute message); Python SDK
+maps the arena and reads at the handle; `protocol/README.md` documents the shm frame form.
+
+### Slice B — .NET producers/consumers in the arena
+Module-requested allocation (processor/sink data outputs), graph-derived refcounts for fan-out, the
+`IDataPlane` seam in Abstractions, context slot. **Slice C = M2.5**: module state slot + snapshot + resume.
