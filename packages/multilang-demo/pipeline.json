@@ -1,0 +1,25 @@
+{
+  "name": "multilang-demo",
+  "version": "1.0.0",
+  "description": "A hardware-free, multi-language pipeline. A .NET simulator source reads frames from a folder; the frame fans out three ways: a Python transformer inverts it (saved), a Python classifier labels it black/ok, and a switch routes the frame to a black or ok dataset by that label. Source + sinks are .NET (in-process); the classifier and transformer are Python (out-of-process over shared memory). Run it with: execute-graph --package packages/multilang-demo --no-tui",
+  "nodes": [
+    { "id": "cam",          "module": "mvf.folder-source",          "displayName": "Folder Source", "config": { "sourceFolder": "assets/frames" } },
+    { "id": "fork",         "primitive": "fork",                    "displayName": "Fork" },
+    { "id": "invert",       "module": "py.invert-transformer",      "displayName": "Invert (Python)" },
+    { "id": "saveInverted", "module": "mvf.dataset-writer",         "displayName": "Save Inverted", "config": { "outputRoot": "out/inverted", "sessionPrefix": "inverted" } },
+    { "id": "bright",       "module": "py.brightness-classifier",   "displayName": "Brightness (Python)" },
+    { "id": "route",        "primitive": "switch",                  "displayName": "Route by brightness" },
+    { "id": "saveBlack",    "module": "mvf.dataset-writer",         "displayName": "Save Black", "config": { "outputRoot": "out/black", "sessionPrefix": "black" } },
+    { "id": "saveOk",       "module": "mvf.dataset-writer",         "displayName": "Save Ok",    "config": { "outputRoot": "out/ok", "sessionPrefix": "ok" } }
+  ],
+  "edges": [
+    { "from": "cam.frame",       "to": "fork.frame" },
+    { "from": "fork.toInvert",   "to": "invert.frame" },
+    { "from": "invert.frame",    "to": "saveInverted.frame" },
+    { "from": "fork.toClass",    "to": "bright.frame" },
+    { "from": "fork.toRoute",    "to": "route.frame" },
+    { "from": "bright.class",    "to": "route.class" },
+    { "from": "route.black",     "to": "saveBlack.frame" },
+    { "from": "route.ok",        "to": "saveOk.frame" }
+  ]
+}

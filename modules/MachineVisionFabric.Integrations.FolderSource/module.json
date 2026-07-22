@@ -1,0 +1,8 @@
+{
+  "id": "mvf.folder-source",
+  "name": "Folder Sequence Source",
+  "version": "1.0.0",
+  "kind": "source",
+  "runtime": "dotnet",
+  "entry": "MachineVisionFabric.Integrations.FolderSource.dll"
+}
