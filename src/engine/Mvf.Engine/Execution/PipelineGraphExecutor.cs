@@ -101,7 +101,9 @@ public sealed class PipelineGraphExecutor(
         var portBus = new GraphPortBus();
         var totalCycles = 0;
         var acceptedCycles = 0;
+        var droppedFrames = 0;
         var sourceCompleted = false;
+        string? backpressureFailure = null;
 
         try
         {
@@ -203,8 +205,9 @@ public sealed class PipelineGraphExecutor(
                     if (arenaActive)
                     {
                         // Phase 1 — route outputs, AddRef arena buffers for the edges they now occupy.
-                        await RouteOutputsWithDataPlaneAsync(
-                            node.Id, result, inputs, portBus, outgoingByPort!, workerNodeIds, dataPlane!, cancellationToken);
+                        droppedFrames += await RouteOutputsWithDataPlaneAsync(
+                            node.Id, result, inputs, portBus, outgoingByPort!, workerNodeIds, dataPlane!,
+                            options.BackpressurePolicy, cancellationToken);
                         // Phase 2 — this node has run, so it no longer occupies its arena input edges.
                         ReleaseArenaInputs(inputs, dataPlane!);
                     }
@@ -251,12 +254,32 @@ public sealed class PipelineGraphExecutor(
         {
             // Propagate after cleanup
         }
+        catch (DataPlaneBackpressureException ex)
+        {
+            // A lossless (Stall) producer hit an exhausted arena, or a payload can never fit a slot.
+            // Neither is recoverable mid-run: stop cleanly with an actionable message.
+            backpressureFailure = ex.Message;
+        }
         finally
         {
             await DisposeAllAsync(runners);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+
+        if (backpressureFailure is not null)
+        {
+            return new PipelineExecutionReport
+            {
+                Succeeded = false,
+                TotalCycles = totalCycles,
+                AcceptedCycles = acceptedCycles,
+                DroppedFrames = droppedFrames,
+                Duration = DateTime.UtcNow - startedAt,
+                ErrorMessage = backpressureFailure,
+                Warnings = warnings
+            };
+        }
 
         // A cleanly, fully-consumed run has nothing to resume — drop its persisted checkpoint.
         if (sourceCompleted && checkpointStore is not null)
@@ -281,6 +304,7 @@ public sealed class PipelineGraphExecutor(
             Succeeded = true,
             TotalCycles = totalCycles,
             AcceptedCycles = acceptedCycles,
+            DroppedFrames = droppedFrames,
             Duration = DateTime.UtcNow - startedAt,
             Warnings = warnings,
             NodeStats = nodeStats
@@ -349,7 +373,7 @@ public sealed class PipelineGraphExecutor(
     /// AddRef runs here (Phase 1), before the caller releases this node's arena inputs (Phase 2), so a
     /// forwarded buffer never transiently reaches zero.
     /// </summary>
-    private static async Task RouteOutputsWithDataPlaneAsync(
+    private static async Task<int> RouteOutputsWithDataPlaneAsync(
         string sourceNodeId,
         NodeExecutionResult result,
         NodeExecutionInputs inputs,
@@ -357,8 +381,11 @@ public sealed class PipelineGraphExecutor(
         IReadOnlyDictionary<string, List<PipelineEdgeDefinition>> outgoingByPort,
         IReadOnlySet<string> workerNodeIds,
         IDataPlane dataPlane,
+        BackpressurePolicy policy,
         CancellationToken cancellationToken)
     {
+        var dropped = 0;
+
         // Arena buffers this node received as inputs — an output carrying one of these is a forwarded
         // pass-through, not a newly produced buffer, so it keeps no producer hold to drop.
         var inputArenaHandles = new HashSet<ArenaHandle>();
@@ -401,15 +428,53 @@ public sealed class PipelineGraphExecutor(
             if (value.Frame is not null)
             {
                 var workerEdgeCount = edges.Count(edge => workerNodeIds.Contains(edge.To.NodeId));
-                if (workerEdgeCount > 0
-                    && await TryPublishFrameAsync(value.Frame, workerEdgeCount, dataPlane, cancellationToken) is { } arenaValue)
+                if (workerEdgeCount > 0)
                 {
-                    foreach (var edge in edges)
+                    var (outcome, arenaValue) = await TryPublishFrameForWorkersAsync(
+                        value.Frame, workerEdgeCount, dataPlane, cancellationToken);
+
+                    if (outcome == PublishOutcome.Published)
                     {
-                        var deliver = workerNodeIds.Contains(edge.To.NodeId) ? arenaValue : value;
-                        portBus.Set(edge.To.NodeId, edge.To.Port, deliver);
+                        foreach (var edge in edges)
+                        {
+                            var deliver = workerNodeIds.Contains(edge.To.NodeId) ? arenaValue! : value;
+                            portBus.Set(edge.To.NodeId, edge.To.Port, deliver);
+                        }
+
+                        // Published with refcount == worker-edge count (no producer hold), so each worker
+                        // release balances it — this buffer is not tracked for a producer-hold drop.
+                        continue;
                     }
 
+                    if (outcome == PublishOutcome.PayloadTooLarge)
+                    {
+                        // Not backpressure: a frame that never fits a slot can't be fixed by waiting or
+                        // by dropping every frame forever. Stop with an actionable message under any policy.
+                        throw new DataPlaneBackpressureException(
+                            $"Frame on '{sourceNodeId}.{portName}' exceeds the arena slot capacity " +
+                            $"({dataPlane.SlotSize} bytes) and can never be published — increase the slot size.");
+                    }
+
+                    // Arena momentarily full → the lossless-vs-lossy choice.
+                    if (policy == BackpressurePolicy.Stall)
+                    {
+                        throw new DataPlaneBackpressureException(
+                            $"Data plane full while publishing '{sourceNodeId}.{portName}' to {workerEdgeCount} " +
+                            "worker edge(s); a lossless (stall) run cannot proceed — raise the arena slot count " +
+                            "or set the backpressure policy to drop.");
+                    }
+
+                    // Drop: out-of-process consumers miss this frame; in-process consumers on the same
+                    // output still receive the heap frame. The source keeps running (bounded latency).
+                    foreach (var edge in edges)
+                    {
+                        if (!workerNodeIds.Contains(edge.To.NodeId))
+                        {
+                            portBus.Set(edge.To.NodeId, edge.To.Port, value);
+                        }
+                    }
+
+                    dropped++;
                     continue;
                 }
             }
@@ -429,9 +494,29 @@ public sealed class PipelineGraphExecutor(
                 dataPlane.Release(handle);
             }
         }
+
+        return dropped;
     }
 
-    private static async Task<PortValue?> TryPublishFrameAsync(
+    /// <summary>Why a publish attempt did not place a frame in the arena.</summary>
+    private enum PublishOutcome
+    {
+        /// <summary>The frame is in the arena; the returned value carries its handle.</summary>
+        Published,
+
+        /// <summary>The arena is momentarily full — every slot carries a live buffer (backpressure).</summary>
+        ArenaFull,
+
+        /// <summary>The frame is larger than a slot and can never be published (a sizing error).</summary>
+        PayloadTooLarge
+    }
+
+    /// <summary>
+    /// Copies a heap frame into the arena once (refcount = its worker-edge count) and, on failure,
+    /// classifies whether the arena was merely full (backpressure) or the frame can never fit a slot.
+    /// The caller turns that classification into the configured policy.
+    /// </summary>
+    private static async Task<(PublishOutcome Outcome, PortValue? Value)> TryPublishFrameForWorkersAsync(
         IFrameEnvelope frame,
         int referenceCount,
         IDataPlane dataPlane,
@@ -448,9 +533,14 @@ public sealed class PipelineGraphExecutor(
         // An encoded frame is an opaque byte blob (u8, length N); its media type/decoding is the
         // consumer's concern. Raw tensors get a richer descriptor when those payload types land.
         var descriptor = new PayloadDescriptor(PayloadMediaType.Blob, PayloadElementType.UInt8, [bytes.Length]);
-        return dataPlane.TryPublish(descriptor, bytes, referenceCount, out var handle)
-            ? PortValue.FromFrame(new ArenaFrameEnvelope(dataPlane, handle, frame))
-            : null;
+        if (dataPlane.TryPublish(descriptor, bytes, referenceCount, out var handle))
+        {
+            return (PublishOutcome.Published, PortValue.FromFrame(new ArenaFrameEnvelope(dataPlane, handle, frame)));
+        }
+
+        // A payload that can never fit a slot is a permanent sizing error, not transient backpressure.
+        var tooLarge = PayloadDescriptor.HeaderSize + (long)bytes.Length > dataPlane.SlotSize;
+        return (tooLarge ? PublishOutcome.PayloadTooLarge : PublishOutcome.ArenaFull, null);
     }
 
     /// <summary>Releases one reference for each arena-backed frame this node consumed, now that it has run.</summary>
@@ -558,4 +648,11 @@ public sealed class PipelineGraphExecutor(
         public int FaultedCycles;
         public long TotalDurationMs;
     }
+
+    /// <summary>
+    /// Thrown when a producer cannot place a frame in the arena and the run cannot continue: a lossless
+    /// (stall) policy meeting an exhausted arena, or a frame that can never fit a slot. Caught by the
+    /// executor and turned into a failed report with an actionable message.
+    /// </summary>
+    private sealed class DataPlaneBackpressureException(string message) : Exception(message);
 }

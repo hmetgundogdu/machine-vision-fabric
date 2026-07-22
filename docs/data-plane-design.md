@@ -236,3 +236,55 @@ bytes) so one handle carries everything; stdio only carries the handle/offset.
 3. **Transformer** on the typed model — worker output = a typed payload (shm, no base64) → live-edge-occupancy
    refcount.
 4. Further types (`f32` tensor, JSON) + Arrow/DLPack SDK adapters.
+
+---
+
+## Backpressure (M3 — Slice D.1, implemented)
+
+> Discussed with the user (2026-07-23). The question that opened it: *"each node's output is a different
+> length — if it's long we grow the buffer on request, and we already pass that size to the next node;
+> what about backpressure?"* The answer: **variable sizing and backpressure are two different axes.**
+
+**Sizing is already solved** (Agreed decision 2): the arena is a variable-size allocator; a module requests
+a size or the engine auto-detects it from the produced payload, and the descriptor (size/type) travels with
+the handle. That answers *"is this one buffer the right size."*
+
+**Backpressure is a different question: is there room in the arena *at all* right now?** Even with perfectly
+sized allocations, the arena is a finite file-backed region. If a producer emits faster than consumers drain
+(and refcounts fall to zero), live buffers accumulate until the arena is full. That full moment is
+backpressure — it is about *total capacity*, not per-buffer size.
+
+**Why "just grow the arena" is not the mechanism.** Growing helps a slow steady-state but cannot be the
+backpressure answer: (a) RAM is finite — a fast source + slow sink exhausts *any* size; (b) growing a
+file-backed MMF at runtime forces *every* mapping process to re-map (offsets stay valid, but the remap must
+be coordinated across processes) — not something you want on the per-frame hot path. Growth is at best a
+capped secondary escape valve, not the primary lever.
+
+**The primary lever = the engine-orchestrated scheduler.** Because the engine drives every cycle and knows
+the requested size *before* it commits to running a producer (the size rides the handle, exactly as the user
+observed), backpressure collapses into a scheduling decision — no separate futex/credit IPC. When a publish
+cannot be satisfied, the executor consults a **per-run policy**:
+
+| Policy | Behavior | For |
+|--------|----------|-----|
+| **Stall** (lossless, default) | Never drop a frame. In today's **serial** executor there is no concurrent drain to wait on (a frame's consumers run later in the *same* cycle, after the producer), so an exhausted arena is a hard, actionable stop ("raise the slot count"). When a pipelined executor lands (M3+), Stall becomes a real block-the-producer wait. | Inspection, folder-sequence replay — every frame matters |
+| **Drop** (lossy) | Skip the frame for its out-of-process consumers this cycle (in-process consumers on the same output still get the heap frame), count it (`report.DroppedFrames`), keep the source running so latency stays bounded. | Live camera — the newest frame matters more than every frame |
+
+**Permanent vs transient failure.** A publish can fail two ways, and they are *not* the same: a frame that
+can never fit a slot (larger than the slot) is a **sizing error**, not backpressure — waiting forever or
+dropping every frame forever are both useless, so it stops the run under *any* policy with a "raise the slot
+size" message. Only a *momentarily full* arena is backpressure and subject to the policy.
+
+**What this replaced.** Before D.1, a full arena was a silent accident: routing fell back to handing the heap
+frame to a worker edge, the worker's marshal tried to publish again and threw, and the executor swallowed
+that as a generic "node threw during execution" — an undiagnosed, uncounted, misleadingly-labeled drop. Now
+the outcome is explicit, counted, and policy-driven.
+
+**Implementation:** `BackpressurePolicy` (Graph.Execution) on `PipelineExecutionOptions` (default `Stall`);
+the executor classifies a failed publish as `ArenaFull` vs `PayloadTooLarge` from `dataPlane.SlotSize`;
+`report.DroppedFrames` surfaces drops; CLI `execute-graph --backpressure stall|drop`. The policy is a
+**run-level** default for now; the design intent is a **per-source** override (folder-replay lossless, live
+camera lossy) — that lands with source-node config wiring in a later slice.
+
+**Not yet done (future M3 slices):** per-source policy override; a real block-the-producer Stall once the
+executor pipelines; credit-based flow when producers and consumers run concurrently.

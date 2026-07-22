@@ -38,6 +38,14 @@ public sealed class PipelineExecutionOptions
     public string? CheckpointDirectory { get; init; }
 
     /// <summary>
+    /// What to do when an arena-backed producer cannot publish because the shared data plane is full.
+    /// <see cref="BackpressurePolicy.Stall"/> (default) is lossless — it stops the run rather than lose a
+    /// frame; <see cref="BackpressurePolicy.Drop"/> is lossy — it drops the frame for out-of-process
+    /// consumers and keeps the source running. Inactive when the graph has no out-of-process workers.
+    /// </summary>
+    public BackpressurePolicy BackpressurePolicy { get; init; } = BackpressurePolicy.Stall;
+
+    /// <summary>
     /// Optional callback invoked at the end of each completed cycle.
     /// Use to observe real-time progress without polling.
     /// </summary>

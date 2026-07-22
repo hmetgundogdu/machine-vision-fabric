@@ -315,13 +315,21 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
             : Path.Combine(packageRoot, ".mvf", "checkpoint");
     }
 
+    // Backpressure policy for the shared data plane: stall (lossless, default) fails a run rather than
+    // lose a frame; drop (lossy) skips a frame for out-of-process consumers when the arena is full.
+    var backpressure = invocation.Options.TryGetValue("backpressure", out var bp)
+        && string.Equals(bp, "drop", StringComparison.OrdinalIgnoreCase)
+        ? BackpressurePolicy.Drop
+        : BackpressurePolicy.Stall;
+
     var options = new PipelineExecutionOptions
     {
         PackageRoot = packageRoot,
         IntegrationsRoot = integrationsRoot,
         MaxCycles = maxCycles,
         CheckpointIntervalCycles = checkpointEvery,
-        CheckpointDirectory = checkpointDirectory
+        CheckpointDirectory = checkpointDirectory,
+        BackpressurePolicy = backpressure
     };
 
     var validator = host.Services.GetRequiredService<IPipelineDefinitionValidator>();
@@ -348,7 +356,9 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         Console.WriteLine($"Pipeline: {definition.Name}  nodes:{definition.Nodes.Count}  edges:{definition.Edges.Count}");
         await executionHost.StartAsync(definition, options);
         var report = await executionHost.WaitForCompletionAsync();
-        Console.WriteLine($"Succeeded:{report?.Succeeded}  cycles:{report?.TotalCycles}  accepted:{report?.AcceptedCycles}  duration:{report?.Duration.TotalSeconds:F2}s");
+        Console.WriteLine($"Succeeded:{report?.Succeeded}  cycles:{report?.TotalCycles}  accepted:{report?.AcceptedCycles}  dropped:{report?.DroppedFrames}  duration:{report?.Duration.TotalSeconds:F2}s");
+        if (report is { DroppedFrames: > 0 })
+            Console.WriteLine($"  backpressure: dropped {report.DroppedFrames} frame(s) (policy=drop, arena full)");
         foreach (var (nid, ns) in report?.NodeStats ?? new Dictionary<string, Mvf.Graph.Execution.NodeExecutionStats>())
             Console.WriteLine($"  {nid}: cycles={ns.TotalCycles} faults={ns.FaultedCycles} avg={ns.AverageDurationMs:F1}ms");
         if (report is null || !report.Succeeded)
@@ -484,7 +494,7 @@ void PrintHelp()
 {
     Console.WriteLine("Mvf.Cli");
     Console.WriteLine("Commands:");
-    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--no-tui]");
+    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--no-tui]");
     Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");
     Console.WriteLine("  modules [--root <path>]");
     Console.WriteLine("  packages [--root <path>]");
