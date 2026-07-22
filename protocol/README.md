@@ -13,9 +13,18 @@ engine sets the child's `MVF_ARENA_PATH` env var to a memory-mapped file; a payl
 
 ## Messages
 
-Child → engine, on start (handshake):
+Child → engine, on start (handshake). Ready immediately (no warmup):
 ```json
 {"type":"hello","protocol":1,"moduleId":"py.brightness-classifier","capability":"classifier"}
+```
+
+Child → engine, when the module warms up asynchronously (loads a model, connects a device): the
+`hello` says `"ready": false`, the child warms up, then signals `ready` (sd_notify `READY=1` style).
+The engine waits for `ready` bounded by its **startup budget** — a slow warmup is a *startup* concern,
+not a liveness failure, so it must not be mistaken for a hang. Absent/`true` `ready` = ready now.
+```json
+{"type":"hello","protocol":1,"moduleId":"py.warmup-classifier","capability":"classifier","ready":false}
+{"type":"ready","moduleId":"py.warmup-classifier"}
 ```
 
 Engine → child, run one node cycle:
@@ -73,4 +82,6 @@ Engine → child, shutdown (engine then closes stdin):
 - Every `execute` has an `id`; the matching `result`/`error` echoes it.
 - `log` lines may appear at any time and are not responses.
 - The child must `hello` before the engine sends any request.
+- If the `hello` has `"ready": false`, the child must send `ready` (or exit) before the engine's startup
+  budget elapses; the engine sends no request until then. `log` lines may precede `ready`.
 - Flush after every line so the parent reads promptly.

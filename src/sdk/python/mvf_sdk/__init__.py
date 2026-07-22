@@ -220,14 +220,25 @@ def _do_restore(msg, request_id, arena_view, on_restore):
     _send({"type": "restored", "id": request_id})
 
 
-def _serve(module_id, capability, writable, on_execute, on_checkpoint, on_restore):
-    """Shared stdio loop: handshake, dispatch execute + checkpoint/restore, per-request error isolation."""
+def _serve(module_id, capability, writable, on_execute, on_checkpoint, on_restore, on_start=None):
+    """Shared stdio loop: handshake, dispatch execute + checkpoint/restore, per-request error isolation.
+
+    Readiness (sd_notify-style, see protocol/README.md): when ``on_start`` is given, the module warms up
+    (e.g. loads a model, connects a device) *after* the ``hello`` handshake and signals ``ready`` when done.
+    The ``hello`` carries ``"ready": false`` so the engine waits (bounded by its startup budget) — a slow
+    warmup is a startup concern, not a liveness failure. With no ``on_start`` the module is ready at once.
+    """
     arena = _open_arena(writable=writable)
     if arena is None:
         raise RuntimeError("MVF_ARENA_PATH is not set — the shared-memory data plane is required.")
     arena_view = memoryview(arena)
     try:
-        _send({"type": "hello", "protocol": 1, "moduleId": module_id, "capability": capability})
+        if on_start is not None:
+            _send({"type": "hello", "protocol": 1, "moduleId": module_id, "capability": capability, "ready": False})
+            on_start()  # warmup: load model / connect device / init
+            _send({"type": "ready", "moduleId": module_id})
+        else:
+            _send({"type": "hello", "protocol": 1, "moduleId": module_id, "capability": capability})
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -252,12 +263,13 @@ def _serve(module_id, capability, writable, on_execute, on_checkpoint, on_restor
         arena.close()
 
 
-def run_classifier(module_id, classify, on_checkpoint=None, on_restore=None):
+def run_classifier(module_id, classify, on_checkpoint=None, on_restore=None, on_start=None):
     """Run the stdio loop for a classifier module.
 
     ``classify(payload, meta)`` returns ``(label, measurement, unit, details)`` (last three optional).
     Optional ``on_checkpoint() -> Output|None`` and ``on_restore(payload)`` make the module's state
-    survive a restart (see :func:`blob` / :func:`tensor`).
+    survive a restart (see :func:`blob` / :func:`tensor`). Optional ``on_start()`` runs warmup after the
+    handshake (load a model / connect a device); the module signals ``ready`` when it returns.
     """
     def on_execute(msg, request_id, arena_view):
         frame = msg.get("frame") or {}
@@ -273,14 +285,15 @@ def run_classifier(module_id, classify, on_checkpoint=None, on_restore=None):
         })
 
     writable = on_checkpoint is not None or on_restore is not None
-    _serve(module_id, "classifier", writable, on_execute, on_checkpoint, on_restore)
+    _serve(module_id, "classifier", writable, on_execute, on_checkpoint, on_restore, on_start)
 
 
-def run_processor(module_id, transform, on_checkpoint=None, on_restore=None):
+def run_processor(module_id, transform, on_checkpoint=None, on_restore=None, on_start=None):
     """Run the stdio loop for a transformer module (frame in -> new frame out).
 
     ``transform(payload, meta)`` returns an :class:`Output` (see :func:`blob` / :func:`tensor`) or
-    ``None`` to drop the frame. Optional ``on_checkpoint``/``on_restore`` persist module state.
+    ``None`` to drop the frame. Optional ``on_checkpoint``/``on_restore`` persist module state. Optional
+    ``on_start()`` runs warmup after the handshake; the module signals ``ready`` when it returns.
     """
     def on_execute(msg, request_id, arena_view):
         frame = msg.get("frame") or {}
@@ -299,4 +312,4 @@ def run_processor(module_id, transform, on_checkpoint=None, on_restore=None):
             output.shape, _as_bytes(output.data), int(out["capacity"]))
         _send({"type": "result", "id": request_id, "frame": {"shm": {"offset": int(out["offset"])}}})
 
-    _serve(module_id, "processor", True, on_execute, on_checkpoint, on_restore)
+    _serve(module_id, "processor", True, on_execute, on_checkpoint, on_restore, on_start)

@@ -1,0 +1,9 @@
+{
+  "id": "py.warmup-classifier",
+  "name": "Warmup Classifier (readiness demo)",
+  "version": "1.0.0",
+  "kind": "classifier",
+  "runtime": "python",
+  "entry": "classifier.py",
+  "lifecycle": "resident"
+}

@@ -71,6 +71,13 @@ public sealed class StdioWorkerProcess : IWorkerChannel
         {
             psi.Environment["MVF_ARENA_PATH"] = info.ArenaPath;
         }
+        if (info.Environment is not null)
+        {
+            foreach (var (key, value) in info.Environment)
+            {
+                psi.Environment[key] = value;
+            }
+        }
 
         var process = Process.Start(psi)
             ?? throw new InvalidOperationException($"Failed to start worker '{info.Command}'.");
@@ -82,14 +89,66 @@ public sealed class StdioWorkerProcess : IWorkerChannel
         }, cancellationToken);
 
         var worker = new StdioWorkerProcess(process);
-        var hello = await worker.ReadMessageAsync(cancellationToken)
-            ?? throw new InvalidOperationException("Worker exited before sending a hello handshake.");
-        if ((string?)hello["type"] != "hello")
+
+        // Bound the whole startup handshake (hello + optional readiness) by the startup budget, so a slow
+        // model load / device connect can't hang the engine — and a budget overrun is reported as a
+        // *startup* failure, not mistaken for a mid-run liveness hang (K8s startup-vs-liveness separation).
+        var budget = info.StartupBudget ?? TimeSpan.FromSeconds(30);
+        using var startupCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        startupCts.CancelAfter(budget);
+
+        try
         {
-            throw new InvalidOperationException("Worker did not send a hello handshake.");
+            var hello = await worker.ReadMessageAsync(startupCts.Token)
+                ?? throw new WorkerStartupException("Worker exited before sending a hello handshake.");
+            if ((string?)hello["type"] != "hello")
+            {
+                throw new WorkerStartupException("Worker did not send a hello handshake.");
+            }
+            worker.ModuleId = (string?)hello["moduleId"] ?? string.Empty;
+
+            // Readiness (sd_notify-style): a worker that warms up asynchronously says "ready": false in its
+            // hello and sends a separate `ready` when warm. Absent/true → ready now (backward compatible).
+            if (hello["ready"] is JsonValue readyValue && readyValue.TryGetValue<bool>(out var ready) && !ready)
+            {
+                await worker.WaitForReadyAsync(startupCts.Token);
+            }
         }
-        worker.ModuleId = (string?)hello["moduleId"] ?? string.Empty;
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The budget elapsed (not the caller's cancellation) → a startup timeout.
+            await worker.DisposeAsync();
+            throw new WorkerStartupException(
+                $"Worker '{info.Command}' did not become ready within the startup budget ({budget.TotalSeconds:F0}s).");
+        }
+        catch
+        {
+            await worker.DisposeAsync();
+            throw;
+        }
+
         return worker;
+    }
+
+    /// <summary>Waits for the child's <c>ready</c> signal after warmup, skipping log lines.</summary>
+    private async Task WaitForReadyAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var message = await ReadMessageAsync(cancellationToken)
+                ?? throw new WorkerStartupException("Worker exited during warmup before signaling ready.");
+            var type = (string?)message["type"];
+            if (type == "log")
+            {
+                continue;
+            }
+            if (type == "ready")
+            {
+                return;
+            }
+
+            throw new WorkerStartupException($"Worker sent '{type}' while the engine was waiting for readiness.");
+        }
     }
 
     /// <summary>Send one request and read the matching response (skipping log lines).</summary>
