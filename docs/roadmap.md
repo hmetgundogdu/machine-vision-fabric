@@ -66,7 +66,8 @@ Most of this is a **move/regroup**, not new code. New: `protocol/`, `transports/
 |----|-----------|--------|
 | M0 | Draw seams + folder/architecture; design docs | 🟡 In progress (docs + north-star folder/project rename done; ITransport/IModuleHost seams deferred to M1/M2) |
 | M1 | Out-of-process module host (Python), control plane over local **stdio** | ⬜ Not started |
-| M2 | Our own **shared-memory** zero-copy data plane, graph-aware (no network) | ⛔ Blocked — **discuss design with user first** |
+| M2 | Our own **shared-memory** zero-copy data plane, graph-aware (no network) — see `data-plane-design.md` | 🟢 Design agreed; impl not started |
+| M2.5 | **Snapshot + module-state recovery** (engine-allocated state + context slot, cycle-boundary snapshots, resume-after-crash) | ⬜ Not started (ambitious; after M2 core) |
 | M3 | Hardening: backpressure, crash recovery, warm pools, cross-process observability | ⬜ Not started |
 | M4 | Later frontiers: WASM tier, GPU handles (DLPack/CUDA-IPC) — **distributed is a non-goal** | ⬜ Not started |
 
@@ -109,6 +110,10 @@ NO network** (not adopting iceoryx/Zenoh) — because the differentiator is that
 refcounts/routing). The transport decision is settled; the **detailed design** (pool/handle/
 lifetime/backpressure/signaling) is still to be worked out **together with the user**. Before
 writing implementation: **stop and design it with the user.** Reminder is also stored in memory.
+
+**The design decisions are now agreed and captured in [`data-plane-design.md`](data-plane-design.md)**
+(ownership/mutation, variable auto-sized buffers, precomputed refcounts, engine-owned pool,
+descriptor-in-header, engine context slot, engine-allocated module state, snapshot recovery).
 
 ## Appendix — captured design knowledge (keep in pocket for M2)
 - **Control plane vs data plane split (physical).** Small messages (orchestration,
