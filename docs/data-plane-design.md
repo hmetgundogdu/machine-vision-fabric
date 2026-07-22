@@ -178,3 +178,61 @@ B.3 lands; until then, no arena frame is ever re-emitted, so it cannot bite.
 new capability .NET itself lacks; engine pre-allocates the output slot and passes both handles in
 `execute`, so no child-side allocator) and the **context slot**. **Slice C = M2.5**: module state slot
 + snapshot + resume.
+
+---
+
+## Generic typed-payload plane (B.3 — agreed with user 2026-07-22)
+The data plane is **not frame-specific**. It carries **opaque, byte-based payloads with a
+self-describing typed descriptor**, so a consumer materializes the bytes as a **native object with
+zero effort** (numpy array / .NET `Span`/tensor) — "as if a piece of memory already in use." No base64,
+anywhere; payloads always travel as raw bytes through the arena.
+
+### Layering
+- **Core stays minimal and does not interpret payloads.** It stores `[header | payload]`, and it
+  **validates** the descriptor at every boundary — but it never parses the bytes.
+- **Format standards live in the per-language SDKs.** We write a small typed-payload package inside each
+  SDK (Python: `numpy.frombuffer`/buffer protocol; .NET: `Span<T>`/tensor). No external Arrow/DLPack
+  dependency in the core; the descriptor is kept **DLPack-compatible** so numpy/torch interop is free.
+- **The type is declared by the module** (its `module.json`/schema port types) → becomes the static
+  edge type → the engine validates the runtime descriptor against it. Authors see/define these while
+  building the module.
+
+### Descriptor (DLPack-style, in the slot header, little-endian, fixed layout)
+Everything numeric is a **tensor**: `mediaType + elementType(dtype) + shape[] (+ derived C-contiguous
+strides) + epoch`. An **image** is a `u8` tensor `[H,W,C]` with `mediaType=Image`; **JSON**/blob is a
+rank-0/1 byte payload with `mediaType=Json`/`Blob`. One unified representation. The descriptor is fixed
+binary (never JSON) so reading it is a few field reads with no allocation; `mediaType` is a small
+registry id, not a string compare. The descriptor sits **in the slot header** (co-located with the
+bytes) so one handle carries everything; stdio only carries the handle/offset.
+
+### Strict rules — security (edge case → rule)
+1. **Malformed/hostile descriptor** (payloadLength > slot, out-of-bounds shape) → the engine **validates
+   every descriptor** at the boundary: `product(shape) × elementSize == payloadLength`, header+payload ≤
+   slot capacity, rank ≤ `MaxRank`, known dtype/mediaType. Invalid → drop + fault the node; never propagate.
+2. **Type confusion** (worker declares X, edge expects Y) → the runtime descriptor type must equal the
+   **static graph edge type**; mismatch = reject. (Typing discipline = our edge.)
+3. **Out-of-slot write** (a rogue worker corrupting bookkeeping) → the free-list / refcount / lease
+   tables are **engine-private (not in the shared file)**; a worker sees only its input (read) and one
+   output slot. An **epoch** counter in the header detects stale handles.
+4. **Use-after-free** → lifetime is engine-owned; a worker may touch a buffer **only during the RPC that
+   carries it** and never after replying.
+5. **Integer overflow** (shape product, offset+len) → all size math is **checked / 64-bit**; reject on
+   overflow.
+6. **Endianness / alignment** → byte order is fixed **little-endian**; the payload is **64-byte aligned**
+   (header size is a multiple of 64) so numpy/SIMD wrap without a copy.
+7. **v1 strictness: C-contiguous only.** Non-contiguous strides are rejected in v1 (simpler bounds proof,
+   trivial zero-copy wrap); relax later if a real need appears.
+
+### Strict rules — performance
+- **Zero-copy read**: the consumer wraps the payload in place (buffer protocol / `Span`); no parse on the
+  hot path (JSON is the inherent exception). Payload aligned; descriptor co-located; binary (not JSON).
+
+### Staging
+1. **Descriptor foundation** — `PayloadDescriptor` (dtype/shape/strides + write/read/validate), unit
+   tested. (Pure contract; no wiring.)
+2. **Arena + seam carry a typed payload** — slot header holds the descriptor; `IDataPlane` publishes
+   `(descriptor, bytes)`; the classifier path publishes a `u8` image tensor; the Python SDK returns a
+   **numpy array (zero-copy)**. Base64 fallback retired on this path.
+3. **Transformer** on the typed model — worker output = a typed payload (shm, no base64) → live-edge-occupancy
+   refcount.
+4. Further types (`f32` tensor, JSON) + Arrow/DLPack SDK adapters.
