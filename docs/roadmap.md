@@ -82,7 +82,8 @@ is now lean. Tests 39/39.
 | M1 | Out-of-process module host (Python), control plane over local **stdio** | 🟢 Slices 1–2 done — Python classifier auto-wired from its manifest `runtime`; `IOutOfProcessModuleHost` seam + `StdioModuleHost`; real-python e2e test green |
 | M2 | Our own **shared-memory** zero-copy data plane, graph-aware (no network) — see `data-plane-design.md` | 🟢 Slices A + B + **B.3 done**. Engine-owned arena behind `IDataPlane`; graph-aware publish-once fan-out; generic **typed-payload** plane (DLPack-style `PayloadDescriptor` in the slot header, engine-validated; SDKs wrap bytes as zero-copy `memoryview`/numpy / `Span`; **no base64**). **Worker transformer** (frame-out): the engine pre-allocates the output slot, the child writes a new frame into the arena, and **live-edge-occupancy refcounts** (AddRef on re-emit before releasing consumed inputs) keep pass-through/fan-out balanced. Real-python classifier + transformer round-trips green. Next: **snapshot + module-state recovery** (M2.5) |
 | M2.5 | **Snapshot + module-state recovery** (checkpoint/restore module state, worker-crash supervision, resume-after-crash) | 🟢 **C.1 + C.2 done.** C.1: module state captured/restored via a shared-memory slot (**no base64**); `SupervisedWorker` restarts a crashed child, restores it, and retries; the executor checkpoints stateful workers at cycle boundaries (`--checkpoint-every N`). C.2: captured states persist to a checkpoint dir (`--resume-dir`, atomic per-node files) and are **restored before the first cycle** on the next start, so a restarted process resumes; a clean, fully-consumed run clears them. Because a **source's position is just its checkpointable state**, the source resumes too — no separate cursor. Real-python worker crash recovers mid-run; a fresh executor resumes source + module state coherently (frames 3,4 not 1,2). Follow-up: a checkpointable **folder-sequence source** for a hardware-free resumable demo (Simulator-First) |
-| M3 | Hardening: backpressure, crash recovery, warm pools, cross-process observability | 🟡 **Slice D.1 (backpressure) done.** Data-plane publish is now policy-driven: `BackpressurePolicy` (**Stall** = lossless, default; **Drop** = lossy) on `PipelineExecutionOptions`; the executor classifies a failed publish as transient (arena full → policy) vs permanent (payload larger than a slot → hard stop under any policy); `report.DroppedFrames` counts drops; CLI `execute-graph --backpressure stall\|drop`. Replaces the old silent "worker threw" fallback. Serial-executor caveat: Stall fails fast (no concurrent drain to wait on) — a real block-the-producer Stall + per-source policy override arrive with the pipelined executor. See `data-plane-design.md` §Backpressure. Remaining M3: crash-recovery slot-reclaim, warm pools, cross-process observability |
+| M3 | Hardening: backpressure, crash recovery, warm pools, cross-process observability | 🟡 **Slice D.1 (backpressure) done.** Data-plane publish is now policy-driven: `BackpressurePolicy` (**Stall** = lossless, default; **Drop** = lossy) on `PipelineExecutionOptions`; the executor classifies a failed publish as transient (arena full → policy) vs permanent (payload larger than a slot → hard stop under any policy); `report.DroppedFrames` counts drops; CLI `execute-graph --backpressure stall\|drop`. Replaces the old silent "worker threw" fallback. Serial-executor caveat: Stall fails fast (no concurrent drain to wait on) — a real block-the-producer Stall + per-source policy override arrive with the pipelined executor. See `data-plane-design.md` §Backpressure. **Finding (2026-07-23): crash-recovery slot-reclaim is a non-gap** — the free-list is engine-owned and workers only read handed-in handles, so a dead worker holds no leases of its own; every engine allocation already has try/finally cleanup + `SupervisedWorker` retry. Remaining M3: **module lifecycle (L-track, below)**, cross-process observability |
+| L | **Module lifecycle** — standards-aligned readiness contract (model/package/device/init all = "is this module ready?"). See `module-lifecycle-design.md` | 🟡 **Design agreed (standards-aligned)**; L.1 next. Absorbs the old M3 "warm pools" bullet |
 | M4 | Later frontiers: WASM tier, GPU handles (DLPack/CUDA-IPC) — **distributed is a non-goal** | ⬜ Not started |
 
 ### M0 — Seams + structure (low risk, behavior unchanged)
@@ -128,6 +129,27 @@ the harder lifetime/ownership choices and should be talked through as they come 
 
 ### M3 / M4
 Hardening then optional frontiers (see table).
+
+### L-track — Module lifecycle (standards-aligned)
+The trigger was "model lifecycle," but the real abstraction is **module readiness**: loading an ML model,
+loading a package, connecting a camera/PLC, or finishing init are the same question — *"is this module
+ready to do work, and how does the engine treat it while it is not?"* Today the contract is a lie
+(`NodeActivationMode`/`activationMode` exist but nothing consumes them; everything is de-facto resident).
+The L-track makes it **declared, observed, and enforced**, aligned to Kubernetes probes (startup/readiness/
+liveness), OSGi bundle states, systemd `sd_notify`, and Triton model-control modes. Full design +
+citations in [`module-lifecycle-design.md`](module-lifecycle-design.md).
+
+| ID | Work item | Standard it mirrors | Status |
+|----|-----------|---------------------|--------|
+| **L.1** | Lifecycle contract **real & observed**: parse+validate `activationMode`→`NodeActivationMode` (reject unknown); `module.json` declares a default `lifecycle` profile; node overrides module default; executor **measures + reports per-node warmup (activation) duration** (`WarmupMs`). No behavior change for resident — the honest, low-risk first cut. | K8s startup probe; OSGi declared state | ⬜ Next |
+| **L.2** | **Explicit readiness signal** over stdio: a worker emits `ready` when warmup completes; the engine waits for readiness (bounded by a startup budget) before routing; startup-vs-liveness separation so a slow model load isn't mistaken for a hang. | systemd `sd_notify READY=1`; K8s readiness/liveness split | ⬜ |
+| **L.3** | **On-demand & idle-unload**: honor `OnDemand` — lazy-activate on first use, optional unload after N idle cycles. Needs a real short-helper node. | Triton EXPLICIT / lazy-load | ⬜ |
+| **L.4** | **Warm pools**: pre-warmed worker instances so restart/scale hides cold-start. (Absorbs the old M3 "warm pools" bullet.) | Warm pools / K8s | ⬜ |
+| **L.5** | **Hot-reload / package watch**: reload a module when its package changes. Frontier. | Triton POLL | ⬜ |
+
+**Not in the L-track:** a real **ONNX inference node** is a separate, larger item (needs a model + hardware
+story). The L-track defines the lifecycle *contract* that such a node — and a package loader, and a device
+connector — all plug into. Contract first; heavy nodes inherit it.
 
 ---
 
