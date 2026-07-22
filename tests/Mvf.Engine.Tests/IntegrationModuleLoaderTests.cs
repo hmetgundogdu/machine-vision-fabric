@@ -42,8 +42,8 @@ public sealed class IntegrationModuleLoaderTests
         while (currentDirectory is not null)
         {
             var hasSrc = Directory.Exists(Path.Combine(currentDirectory.FullName, "src"));
-            var hasRealWorld = Directory.Exists(Path.Combine(currentDirectory.FullName, "real-world-projects"));
-            if (hasSrc && hasRealWorld)
+            var hasMarker = File.Exists(Path.Combine(currentDirectory.FullName, "CLAUDE.md"));
+            if (hasSrc && hasMarker)
             {
                 return currentDirectory.FullName;
             }

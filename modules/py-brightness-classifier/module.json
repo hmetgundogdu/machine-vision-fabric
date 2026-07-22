@@ -1,0 +1,9 @@
+{
+  "moduleId": "py.brightness-classifier",
+  "displayName": "Brightness Classifier (Python)",
+  "version": "1.0.0",
+  "runtime": "python",
+  "entry": "classifier.py",
+  "capability": "classifier",
+  "category": "classify"
+}

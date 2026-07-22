@@ -6,6 +6,9 @@
   <Folder Name="/src/engine/">
     <Project Path="src/engine/Mvf.Engine/Mvf.Engine.csproj" />
   </Folder>
+  <Folder Name="/src/hosting/">
+    <Project Path="src/hosting/Mvf.Hosting.Worker/Mvf.Hosting.Worker.csproj" />
+  </Folder>
   <Folder Name="/src/sdk/">
     <Project Path="src/sdk/dotnet/Mvf.Sdk/Mvf.Sdk.csproj" />
   </Folder>

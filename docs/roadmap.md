@@ -65,7 +65,7 @@ Most of this is a **move/regroup**, not new code. New: `protocol/`, `transports/
 | ID | Work item | Status |
 |----|-----------|--------|
 | M0 | Draw seams + folder/architecture; design docs | 🟡 In progress (docs + north-star folder/project rename done; ITransport/IModuleHost seams deferred to M1/M2) |
-| M1 | Out-of-process module host (Python), control plane over local **stdio** | ⬜ Not started |
+| M1 | Out-of-process module host (Python), control plane over local **stdio** | 🟡 Slice 1 done — Python classifier runs out-of-process, plugs into IFrameClassifier; e2e test green |
 | M2 | Our own **shared-memory** zero-copy data plane, graph-aware (no network) — see `data-plane-design.md` | 🟢 Design agreed; impl not started |
 | M2.5 | **Snapshot + module-state recovery** (engine-allocated state + context slot, cycle-boundary snapshots, resume-after-crash) | ⬜ Not started (ambitious; after M2 core) |
 | M3 | Hardening: backpressure, crash recovery, warm pools, cross-process observability | ⬜ Not started |
@@ -82,15 +82,20 @@ Most of this is a **move/regroup**, not new code. New: `protocol/`, `transports/
 - Note: `ITransport` / `IModuleHost` seams are extracted **when their shape is known**
   (M1/M2), to avoid premature abstraction — not built speculatively in M0.
 
-### M1 — Polyglot module host, Python-first (control plane only)
-- Out-of-process worker host; a Python module runs as a separate co-located process and
-  talks to the engine over **local stdio** (length-prefixed protobuf/JSON messages).
-- M1 covers **control** only: handshake, lifecycle (spawn/health/stop), run request/result.
-  Frame data is the data plane's job (M2, shared memory) — no frame bytes over stdio.
-- Deliverable: a Python classifier node wired into the cognex pipeline; the frame it reads
-  arrives via the shared-memory data plane once M2 lands.
-- Proves protocol + Python SDK + lifecycle.
-- **Decision 2:** ✅ Resolved — control plane = **stdio + protobuf/JSON**, no network/gRPC.
+### M1 — Polyglot module host, Python-first
+- Out-of-process worker host; a module runs as a separate co-located process and talks to
+  the engine over **local stdio** (newline-delimited JSON; protobuf later). No network.
+- For M1 the frame is carried **inline over the stdio pipe (base64 copy)** — a local pipe,
+  not the network. M2 replaces the payload with a shared-memory handle (zero copy).
+- **Slice 1 (done):** protocol (`protocol/README.md`), Python SDK (`src/sdk/python/mvf_sdk`),
+  sample `modules/py-brightness-classifier`, and `Mvf.Hosting.Worker` — a
+  `WorkerFrameClassifier : IFrameClassifier` that spawns the Python process and drops into the
+  existing FrameClassifierNodeRunner unchanged. End-to-end test spawns python3 and asserts
+  black/ok classification. Targets: Python + Node.js + out-of-proc .NET (same JSON protocol).
+- **Slice 2 (next):** manifest `runtime`/`entry` discovery + activator wiring so a
+  `runtime: "python"` module is picked up automatically in a pipeline.json (today the worker
+  host is exercised directly by the test, not yet auto-wired by the loader).
+- **Decision 2:** ✅ Resolved — control plane = **stdio + JSON** (protobuf later), no network/gRPC.
 
 ### M2 — Shared-memory data plane ⛔ GATE
 **Do NOT implement before an explicit design discussion with the user.** The user will

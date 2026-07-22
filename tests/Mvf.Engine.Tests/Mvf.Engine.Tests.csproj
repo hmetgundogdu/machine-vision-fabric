@@ -22,6 +22,7 @@
     <ProjectReference Include="..\..\src\core\Mvf.Graph\Mvf.Graph.csproj" />
     <ProjectReference Include="..\..\src\core\Mvf.Abstractions\Mvf.Abstractions.csproj" />
     <ProjectReference Include="..\..\src\engine\Mvf.Engine\Mvf.Engine.csproj" />
+    <ProjectReference Include="..\..\src\hosting\Mvf.Hosting.Worker\Mvf.Hosting.Worker.csproj" />
     <ProjectReference Include="..\..\src\sdk\dotnet\Mvf.Sdk\Mvf.Sdk.csproj" />
   </ItemGroup>
 
