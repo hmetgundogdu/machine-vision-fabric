@@ -10,6 +10,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="integration-module.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="module.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

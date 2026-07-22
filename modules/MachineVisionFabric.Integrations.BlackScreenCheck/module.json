@@ -1,0 +1,8 @@
+{
+  "id": "mvf.black-screen-check",
+  "name": "Black Screen Check",
+  "version": "1.0.0",
+  "kind": "processor",
+  "runtime": "dotnet",
+  "entry": "MachineVisionFabric.Integrations.BlackScreenCheck.dll"
+}

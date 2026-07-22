@@ -22,7 +22,7 @@ var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
 };
 
 WriteSchema<IntegrationModuleDescriptor>("integration-module-descriptor.schema.json");
-WriteSchema<IntegrationModuleManifest>("integration-module-manifest.schema.json");
+WriteSchema<ModuleManifest>("module-manifest.schema.json");
 WriteSchema<IntegrationCapabilityDescriptor>("integration-capability-descriptor.schema.json");
 WriteSchema<ModulePortDescriptor>("module-port-descriptor.schema.json");
 WriteSchema<PipelineDefinition>("pipeline-definition.schema.json");

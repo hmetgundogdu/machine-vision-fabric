@@ -1,0 +1,8 @@
+{
+  "id": "mvf.dataset-writer",
+  "name": "Dataset Writer",
+  "version": "1.0.0",
+  "kind": "sink",
+  "runtime": "dotnet",
+  "entry": "MachineVisionFabric.Integrations.DatasetWriter.dll"
+}

@@ -1,0 +1,8 @@
+{
+  "id": "mvf.realworld-cognex-camera",
+  "name": "Cognex In-Sight Camera",
+  "version": "1.0.0",
+  "kind": "source",
+  "runtime": "dotnet",
+  "entry": "MachineVisionFabric.Integrations.CognexCamera.dll"
+}

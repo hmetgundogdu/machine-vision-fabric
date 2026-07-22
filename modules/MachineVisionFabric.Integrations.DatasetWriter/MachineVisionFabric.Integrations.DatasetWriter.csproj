@@ -14,7 +14,7 @@
 
   <ItemGroup>
     <!-- Copy the manifest to output so the loader can discover it next to the DLL. -->
-    <None Include="integration-module.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="module.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

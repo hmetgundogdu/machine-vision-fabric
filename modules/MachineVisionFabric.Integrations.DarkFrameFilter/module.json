@@ -1,0 +1,8 @@
+{
+  "id": "mvf.realworld-dark-frame-filter",
+  "name": "Dark Frame Filter",
+  "version": "1.0.0",
+  "kind": "processor",
+  "runtime": "dotnet",
+  "entry": "MachineVisionFabric.Integrations.DarkFrameFilter.dll"
+}

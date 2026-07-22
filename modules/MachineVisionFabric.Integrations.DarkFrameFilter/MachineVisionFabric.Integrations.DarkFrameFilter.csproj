@@ -23,6 +23,6 @@
           CopyToOutputDirectory="PreserveNewest" TargetPath="runtimes\win-x64\native\OpenCvSharpExtern.dll" />
     <None Include="$(PkgOpenCvSharp4_runtime_win)\runtimes\win-x64\native\opencv_videoio_ffmpeg4100_64.dll"
           CopyToOutputDirectory="PreserveNewest" TargetPath="runtimes\win-x64\native\opencv_videoio_ffmpeg4100_64.dll" />
-    <None Update="integration-module.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="module.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

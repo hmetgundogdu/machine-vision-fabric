@@ -9,20 +9,22 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace Mvf.Engine.Plugins;
 
 /// <summary>
-/// Discovers integration modules by scanning <c>integration-module.json</c> manifests under a plugin root.
+/// Discovers .NET modules by scanning <c>module.json</c> manifests under a plugin root and
+/// loading the assembly beside each one. The entry type is auto-discovered (the single public
+/// <see cref="IIntegrationModule"/> in the assembly) — the manifest never names it.
+///
+/// Non-.NET (process) modules also use <c>module.json</c> but are handled by the worker host,
+/// not here; this loader skips them.
 ///
 /// A module that cannot be loaded is skipped rather than failing the whole scan, so one broken
-/// plugin never takes the runtime down. Every skip is logged as a warning with its reason —
-/// without that, a rejected module is indistinguishable from one that was never deployed.
+/// plugin never takes the runtime down; every skip is logged with its reason.
 /// </summary>
 public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? logger = null) : IIntegrationModuleLoader
 {
     private readonly ILogger _logger = logger ?? NullLogger<IntegrationModuleLoader>.Instance;
 
-    private const string ManifestFileName = "integration-module.json";
+    private const string ManifestFileName = "module.json";
 
-    // Capability "kind" is written as a readable string ("source", "processor", ...) in
-    // manifests. JsonStringEnumConverter also still accepts the legacy integer form.
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         Converters = { new JsonStringEnumConverter() }
@@ -42,7 +44,7 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
         }
 
         var candidatesByModuleId = new Dictionary<string, ModuleCandidate>(StringComparer.OrdinalIgnoreCase);
-        var missingAssemblyByModuleId = new Dictionary<string, (string EntryAssembly, string AssemblyPath)>(StringComparer.OrdinalIgnoreCase);
+        var missingAssemblyByModuleId = new Dictionary<string, (string Entry, string AssemblyPath)>(StringComparer.OrdinalIgnoreCase);
         foreach (var manifestPath in Directory.EnumerateFiles(fullPluginRoot, ManifestFileName, SearchOption.AllDirectories))
         {
             if (!IsRuntimeManifestPath(manifestPath))
@@ -56,14 +58,20 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
                 continue;
             }
 
-            var assemblyPath = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(manifestPath) ?? fullPluginRoot, manifest.EntryAssembly));
+            // Process (python/node/...) modules use the same manifest but are launched by the
+            // worker host, not loaded as .NET assemblies here.
+            if (!string.Equals(manifest.Runtime, "dotnet", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var assemblyPath = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(manifestPath) ?? fullPluginRoot, manifest.Entry));
             if (!File.Exists(assemblyPath) || !IsRuntimeAssemblyPath(assemblyPath))
             {
                 // Defer this warning. A module commonly appears twice under one root: a
-                // source-tree manifest with no co-located DLL, plus a built copy under
-                // bin/ that loads fine. Warning here would flag a module that is actually
-                // available. Record it and only warn below if no deployable copy is found.
-                missingAssemblyByModuleId.TryAdd(manifest.ModuleId, (manifest.EntryAssembly, assemblyPath));
+                // source-tree manifest with no co-located DLL, plus a built copy under bin/
+                // that loads fine. Only warn below if no deployable copy is found anywhere.
+                missingAssemblyByModuleId.TryAdd(manifest.Id, (manifest.Entry, assemblyPath));
                 continue;
             }
 
@@ -74,10 +82,10 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
             }
 
             var candidate = new ModuleCandidate(manifest, manifestPath, assemblyPath);
-            if (!candidatesByModuleId.TryGetValue(manifest.ModuleId, out var existing)
+            if (!candidatesByModuleId.TryGetValue(manifest.Id, out var existing)
                 || CompareCandidates(candidate, existing, fullPluginRoot) < 0)
             {
-                candidatesByModuleId[manifest.ModuleId] = candidate;
+                candidatesByModuleId[manifest.Id] = candidate;
             }
         }
 
@@ -89,8 +97,8 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
             }
 
             _logger.LogWarning(
-                "Integration module '{ModuleId}' skipped: entry assembly '{EntryAssembly}' was not found at '{AssemblyPath}'.",
-                moduleId, info.EntryAssembly, info.AssemblyPath);
+                "Module '{ModuleId}' skipped: entry assembly '{Entry}' was not found at '{AssemblyPath}'.",
+                moduleId, info.Entry, info.AssemblyPath);
         }
 
         var modules = new List<IIntegrationModule>();
@@ -105,8 +113,8 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
             catch (BadImageFormatException ex)
             {
                 _logger.LogWarning(
-                    "Integration module '{ModuleId}' skipped: '{AssemblyPath}' is not a loadable .NET assembly: {Reason}",
-                    candidate.Manifest.ModuleId, candidate.AssemblyPath, ex.Message);
+                    "Module '{ModuleId}' skipped: '{AssemblyPath}' is not a loadable .NET assembly: {Reason}",
+                    candidate.Manifest.Id, candidate.AssemblyPath, ex.Message);
                 continue;
             }
 
@@ -119,44 +127,45 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
             {
                 var loaderReasons = string.Join("; ", ex.LoaderExceptions.Select(loaderException => loaderException?.Message));
                 _logger.LogWarning(
-                    "Integration module '{ModuleId}' skipped: its types could not be loaded, which usually means a missing dependency: {Reason}",
-                    candidate.Manifest.ModuleId, loaderReasons);
+                    "Module '{ModuleId}' skipped: its types could not be loaded, which usually means a missing dependency: {Reason}",
+                    candidate.Manifest.Id, loaderReasons);
                 continue;
             }
 
-            var exportedType = exportedTypes.FirstOrDefault(type =>
-                string.Equals(type.FullName, candidate.Manifest.EntryType, StringComparison.Ordinal));
+            var entryTypes = exportedTypes
+                .Where(type => !type.IsAbstract && !type.IsInterface && typeof(IIntegrationModule).IsAssignableFrom(type))
+                .ToArray();
 
-            if (exportedType is null || exportedType.IsAbstract || exportedType.IsInterface)
+            if (entryTypes.Length == 0)
             {
                 _logger.LogWarning(
-                    "Integration module '{ModuleId}' skipped: entry type '{EntryType}' is missing, abstract, or not public in '{AssemblyPath}'.",
-                    candidate.Manifest.ModuleId, candidate.Manifest.EntryType, candidate.AssemblyPath);
+                    "Module '{ModuleId}' skipped: no public IIntegrationModule type found in '{AssemblyPath}'.",
+                    candidate.Manifest.Id, candidate.AssemblyPath);
                 continue;
             }
 
-            if (!typeof(IIntegrationModule).IsAssignableFrom(exportedType))
+            if (entryTypes.Length > 1)
             {
                 _logger.LogWarning(
-                    "Integration module '{ModuleId}' skipped: entry type '{EntryType}' does not implement IIntegrationModule.",
-                    candidate.Manifest.ModuleId, candidate.Manifest.EntryType);
+                    "Module '{ModuleId}' skipped: assembly '{AssemblyPath}' has {Count} IIntegrationModule types; exactly one is required.",
+                    candidate.Manifest.Id, candidate.AssemblyPath, entryTypes.Length);
                 continue;
             }
 
-            if (Activator.CreateInstance(exportedType) is not IIntegrationModule module)
+            if (Activator.CreateInstance(entryTypes[0]) is not IIntegrationModule module)
             {
                 _logger.LogWarning(
-                    "Integration module '{ModuleId}' skipped: entry type '{EntryType}' could not be instantiated.",
-                    candidate.Manifest.ModuleId, candidate.Manifest.EntryType);
+                    "Module '{ModuleId}' skipped: entry type '{EntryType}' could not be instantiated.",
+                    candidate.Manifest.Id, entryTypes[0].FullName);
                 continue;
             }
 
             var descriptor = module.Describe();
-            if (!string.Equals(descriptor.ModuleId, candidate.Manifest.ModuleId, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(descriptor.ModuleId, candidate.Manifest.Id, StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogWarning(
-                    "Integration module skipped: manifest '{ManifestPath}' declares module id '{ManifestModuleId}' but the code reports '{DescribedModuleId}'.",
-                    candidate.ManifestPath, candidate.Manifest.ModuleId, descriptor.ModuleId);
+                    "Module skipped: manifest '{ManifestPath}' declares id '{ManifestId}' but the code reports '{DescribedId}'.",
+                    candidate.ManifestPath, candidate.Manifest.Id, descriptor.ModuleId);
                 continue;
             }
 
@@ -166,33 +175,33 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
         return modules;
     }
 
-    private IntegrationModuleManifest? LoadManifest(string manifestPath)
+    private ModuleManifest? LoadManifest(string manifestPath)
     {
         try
         {
             var json = File.ReadAllText(manifestPath);
-            var manifest = JsonSerializer.Deserialize<IntegrationModuleManifest>(json, JsonOptions);
+            var manifest = JsonSerializer.Deserialize<ModuleManifest>(json, JsonOptions);
             if (manifest is null)
             {
-                _logger.LogWarning("Integration manifest '{ManifestPath}' is empty.", manifestPath);
+                _logger.LogWarning("Module manifest '{ManifestPath}' is empty.", manifestPath);
             }
 
             return manifest;
         }
         catch (IOException ex)
         {
-            _logger.LogWarning(ex, "Integration manifest '{ManifestPath}' could not be read.", manifestPath);
+            _logger.LogWarning(ex, "Module manifest '{ManifestPath}' could not be read.", manifestPath);
             return null;
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning(ex, "Integration manifest '{ManifestPath}' could not be read.", manifestPath);
+            _logger.LogWarning(ex, "Module manifest '{ManifestPath}' could not be read.", manifestPath);
             return null;
         }
         catch (JsonException ex)
         {
             _logger.LogWarning(
-                "Integration manifest '{ManifestPath}' is invalid and its module will not be available: {Reason}",
+                "Module manifest '{ManifestPath}' is invalid and its module will not be available: {Reason}",
                 manifestPath, ex.Message);
             return null;
         }
@@ -202,7 +211,7 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
     {
         var normalizedPath = Path.GetFullPath(manifestPath);
 
-        // Exclude build-time artifact directories (source, obj, ref/refint)
+        // Exclude build-time artifact directories (obj, ref/refint).
         return !normalizedPath.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
             && !normalizedPath.Contains($"{Path.DirectorySeparatorChar}ref{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
             && !normalizedPath.Contains($"{Path.DirectorySeparatorChar}refint{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase);
@@ -232,7 +241,7 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
     }
 
     private sealed record ModuleCandidate(
-        IntegrationModuleManifest Manifest,
+        ModuleManifest Manifest,
         string ManifestPath,
         string AssemblyPath);
 }
