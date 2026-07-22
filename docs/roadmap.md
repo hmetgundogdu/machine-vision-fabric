@@ -9,8 +9,16 @@
 ## Guiding principle: minimal core, power at the edges
 The **core** knows only *what a pipeline is* (typed graph) and *what a node contract is*.
 It does **not** know how bytes move or what language/process a node runs in. Shared
-memory, Python, gRPC, WASM are all **adapters behind core interfaces**. New capabilities
+memory, Python, stdio, WASM are all **adapters behind core interfaces**. New capabilities
 attach at the edges; the core stays small and stable.
+
+## Hard constraint: NO network — everything is local IPC
+All inter-process communication is **local to one machine**. There is no network transport
+anywhere in the runtime: **no TCP, no gRPC/HTTP, no sockets-over-the-wire.**
+- **Data plane** = our own **shared memory** (zero-copy handle passing). Hand-written.
+- **Control plane** = **stdio pipes** (length-prefixed messages) between the engine and each
+  co-located child process. Local, dependency-free.
+Cross-machine / distributed operation is an explicit **non-goal**.
 
 ## Target architecture (layers)
 ```
@@ -57,10 +65,10 @@ Most of this is a **move/regroup**, not new code. New: `protocol/`, `transports/
 | ID | Work item | Status |
 |----|-----------|--------|
 | M0 | Draw seams + folder/architecture; design docs | 🟡 In progress (docs + north-star folder/project rename done; ITransport/IModuleHost seams deferred to M1/M2) |
-| M1 | Out-of-process module host, Python-first — NO shared memory yet (frames copied over wire) | ⬜ Not started |
-| M2 | Shared-memory zero-copy data plane, graph-aware | ⛔ Blocked — **discuss design with user first** |
+| M1 | Out-of-process module host (Python), control plane over local **stdio** | ⬜ Not started |
+| M2 | Our own **shared-memory** zero-copy data plane, graph-aware (no network) | ⛔ Blocked — **discuss design with user first** |
 | M3 | Hardening: backpressure, crash recovery, warm pools, cross-process observability | ⬜ Not started |
-| M4 | Later frontiers: WASM tier, GPU handles (DLPack/CUDA-IPC), distributed | ⬜ Not started |
+| M4 | Later frontiers: WASM tier, GPU handles (DLPack/CUDA-IPC) — **distributed is a non-goal** | ⬜ Not started |
 
 ### M0 — Seams + structure (low risk, behavior unchanged)
 - [x] Roadmap + architecture + captured design knowledge (this doc)
@@ -73,12 +81,15 @@ Most of this is a **move/regroup**, not new code. New: `protocol/`, `transports/
 - Note: `ITransport` / `IModuleHost` seams are extracted **when their shape is known**
   (M1/M2), to avoid premature abstraction — not built speculatively in M0.
 
-### M1 — Polyglot module host, Python-first (no data plane yet)
-- Out-of-process worker host; module runs as a separate process, talks over the control
-  plane. Frames are **copied over the wire for now** (intentionally slow but correct).
-- Deliverable: a Python classifier node running inside the cognex pipeline.
-- Proves protocol + Python SDK + lifecycle **independently of the hard data-plane work**.
-- *(Decision 2 needed: gRPC vs stdio+protobuf/JSON for the control plane.)*
+### M1 — Polyglot module host, Python-first (control plane only)
+- Out-of-process worker host; a Python module runs as a separate co-located process and
+  talks to the engine over **local stdio** (length-prefixed protobuf/JSON messages).
+- M1 covers **control** only: handshake, lifecycle (spawn/health/stop), run request/result.
+  Frame data is the data plane's job (M2, shared memory) — no frame bytes over stdio.
+- Deliverable: a Python classifier node wired into the cognex pipeline; the frame it reads
+  arrives via the shared-memory data plane once M2 lands.
+- Proves protocol + Python SDK + lifecycle.
+- **Decision 2:** ✅ Resolved — control plane = **stdio + protobuf/JSON**, no network/gRPC.
 
 ### M2 — Shared-memory data plane ⛔ GATE
 **Do NOT implement before an explicit design discussion with the user.** The user will
@@ -92,16 +103,18 @@ Hardening then optional frontiers (see table).
 ---
 
 ## ⛔ Data-plane gate (read before starting M2)
-The data plane will be **hand-written and custom** (not adopting iceoryx/Zenoh wholesale),
-because the differentiator is that our engine **knows the static typed graph** and can do
-things general middlewares cannot (precomputed refcounts/routing). Before writing any of
-it: **stop and design it with the user.** Reminder is also stored in memory.
+Confirmed by the user: the data plane is **hand-written, our own, over shared memory, with
+NO network** (not adopting iceoryx/Zenoh) — because the differentiator is that our engine
+**knows the static typed graph** and can do things general middlewares cannot (precomputed
+refcounts/routing). The transport decision is settled; the **detailed design** (pool/handle/
+lifetime/backpressure/signaling) is still to be worked out **together with the user**. Before
+writing implementation: **stop and design it with the user.** Reminder is also stored in memory.
 
 ## Appendix — captured design knowledge (keep in pocket for M2)
 - **Control plane vs data plane split (physical).** Small messages (orchestration,
-  handles, results, backpressure) cross the language boundary over RPC/stdio. Big frames
-  never cross as bytes — only a **handle** does. This maps onto our data-edge/control-edge
-  distinction.
+  handles, results, backpressure) cross the language boundary over **local stdio** (no
+  network). Big frames never cross as bytes — only a **handle** into shared memory does.
+  This maps onto our data-edge/control-edge distinction.
 - **Modules are co-located (same machine).** So shared memory is the sweet spot; no network.
 - **Shared-memory slot pool.** Engine opens ONE shared segment carved into fixed-size
   **slots**; every process maps the same segment. A frame is written into slot N once;
@@ -117,14 +130,18 @@ it: **stop and design it with the user.** Reminder is also stored in memory.
   vs embedded in control RPC; spin-then-block), backpressure (credit-based when pool full),
   crash cleanup (supervisor reclaims slots of a dead module), descriptor location.
 - **Transport tiers:** in-process .NET↔.NET (identity, zero copy) | co-located out-of-proc
-  (shared-mem handle) | (later) cross-machine (must serialize) . Scheduler picks the cheapest.
+  (shared-mem handle). Cross-machine is a non-goal. Scheduler picks the cheapest.
 - **GPU frontier (M4):** keep frames GPU-resident; pass CUDA-IPC / **DLPack** handles so a
   Python torch tensor wraps the same buffer with no copy. Real bottleneck is host↔device
-  copy, not IPC.
-- **Build vs adopt:** ADOPT the control plane (gRPC/stdio — mature). BUILD the data plane,
-  but **minimal and graph-aware** — a narrow, single-machine, topology-specific slot pool,
-  not a general IPC middleware. Kept as a separate transport project the core never depends on.
+  copy, not IPC. (Still local — no network.)
+- **Build vs adopt:** Control plane = **local stdio pipes** (no network, no gRPC/TCP — plain
+  child-process stdin/stdout). BUILD the data plane over **shared memory**, minimal and
+  graph-aware — a narrow, single-machine, topology-specific slot pool, not a general IPC
+  middleware. Kept as a separate transport project the core never depends on.
 
 ## Open decisions
 - **Decision 1 (M0):** ✅ Resolved — full clean rename to the north-star structure (done).
-- **Decision 2 (M1):** ⬜ Pending — control plane: **gRPC** vs **stdio + protobuf/JSON**.
+- **Decision 2 (M1):** ✅ Resolved — control plane = **stdio + protobuf/JSON**, local only,
+  no network/gRPC.
+- **Data plane (M2):** ✅ Transport decided — our own **shared memory**, no network. Detailed
+  design still to be done together with the user (gated).
