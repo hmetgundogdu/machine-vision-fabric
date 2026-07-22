@@ -301,11 +301,16 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         ? mcInt
         : 0;
 
+    var checkpointEvery = invocation.Options.TryGetValue("checkpoint-every", out var ce) && int.TryParse(ce, out var ceInt)
+        ? ceInt
+        : 0;
+
     var options = new PipelineExecutionOptions
     {
         PackageRoot = packageRoot,
         IntegrationsRoot = integrationsRoot,
-        MaxCycles = maxCycles
+        MaxCycles = maxCycles,
+        CheckpointIntervalCycles = checkpointEvery
     };
 
     var validator = host.Services.GetRequiredService<IPipelineDefinitionValidator>();
@@ -468,7 +473,7 @@ void PrintHelp()
 {
     Console.WriteLine("Mvf.Cli");
     Console.WriteLine("Commands:");
-    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--no-tui]");
+    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--no-tui]");
     Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");
     Console.WriteLine("  modules [--root <path>]");
     Console.WriteLine("  packages [--root <path>]");

@@ -10,11 +10,23 @@ namespace Mvf.Engine.Execution.NodeRunners;
 /// Input ports : <c>frame</c> (data)
 /// Output ports: <c>frame</c> (data) — emitted only when the transformer returns a frame
 /// </summary>
-internal sealed class FrameTransformerNodeRunner(string nodeId, IFrameTransformer transformer) : INodeRunner
+internal sealed class FrameTransformerNodeRunner(string nodeId, IFrameTransformer transformer) : INodeRunner, ICheckpointable
 {
     public string NodeId { get; } = nodeId;
 
     public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    // Surfaces the wrapped transformer's checkpoint/restore (worker-backed transformers are
+    // checkpointable) so the executor can periodically snapshot it; otherwise a no-op.
+    public Task<byte[]?> CheckpointAsync(CancellationToken cancellationToken) =>
+        transformer is ICheckpointable checkpointable
+            ? checkpointable.CheckpointAsync(cancellationToken)
+            : Task.FromResult<byte[]?>(null);
+
+    public Task RestoreAsync(ReadOnlyMemory<byte> state, CancellationToken cancellationToken) =>
+        transformer is ICheckpointable checkpointable
+            ? checkpointable.RestoreAsync(state, cancellationToken)
+            : Task.CompletedTask;
 
     public async Task<NodeExecutionResult> ExecuteAsync(NodeExecutionInputs inputs, CancellationToken cancellationToken)
     {

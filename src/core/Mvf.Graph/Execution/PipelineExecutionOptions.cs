@@ -23,6 +23,13 @@ public sealed class PipelineExecutionOptions
     public int MaxCycles { get; init; } = 0;
 
     /// <summary>
+    /// How often (in completed cycles) to checkpoint stateful, checkpointable node runners so a
+    /// supervised worker always has a recent state to recover with. 0 disables periodic checkpoints.
+    /// Checkpoints are taken at cycle boundaries, where the engine is quiesced (torn-free).
+    /// </summary>
+    public int CheckpointIntervalCycles { get; init; } = 0;
+
+    /// <summary>
     /// Optional callback invoked at the end of each completed cycle.
     /// Use to observe real-time progress without polling.
     /// </summary>

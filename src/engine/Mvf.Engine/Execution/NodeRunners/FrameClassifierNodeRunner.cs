@@ -12,11 +12,23 @@ namespace Mvf.Engine.Execution.NodeRunners;
 /// Input ports : <c>frame</c> (data)
 /// Output ports: <c>class</c> (control)
 /// </summary>
-internal sealed class FrameClassifierNodeRunner(string nodeId, IFrameClassifier classifier) : INodeRunner
+internal sealed class FrameClassifierNodeRunner(string nodeId, IFrameClassifier classifier) : INodeRunner, ICheckpointable
 {
     public string NodeId { get; } = nodeId;
 
     public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    // Surfaces the wrapped classifier's checkpoint/restore (worker-backed classifiers are checkpointable)
+    // so the executor can periodically snapshot it; a stateless or in-process classifier is a no-op.
+    public Task<byte[]?> CheckpointAsync(CancellationToken cancellationToken) =>
+        classifier is ICheckpointable checkpointable
+            ? checkpointable.CheckpointAsync(cancellationToken)
+            : Task.FromResult<byte[]?>(null);
+
+    public Task RestoreAsync(ReadOnlyMemory<byte> state, CancellationToken cancellationToken) =>
+        classifier is ICheckpointable checkpointable
+            ? checkpointable.RestoreAsync(state, cancellationToken)
+            : Task.CompletedTask;
 
     public async Task<NodeExecutionResult> ExecuteAsync(NodeExecutionInputs inputs, CancellationToken cancellationToken)
     {

@@ -73,6 +73,11 @@ public sealed class PipelineGraphExecutor(
             r => r,
             StringComparer.OrdinalIgnoreCase);
 
+        // Runners whose (worker-backed) state can be captured for resume-after-crash. A runner that
+        // reports no state is remembered and skipped so we don't keep paying a round-trip for it.
+        var checkpointableRunners = runners.OfType<ICheckpointable>().ToList();
+        var statelessRunners = new HashSet<ICheckpointable>();
+
         // Per-node mutable stats accumulators
         var statsMap = executionOrder.ToDictionary(
             n => n.Id,
@@ -202,6 +207,15 @@ public sealed class PipelineGraphExecutor(
                     CycleAccepted = cycleHadSinkOutput,
                     Elapsed = DateTime.UtcNow - startedAt
                 });
+
+                // Cycle boundary: the engine is quiesced, so this is a torn-free point to snapshot
+                // stateful workers. A supervised worker caches the capture to recover with on a crash.
+                if (options.CheckpointIntervalCycles > 0
+                    && checkpointableRunners.Count > 0
+                    && totalCycles % options.CheckpointIntervalCycles == 0)
+                {
+                    await CheckpointRunnersAsync(checkpointableRunners, statelessRunners, warnings, cancellationToken);
+                }
             }
         }
         catch (OperationCanceledException)
@@ -411,6 +425,38 @@ public sealed class PipelineGraphExecutor(
             if (value.Frame is ArenaFrameEnvelope arenaFrame)
             {
                 dataPlane.Release(arenaFrame.Handle);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Captures each checkpointable runner's state (best-effort). A runner reporting no state is added to
+    /// <paramref name="stateless"/> and skipped thereafter; a failure is warned about, never fatal.
+    /// </summary>
+    private static async Task CheckpointRunnersAsync(
+        IReadOnlyList<ICheckpointable> runners,
+        HashSet<ICheckpointable> stateless,
+        List<string> warnings,
+        CancellationToken cancellationToken)
+    {
+        foreach (var runner in runners)
+        {
+            if (stateless.Contains(runner))
+            {
+                continue;
+            }
+
+            try
+            {
+                var state = await runner.CheckpointAsync(cancellationToken);
+                if (state is null)
+                {
+                    stateless.Add(runner);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add($"Checkpoint failed: {ex.Message}");
             }
         }
     }
