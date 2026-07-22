@@ -3,6 +3,7 @@ using Mvf.Graph.Pipelines;
 using Mvf.Abstractions;
 using Mvf.Abstractions.Frames;
 using Mvf.Engine.Modules;
+using Mvf.Engine.Recovery;
 
 namespace Mvf.Engine.Execution;
 
@@ -75,8 +76,15 @@ public sealed class PipelineGraphExecutor(
 
         // Runners whose (worker-backed) state can be captured for resume-after-crash. A runner that
         // reports no state is remembered and skipped so we don't keep paying a round-trip for it.
-        var checkpointableRunners = runners.OfType<ICheckpointable>().ToList();
-        var statelessRunners = new HashSet<ICheckpointable>();
+        var checkpointableRunners = runners.Where(r => r is ICheckpointable).ToList();
+        var statelessRunners = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var lastStates = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+
+        // Durable checkpoints (engine-crash resume) when a directory is configured; otherwise captures
+        // stay in memory (worker-crash recovery only).
+        ICheckpointStore? checkpointStore = options.CheckpointDirectory is { Length: > 0 } checkpointDir
+            ? new FileCheckpointStore(checkpointDir)
+            : null;
 
         // Per-node mutable stats accumulators
         var statsMap = executionOrder.ToDictionary(
@@ -93,9 +101,28 @@ public sealed class PipelineGraphExecutor(
         var portBus = new GraphPortBus();
         var totalCycles = 0;
         var acceptedCycles = 0;
+        var sourceCompleted = false;
 
         try
         {
+            // Resume: restore each node's persisted state (incl. a checkpointable source's position)
+            // before the first cycle, so an interrupted run continues where it left off.
+            if (checkpointStore is not null)
+            {
+                var restored = await checkpointStore.LoadAsync(cancellationToken);
+                foreach (var runner in checkpointableRunners)
+                {
+                    if (restored.TryGetValue(runner.NodeId, out var state) && runner is ICheckpointable checkpointable)
+                    {
+                        try { await checkpointable.RestoreAsync(state, cancellationToken); }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            warnings.Add($"Restore failed for node '{runner.NodeId}': {ex.Message}");
+                        }
+                    }
+                }
+            }
+
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -189,6 +216,7 @@ public sealed class PipelineGraphExecutor(
 
                 if (sourcesExhausted)
                 {
+                    sourceCompleted = true;
                     break;
                 }
 
@@ -214,7 +242,8 @@ public sealed class PipelineGraphExecutor(
                     && checkpointableRunners.Count > 0
                     && totalCycles % options.CheckpointIntervalCycles == 0)
                 {
-                    await CheckpointRunnersAsync(checkpointableRunners, statelessRunners, warnings, cancellationToken);
+                    await CheckpointRunnersAsync(
+                        checkpointableRunners, statelessRunners, lastStates, checkpointStore, warnings, cancellationToken);
                 }
             }
         }
@@ -228,6 +257,13 @@ public sealed class PipelineGraphExecutor(
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+
+        // A cleanly, fully-consumed run has nothing to resume — drop its persisted checkpoint.
+        if (sourceCompleted && checkpointStore is not null)
+        {
+            try { await checkpointStore.ClearAsync(cancellationToken); }
+            catch { /* best effort */ }
+        }
 
         var nodeStats = statsMap.ToDictionary(
             kvp => kvp.Key,
@@ -430,33 +466,54 @@ public sealed class PipelineGraphExecutor(
     }
 
     /// <summary>
-    /// Captures each checkpointable runner's state (best-effort). A runner reporting no state is added to
-    /// <paramref name="stateless"/> and skipped thereafter; a failure is warned about, never fatal.
+    /// Captures each checkpointable runner's state (best-effort) and, when a store is present, persists
+    /// the accumulated states. A runner reporting no state is remembered and skipped thereafter; any
+    /// failure is warned about, never fatal.
     /// </summary>
     private static async Task CheckpointRunnersAsync(
-        IReadOnlyList<ICheckpointable> runners,
-        HashSet<ICheckpointable> stateless,
+        IReadOnlyList<INodeRunner> runners,
+        HashSet<string> stateless,
+        Dictionary<string, byte[]> lastStates,
+        ICheckpointStore? store,
         List<string> warnings,
         CancellationToken cancellationToken)
     {
+        var changed = false;
         foreach (var runner in runners)
         {
-            if (stateless.Contains(runner))
+            if (stateless.Contains(runner.NodeId) || runner is not ICheckpointable checkpointable)
             {
                 continue;
             }
 
             try
             {
-                var state = await runner.CheckpointAsync(cancellationToken);
+                var state = await checkpointable.CheckpointAsync(cancellationToken);
                 if (state is null)
                 {
-                    stateless.Add(runner);
+                    stateless.Add(runner.NodeId);
+                }
+                else
+                {
+                    lastStates[runner.NodeId] = state;
+                    changed = true;
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                warnings.Add($"Checkpoint failed: {ex.Message}");
+                warnings.Add($"Checkpoint failed for node '{runner.NodeId}': {ex.Message}");
+            }
+        }
+
+        if (store is not null && changed && lastStates.Count > 0)
+        {
+            try
+            {
+                await store.SaveAsync(lastStates, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add($"Checkpoint persist failed: {ex.Message}");
             }
         }
     }

@@ -30,6 +30,14 @@ public sealed class PipelineExecutionOptions
     public int CheckpointIntervalCycles { get; init; } = 0;
 
     /// <summary>
+    /// Directory for durable checkpoints. When set, captured node states are persisted here each
+    /// checkpoint and, on the next start, restored before the first cycle — so a run interrupted by an
+    /// engine/process crash resumes where it left off (a clean, fully-consumed run clears them). Null
+    /// keeps checkpoints in memory only (worker-crash recovery, but not engine-crash resume).
+    /// </summary>
+    public string? CheckpointDirectory { get; init; }
+
+    /// <summary>
     /// Optional callback invoked at the end of each completed cycle.
     /// Use to observe real-time progress without polling.
     /// </summary>

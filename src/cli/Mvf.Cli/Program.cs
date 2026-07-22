@@ -305,12 +305,23 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         ? ceInt
         : 0;
 
+    // Durable resume: when checkpointing is on, persist under the package (or --resume-dir). An
+    // interrupted run reloads this on the next start; a clean run clears it.
+    string? checkpointDirectory = null;
+    if (checkpointEvery > 0)
+    {
+        checkpointDirectory = invocation.Options.TryGetValue("resume-dir", out var rd)
+            ? ResolveWorkingPath(rd)
+            : Path.Combine(packageRoot, ".mvf", "checkpoint");
+    }
+
     var options = new PipelineExecutionOptions
     {
         PackageRoot = packageRoot,
         IntegrationsRoot = integrationsRoot,
         MaxCycles = maxCycles,
-        CheckpointIntervalCycles = checkpointEvery
+        CheckpointIntervalCycles = checkpointEvery,
+        CheckpointDirectory = checkpointDirectory
     };
 
     var validator = host.Services.GetRequiredService<IPipelineDefinitionValidator>();
@@ -473,7 +484,7 @@ void PrintHelp()
 {
     Console.WriteLine("Mvf.Cli");
     Console.WriteLine("Commands:");
-    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--no-tui]");
+    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--no-tui]");
     Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");
     Console.WriteLine("  modules [--root <path>]");
     Console.WriteLine("  packages [--root <path>]");
