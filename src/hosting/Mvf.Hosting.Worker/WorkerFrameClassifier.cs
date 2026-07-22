@@ -16,9 +16,15 @@ namespace Mvf.Hosting.Worker;
 /// classifier publishes it into the data plane for the single RPC and releases it afterwards.</para>
 /// </summary>
 public sealed class WorkerFrameClassifier(StdioWorkerProcess worker, IDataPlane dataPlane)
-    : IFrameClassifier, IAsyncDisposable
+    : IFrameClassifier, ICheckpointable, IAsyncDisposable
 {
     private int _requestId;
+
+    public Task<byte[]?> CheckpointAsync(CancellationToken cancellationToken) =>
+        WorkerCheckpoint.CheckpointAsync(worker, dataPlane, ++_requestId, cancellationToken);
+
+    public Task RestoreAsync(ReadOnlyMemory<byte> state, CancellationToken cancellationToken) =>
+        WorkerCheckpoint.RestoreAsync(worker, dataPlane, ++_requestId, state, cancellationToken);
 
     public async Task<FrameClassification> ClassifyAsync(IFrameEnvelope frame, CancellationToken cancellationToken)
     {

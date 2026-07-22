@@ -198,101 +198,105 @@ def _read_input(arena_view, frame):
     return media_type, element_type, shape, arena_view[start:start + length]
 
 
-def run_classifier(module_id, classify):
+def _do_checkpoint(msg, request_id, arena_view, on_checkpoint):
+    output = on_checkpoint() if on_checkpoint is not None else None
+    if output is None:
+        _send({"type": "state", "id": request_id, "empty": True})
+        return
+    out = msg["out"]
+    _write_descriptor(
+        arena_view, int(out["offset"]), output.media_type, output.element_type,
+        output.shape, _as_bytes(output.data), int(out["capacity"]))
+    _send({"type": "state", "id": request_id})
+
+
+def _do_restore(msg, request_id, arena_view, on_restore):
+    media_type, element_type, shape, cell = _read_input(arena_view, msg)
+    try:
+        if on_restore is not None:
+            on_restore(Payload(media_type, element_type, shape, cell))
+    finally:
+        cell.release()
+    _send({"type": "restored", "id": request_id})
+
+
+def _serve(module_id, capability, writable, on_execute, on_checkpoint, on_restore):
+    """Shared stdio loop: handshake, dispatch execute + checkpoint/restore, per-request error isolation."""
+    arena = _open_arena(writable=writable)
+    if arena is None:
+        raise RuntimeError("MVF_ARENA_PATH is not set — the shared-memory data plane is required.")
+    arena_view = memoryview(arena)
+    try:
+        _send({"type": "hello", "protocol": 1, "moduleId": module_id, "capability": capability})
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            msg = json.loads(line)
+            msg_type = msg.get("type")
+            if msg_type == "shutdown":
+                break
+
+            request_id = msg.get("id")
+            try:
+                if msg_type == "execute":
+                    on_execute(msg, request_id, arena_view)
+                elif msg_type == "checkpoint":
+                    _do_checkpoint(msg, request_id, arena_view, on_checkpoint)
+                elif msg_type == "restore":
+                    _do_restore(msg, request_id, arena_view, on_restore)
+            except Exception as exc:  # report per-request failure, keep serving
+                _send({"type": "error", "id": request_id, "message": str(exc)})
+    finally:
+        arena_view.release()
+        arena.close()
+
+
+def run_classifier(module_id, classify, on_checkpoint=None, on_restore=None):
     """Run the stdio loop for a classifier module.
 
-    ``classify(payload, meta)`` must return ``(label, measurement, unit, details)``;
-    ``measurement``/``unit``/``details`` may be ``None``.
+    ``classify(payload, meta)`` returns ``(label, measurement, unit, details)`` (last three optional).
+    Optional ``on_checkpoint() -> Output|None`` and ``on_restore(payload)`` make the module's state
+    survive a restart (see :func:`blob` / :func:`tensor`).
     """
-    arena = _open_arena()
-    if arena is None:
-        raise RuntimeError("MVF_ARENA_PATH is not set — the shared-memory data plane is required.")
-    arena_view = memoryview(arena)
-    try:
-        _send({"type": "hello", "protocol": 1, "moduleId": module_id, "capability": "classifier"})
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            msg = json.loads(line)
-            msg_type = msg.get("type")
-            if msg_type == "shutdown":
-                break
-            if msg_type != "execute":
-                continue
+    def on_execute(msg, request_id, arena_view):
+        frame = msg.get("frame") or {}
+        media_type, element_type, shape, cell = _read_input(arena_view, frame)
+        try:
+            label, measurement, unit, details = classify(Payload(media_type, element_type, shape, cell), frame)
+        finally:
+            cell.release()
+        _send({
+            "type": "result",
+            "id": request_id,
+            "classification": {"label": label, "measurement": measurement, "unit": unit, "details": details},
+        })
 
-            request_id = msg.get("id")
-            try:
-                frame = msg.get("frame") or {}
-                media_type, element_type, shape, cell = _read_input(arena_view, frame)
-                try:
-                    payload = Payload(media_type, element_type, shape, cell)
-                    label, measurement, unit, details = classify(payload, frame)
-                finally:
-                    cell.release()
-
-                _send({
-                    "type": "result",
-                    "id": request_id,
-                    "classification": {
-                        "label": label,
-                        "measurement": measurement,
-                        "unit": unit,
-                        "details": details,
-                    },
-                })
-            except Exception as exc:  # report per-request failure, keep serving
-                _send({"type": "error", "id": request_id, "message": str(exc)})
-    finally:
-        arena_view.release()
-        arena.close()
+    writable = on_checkpoint is not None or on_restore is not None
+    _serve(module_id, "classifier", writable, on_execute, on_checkpoint, on_restore)
 
 
-def run_processor(module_id, transform):
+def run_processor(module_id, transform, on_checkpoint=None, on_restore=None):
     """Run the stdio loop for a transformer module (frame in -> new frame out).
 
-    ``transform(payload, meta)`` must return an :class:`Output` (see :func:`blob` / :func:`tensor`)
-    or ``None`` to drop the frame. The new frame is written straight into the shared-memory arena.
+    ``transform(payload, meta)`` returns an :class:`Output` (see :func:`blob` / :func:`tensor`) or
+    ``None`` to drop the frame. Optional ``on_checkpoint``/``on_restore`` persist module state.
     """
-    arena = _open_arena(writable=True)
-    if arena is None:
-        raise RuntimeError("MVF_ARENA_PATH is not set — the shared-memory data plane is required.")
-    arena_view = memoryview(arena)
-    try:
-        _send({"type": "hello", "protocol": 1, "moduleId": module_id, "capability": "processor"})
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            msg = json.loads(line)
-            msg_type = msg.get("type")
-            if msg_type == "shutdown":
-                break
-            if msg_type != "execute":
-                continue
+    def on_execute(msg, request_id, arena_view):
+        frame = msg.get("frame") or {}
+        media_type, element_type, shape, cell = _read_input(arena_view, frame)
+        try:
+            output = transform(Payload(media_type, element_type, shape, cell), frame)
+        finally:
+            cell.release()
 
-            request_id = msg.get("id")
-            try:
-                frame = msg.get("frame") or {}
-                media_type, element_type, shape, cell = _read_input(arena_view, frame)
-                try:
-                    payload = Payload(media_type, element_type, shape, cell)
-                    output = transform(payload, frame)
-                finally:
-                    cell.release()
+        if output is None:
+            _send({"type": "result", "id": request_id, "frame": None})
+            return
+        out = msg["out"]
+        _write_descriptor(
+            arena_view, int(out["offset"]), output.media_type, output.element_type,
+            output.shape, _as_bytes(output.data), int(out["capacity"]))
+        _send({"type": "result", "id": request_id, "frame": {"shm": {"offset": int(out["offset"])}}})
 
-                if output is None:
-                    _send({"type": "result", "id": request_id, "frame": None})
-                    continue
-
-                out = msg.get("out") or {}
-                out_offset = int(out["offset"])
-                capacity = int(out["capacity"])
-                data = _as_bytes(output.data)
-                _write_descriptor(arena_view, out_offset, output.media_type, output.element_type, output.shape, data, capacity)
-                _send({"type": "result", "id": request_id, "frame": {"shm": {"offset": out_offset}}})
-            except Exception as exc:  # report per-request failure, keep serving
-                _send({"type": "error", "id": request_id, "message": str(exc)})
-    finally:
-        arena_view.release()
-        arena.close()
+    _serve(module_id, "processor", True, on_execute, on_checkpoint, on_restore)

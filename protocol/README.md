@@ -40,6 +40,20 @@ Child → engine, result (processor capability) — a new frame in the output sl
 {"type":"result","id":1,"frame":{"shm":{"offset":8388608}}}
 ```
 
+Engine → child, capture durable state at a cycle boundary (resume-after-crash). The child writes its
+serialized state into the reserved slot and replies `state`, or `{"empty":true}` when stateless:
+```json
+{"type":"checkpoint","id":1,"out":{"offset":8388608,"capacity":8388416}}
+{"type":"state","id":1}
+```
+
+Engine → child (usually after a restart), restore previously captured state from a slot; the child
+rehydrates its external resources and replies `restored`:
+```json
+{"type":"restore","id":1,"shm":{"offset":0}}
+{"type":"restored","id":1}
+```
+
 Child → engine, failure for a request:
 ```json
 {"type":"error","id":1,"message":"..."}

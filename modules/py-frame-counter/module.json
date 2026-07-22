@@ -1,0 +1,8 @@
+{
+  "id": "py.frame-counter",
+  "name": "Frame Counter (Python, stateful)",
+  "version": "1.0.0",
+  "kind": "classifier",
+  "runtime": "python",
+  "entry": "classifier.py"
+}

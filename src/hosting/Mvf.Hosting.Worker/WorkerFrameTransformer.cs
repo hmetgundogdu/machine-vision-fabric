@@ -13,9 +13,15 @@ namespace Mvf.Hosting.Worker;
 /// then owns (it holds one producer reference until routed).
 /// </summary>
 public sealed class WorkerFrameTransformer(StdioWorkerProcess worker, IDataPlane dataPlane)
-    : IFrameTransformer, IAsyncDisposable
+    : IFrameTransformer, ICheckpointable, IAsyncDisposable
 {
     private int _requestId;
+
+    public Task<byte[]?> CheckpointAsync(CancellationToken cancellationToken) =>
+        WorkerCheckpoint.CheckpointAsync(worker, dataPlane, ++_requestId, cancellationToken);
+
+    public Task RestoreAsync(ReadOnlyMemory<byte> state, CancellationToken cancellationToken) =>
+        WorkerCheckpoint.RestoreAsync(worker, dataPlane, ++_requestId, state, cancellationToken);
 
     public async Task<IFrameEnvelope?> TransformAsync(IFrameEnvelope frame, CancellationToken cancellationToken)
     {
