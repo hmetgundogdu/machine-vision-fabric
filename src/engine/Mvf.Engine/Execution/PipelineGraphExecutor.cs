@@ -1,6 +1,8 @@
 using Mvf.Graph.Execution;
 using Mvf.Graph.Pipelines;
 using Mvf.Abstractions;
+using Mvf.Abstractions.Frames;
+using Mvf.Engine.Modules;
 
 namespace Mvf.Engine.Execution;
 
@@ -14,8 +16,18 @@ namespace Mvf.Engine.Execution;
 ///   <item>Source nodes drive the loop — when a source returns NoOutput the run ends.</item>
 ///   <item>Control and data edges use the same routing mechanism but are kept semantically distinct by the port bus.</item>
 /// </list>
+///
+/// <para><b>Graph-aware data plane (M2):</b> when an <see cref="IDataPlane"/> is present, a frame that
+/// fans out to one or more out-of-process (worker) consumers is published into the shared arena
+/// <b>once</b> — with a reference count equal to the number of worker edges — and the resulting
+/// <see cref="ArenaFrameEnvelope"/> is routed to those workers (in-process consumers keep the heap
+/// frame, zero copy). Each consumer's handle is released after it runs, so the slot is reclaimed once
+/// the last worker has read it. Transport is thus chosen per edge from the static graph.</para>
 /// </summary>
-public sealed class PipelineGraphExecutor(IPipelineNodeActivator nodeActivator) : IPipelineGraphExecutor
+public sealed class PipelineGraphExecutor(
+    IPipelineNodeActivator nodeActivator,
+    IDataPlane? dataPlane = null,
+    ModuleCatalog? moduleCatalog = null) : IPipelineGraphExecutor
 {
     public async Task<PipelineExecutionReport> ExecuteAsync(
         PipelineDefinition definition,
@@ -66,6 +78,12 @@ public sealed class PipelineGraphExecutor(IPipelineNodeActivator nodeActivator) 
             n => n.Id,
             _ => new NodeStatsAccumulator(),
             StringComparer.OrdinalIgnoreCase);
+
+        // Static, graph-aware data-plane routing. Inactive (heap-only, original behavior) when there is
+        // no data plane or the graph has no out-of-process worker nodes.
+        var workerNodeIds = BuildWorkerNodeIds(definition, moduleCatalog, options);
+        var arenaActive = dataPlane is not null && workerNodeIds.Count > 0;
+        var outgoingByPort = arenaActive ? BuildOutgoingByPort(definition) : null;
 
         var portBus = new GraphPortBus();
         var totalCycles = 0;
@@ -150,7 +168,16 @@ public sealed class PipelineGraphExecutor(IPipelineNodeActivator nodeActivator) 
                         cycleHadSinkOutput = true;
                     }
 
-                    portBus.RouteOutputs(node.Id, result, definition.Edges);
+                    if (arenaActive)
+                    {
+                        await RouteOutputsWithDataPlaneAsync(
+                            node.Id, result, portBus, outgoingByPort!, workerNodeIds, dataPlane!, cancellationToken);
+                        ReleaseArenaInputs(inputs, dataPlane!);
+                    }
+                    else
+                    {
+                        portBus.RouteOutputs(node.Id, result, definition.Edges);
+                    }
                 }
 
                 if (sourcesExhausted)
@@ -206,6 +233,129 @@ public sealed class PipelineGraphExecutor(IPipelineNodeActivator nodeActivator) 
             Warnings = warnings,
             NodeStats = nodeStats
         };
+    }
+
+    /// <summary>Node ids whose module runs out-of-process (a non-<c>dotnet</c> runtime in the catalog).</summary>
+    private static IReadOnlySet<string> BuildWorkerNodeIds(
+        PipelineDefinition definition,
+        ModuleCatalog? moduleCatalog,
+        PipelineExecutionOptions options)
+    {
+        var workers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (moduleCatalog is null)
+        {
+            return workers;
+        }
+
+        var catalog = moduleCatalog.Load(options.IntegrationsRoot);
+        foreach (var node in definition.Nodes)
+        {
+            if (node.ModuleId is not null
+                && catalog.TryGetValue(node.ModuleId, out var entry)
+                && !string.Equals(entry.Manifest.Runtime, "dotnet", StringComparison.OrdinalIgnoreCase))
+            {
+                workers.Add(node.Id);
+            }
+        }
+
+        return workers;
+    }
+
+    private static Dictionary<string, List<PipelineEdgeDefinition>> BuildOutgoingByPort(PipelineDefinition definition)
+    {
+        var map = new Dictionary<string, List<PipelineEdgeDefinition>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var edge in definition.Edges)
+        {
+            var key = PortKey(edge.From.NodeId, edge.From.Port);
+            if (!map.TryGetValue(key, out var list))
+            {
+                list = [];
+                map[key] = list;
+            }
+
+            list.Add(edge);
+        }
+
+        return map;
+    }
+
+    private static string PortKey(string nodeId, string port) => $"{nodeId} {port}";
+
+    /// <summary>
+    /// Routes a node's outputs with graph-aware transport selection: a heap frame that fans out to one
+    /// or more worker consumers is published into the arena once (refcount = worker edges), and the
+    /// arena handle is routed to workers while in-process consumers keep the heap frame. Everything else
+    /// (control signals, in-process-only frames, already-arena frames, a full/oversized arena) is routed
+    /// by reference, unchanged.
+    /// </summary>
+    private static async Task RouteOutputsWithDataPlaneAsync(
+        string sourceNodeId,
+        NodeExecutionResult result,
+        GraphPortBus portBus,
+        IReadOnlyDictionary<string, List<PipelineEdgeDefinition>> outgoingByPort,
+        IReadOnlySet<string> workerNodeIds,
+        IDataPlane dataPlane,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (portName, value) in result.All)
+        {
+            if (!outgoingByPort.TryGetValue(PortKey(sourceNodeId, portName), out var edges))
+            {
+                continue;
+            }
+
+            if (value.Frame is not null and not ArenaFrameEnvelope)
+            {
+                var workerEdgeCount = edges.Count(edge => workerNodeIds.Contains(edge.To.NodeId));
+                if (workerEdgeCount > 0
+                    && await TryPublishFrameAsync(value.Frame, workerEdgeCount, dataPlane, cancellationToken) is { } arenaValue)
+                {
+                    foreach (var edge in edges)
+                    {
+                        var deliver = workerNodeIds.Contains(edge.To.NodeId) ? arenaValue : value;
+                        portBus.Set(edge.To.NodeId, edge.To.Port, deliver);
+                    }
+
+                    continue;
+                }
+            }
+
+            foreach (var edge in edges)
+            {
+                portBus.Set(edge.To.NodeId, edge.To.Port, value);
+            }
+        }
+    }
+
+    private static async Task<PortValue?> TryPublishFrameAsync(
+        IFrameEnvelope frame,
+        int referenceCount,
+        IDataPlane dataPlane,
+        CancellationToken cancellationToken)
+    {
+        byte[] bytes;
+        await using (var stream = await frame.OpenReadAsync(cancellationToken))
+        using (var buffer = new MemoryStream())
+        {
+            await stream.CopyToAsync(buffer, cancellationToken);
+            bytes = buffer.ToArray();
+        }
+
+        return dataPlane.TryPublish(bytes, referenceCount, out var handle)
+            ? PortValue.FromFrame(new ArenaFrameEnvelope(dataPlane, handle, frame))
+            : null;
+    }
+
+    /// <summary>Releases one reference for each arena-backed frame this node consumed, now that it has run.</summary>
+    private static void ReleaseArenaInputs(NodeExecutionInputs inputs, IDataPlane dataPlane)
+    {
+        foreach (var (_, value) in inputs.All)
+        {
+            if (value.Frame is ArenaFrameEnvelope arenaFrame)
+            {
+                dataPlane.Release(arenaFrame.Handle);
+            }
+        }
     }
 
     private static bool IsSourceNode(PipelineNodeDefinition node) =>

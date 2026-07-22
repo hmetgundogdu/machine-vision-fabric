@@ -153,14 +153,26 @@ breadth. Agreed decisions:
   input handle (and, later, writes a pre-assigned output handle).
 
 **Staging (build infra first, per user):**
-- **B.1 — infra, behavior-preserving:** `IDataPlane` + `ArenaHandle` in Abstractions; arena implements
-  it and gains a refcount (publish-with-count / release-to-zero) + lazy backing file; the data plane is
-  injected (engine-owned) rather than self-created by the host. Slice A's path keeps working through
-  the seam.
-- **B.2 — graph-aware routing:** precompute per-port consumer counts + worker-vs-inproc; publish-once +
-  route an `ArenaFrameEnvelope` to all consumers; executor decrements after each consumer. Demo: one
-  .NET source frame fans out to **two** Python nodes sharing **one** arena copy (refcount 2), reclaimed
-  at cycle end.
+- **B.1 — infra, behavior-preserving (done):** `IDataPlane` + `ArenaHandle` in Abstractions; arena
+  implements it with a per-slot refcount (publish-with-count / release-to-zero) + a lazy backing file;
+  the data plane is engine-owned (injected) rather than self-created by the host. Slice A's path runs
+  through the seam.
+- **B.2 — graph-aware routing (done):** the executor precomputes worker node ids (from the catalog
+  runtime) and outgoing edges per port; a heap frame fanning out to ≥1 worker is published **once**
+  (refcount = worker edges) and the `ArenaFrameEnvelope` is routed to workers while in-process
+  consumers keep the heap frame; each consumer's handle is released after it runs, reclaiming the slot
+  once the last worker has read it. `WorkerFrameClassifier` forwards an engine-published handle as-is
+  (no re-copy, no release). Proven by a recording-data-plane test: fan-out to two workers = one publish,
+  refcount 2, two releases, reclaimed.
+
+**Known lifetime boundary (matters for the transformer, B.3).** B.2 is correct because the only arena
+frames are **worker inputs**, and workers here (classifiers) emit a *control signal*, not a frame — so
+an arena frame is **never re-emitted** by a pass-through node (fork/processor/if/switch). The moment a
+worker emits a **frame** (the transformer), that arena buffer can flow through a pass-through node,
+which both consumes and re-emits it. The simple "release after the consumer runs" rule then reclaims
+too early. The fix is a **live-edge-occupancy refcount**: a re-emitted buffer gets `AddRef`'d for its
+new outgoing edges before its incoming ref is released. Design this with `AddRef` on `IDataPlane` when
+B.3 lands; until then, no arena frame is ever re-emitted, so it cannot bite.
 
 **Deferred (after the infra):** the **transformer** capability (a worker that emits a *new* frame — a
 new capability .NET itself lacks; engine pre-allocates the output slot and passes both handles in
