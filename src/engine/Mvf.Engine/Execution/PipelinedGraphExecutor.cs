@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Threading.Channels;
 using Mvf.Abstractions;
 using Mvf.Engine.Modules;
+using Mvf.Engine.Recovery;
 using Mvf.Graph.Execution;
 using Mvf.Graph.Pipelines;
 using Mvf.Graph.Runtime;
@@ -79,8 +80,16 @@ public sealed class PipelinedGraphExecutor(
             backpressureByNode[node.Id] = ResolveBackpressurePolicy(node, loadedCatalog, options.BackpressurePolicy);
         }
 
+        ICheckpointStore? checkpointStore = options.CheckpointDirectory is { Length: > 0 } checkpointDir
+            ? new FileCheckpointStore(checkpointDir)
+            : null;
+        IReadOnlyDictionary<string, byte[]> restoredStates = checkpointStore is not null
+            ? await checkpointStore.LoadAsync(cancellationToken)
+            : new Dictionary<string, byte[]>();
+
         // Every node is resident here (on-demand is rejected above), so warm them all before the stages
-        // start — a stage must not pay a cold start while its queue fills behind it.
+        // start — a stage must not pay a cold start while its queue fills behind it. Restoring here, before
+        // any stage runs, is the pipelined equivalent of serial's restore-before-cycle-0.
         var runners = new List<INodeRunner>(executionOrder.Count);
         var runnerById = new Dictionary<string, INodeRunner>(StringComparer.OrdinalIgnoreCase);
         try
@@ -92,6 +101,8 @@ public sealed class PipelinedGraphExecutor(
                 warmupByNode[node.Id] = (long)Stopwatch.GetElapsedTime(activateStart).TotalMilliseconds;
                 runners.Add(runner);
                 runnerById[node.Id] = runner;
+
+                await CheckpointCoordinator.RestoreAsync(runner, restoredStates, Warn, cancellationToken);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -144,6 +155,58 @@ public sealed class PipelinedGraphExecutor(
         // sinks, i.e. the same report field meaning something different per mode. Every sink sees every
         // cycle exactly once (void markers guarantee it), so a cycle is decided once all sinks report and
         // its entry can be dropped — bounded memory, no growing set of ids.
+        // ── Epoch barrier ────────────────────────────────────────────────────────────────────────────
+        // A pipelined run has no naturally quiesced moment, and M2.5's whole guarantee is that a capture
+        // happens when nothing is in flight. So the source periodically stops and waits for the pipeline
+        // to drain. "Drained" is decided at the leaves: every node reaches some leaf, edges are FIFO and
+        // carry one message per cycle, so once every leaf has finished cycle C every node upstream has
+        // too — no frame in flight, and every arena input released. Cheaper than aligned barriers and it
+        // keeps the existing checkpoint contract literally true rather than redefining it.
+        var leafNodeIds = executionOrder
+            .Where(n => !outboundByNode[n.Id].Any())
+            .Select(n => n.Id)
+            .ToList();
+        var drainLock = new object();
+        var lastCycleByLeaf = leafNodeIds.ToDictionary(id => id, _ => -1L, StringComparer.OrdinalIgnoreCase);
+        var drainTarget = -1L;
+        TaskCompletionSource? drainSignal = null;
+
+        void NoteLeafCompleted(string nodeId, long cycleId)
+        {
+            lock (drainLock)
+            {
+                if (!lastCycleByLeaf.ContainsKey(nodeId))
+                {
+                    return;
+                }
+
+                lastCycleByLeaf[nodeId] = cycleId;
+                if (drainSignal is not null && lastCycleByLeaf.Values.All(seen => seen >= drainTarget))
+                {
+                    drainSignal.TrySetResult();
+                    drainSignal = null;
+                }
+            }
+        }
+
+        Task WaitForDrainAsync(long throughCycleId)
+        {
+            lock (drainLock)
+            {
+                if (lastCycleByLeaf.Count == 0 || lastCycleByLeaf.Values.All(seen => seen >= throughCycleId))
+                {
+                    return Task.CompletedTask;
+                }
+
+                drainTarget = throughCycleId;
+                drainSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                return drainSignal.Task;
+            }
+        }
+
+        var statelessRunners = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var lastStates = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+
         var sinkStageCount = executionOrder.Count(NodeRoles.IsSink);
         var acceptedLock = new object();
         var sinkReportsByCycle = new Dictionary<long, (int Reports, bool Accepted)>();
@@ -316,6 +379,15 @@ public sealed class PipelinedGraphExecutor(
 
                     cycle++;
                     Interlocked.Exchange(ref totalCycles, (int)Math.Min(int.MaxValue, cycle));
+
+                    // Epoch barrier: stop feeding, let the pipeline drain, snapshot while nothing is in
+                    // flight, then resume. The stall is the price of keeping the capture torn-free.
+                    if (options.CheckpointIntervalCycles > 0 && cycle % options.CheckpointIntervalCycles == 0)
+                    {
+                        await WaitForDrainAsync(cycle - 1).WaitAsync(runToken);
+                        await CheckpointCoordinator.CaptureAsync(
+                            runners, statelessRunners, lastStates, checkpointStore, Warn, runToken);
+                    }
                     options.OnCycleCompleted?.Invoke(new PipelineExecutionProgress
                     {
                         RunId = runId,
@@ -422,6 +494,7 @@ public sealed class PipelinedGraphExecutor(
                     {
                         Interlocked.Add(ref droppedFrames,
                             await RouteAsync(node, NodeExecutionResult.NoOutput, NodeExecutionInputs.Empty, cycleId));
+                        NoteLeafCompleted(node.Id, cycleId);
                         continue;
                     }
 
@@ -434,6 +507,10 @@ public sealed class PipelinedGraphExecutor(
                     {
                         DataPlaneRouter.ReleaseArenaInputs(inputs, dataPlane!);
                     }
+
+                    // Reported after the release, so a leaf at cycle C means C's buffers are back in the
+                    // arena — that is what makes the drained point safe to snapshot.
+                    NoteLeafCompleted(node.Id, cycleId);
                 }
             }
             finally
@@ -524,7 +601,12 @@ public sealed class PipelinedGraphExecutor(
             },
             StringComparer.OrdinalIgnoreCase);
 
-        _ = sourceCompleted;   // pipelined mode has no checkpoint store to clear yet (step 2)
+        // A cleanly, fully-consumed run has nothing to resume — drop its persisted checkpoint.
+        if (sourceCompleted && runFailure is null && checkpointStore is not null)
+        {
+            try { await checkpointStore.ClearAsync(cancellationToken); }
+            catch { /* best effort */ }
+        }
 
         return new PipelineExecutionReport
         {
@@ -551,12 +633,6 @@ public sealed class PipelinedGraphExecutor(
         PipelineExecutionOptions options,
         IReadOnlyDictionary<string, ModuleCatalogEntry>? catalog)
     {
-        if (options.CheckpointIntervalCycles > 0 || options.CheckpointDirectory is { Length: > 0 })
-        {
-            return "Pipelined mode does not support checkpointing yet — there is no quiesced cycle boundary "
-                 + "to snapshot at until epoch barriers land. Run this pipeline in serial mode.";
-        }
-
         foreach (var node in executionOrder)
         {
             // Two edges into one port would race: whichever arrived first would win, and the join would

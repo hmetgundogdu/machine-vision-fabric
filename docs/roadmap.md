@@ -225,5 +225,14 @@ descriptor-in-header, engine context slot, engine-allocated module state, snapsh
   no node owned before. **Step 1b: multi-input joins**, via a **void marker** — every edge carries exactly
   one message per cycle, so a join reads one from each edge and pairs by construction, and an untaken
   switch branch cannot stall it. `multilang-demo` now runs pipelined with byte-identical routing to serial.
-  Still refused, with the reason: checkpointing (needs epoch barriers) and two edges into one input port.
-  Remaining in phase 1: epoch barriers, per-node parallelism + reorder buffer, graph-derived arena sizing.
+  **Step 1c: epoch-barrier checkpointing.** Every N cycles the source stops feeding and waits for the
+  pipeline to drain, then captures, then resumes — so M2.5's "quiesced ⇒ torn-free" contract stays literally
+  true instead of being redefined. Drained is decided **at the leaves**: every node reaches some leaf, edges
+  are FIFO with one message per cycle, so once every leaf has finished cycle C (and released its arena
+  inputs) nothing upstream is in flight. Restore-on-start and clear-on-clean-completion match serial;
+  `CheckpointCoordinator` is now shared by both executors. **Measured barrier cost** on the 6 MB numpy
+  bench: `--checkpoint-every 100` is indistinguishable from no checkpointing (5.18 s vs 5.19 s),
+  `--checkpoint-every 10` costs ~10% (5.69 s) — roughly one pipeline depth of latency per barrier,
+  amortised over N.
+  Still refused, with the reason: two edges into one input port.
+  Remaining in phase 1: per-node parallelism + reorder buffer, graph-derived arena sizing.

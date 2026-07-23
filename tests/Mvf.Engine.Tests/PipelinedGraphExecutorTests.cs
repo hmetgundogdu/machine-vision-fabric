@@ -225,11 +225,16 @@ public sealed class PipelinedGraphExecutorTests
     }
 
     [Fact]
-    public async Task Pipelined_RejectsCheckpointing()
+    public async Task Pipelined_EpochBarrier_CapturesWithNothingInFlight()
     {
+        var sink = new StatefulCountingRunner("sink1");
+        var frames = Enumerable.Range(1, 12)
+            .Select(i => (IFrameEnvelope)new BinaryFrameEnvelope("cam1", i, $"f{i}.bmp", [(byte)i], "image/bmp"))
+            .ToArray();
+
         var activator = new FakeActivator(
-            ("source1", new ListSourceRunner("source1", [])),
-            ("sink1", new RecordingSinkRunner("sink1")));
+            ("source1", new ListSourceRunner("source1", frames)),
+            ("sink1", sink));
 
         var report = await new PipelinedGraphExecutor(activator).ExecuteAsync(
             BuildSourceToSink(),
@@ -237,13 +242,101 @@ public sealed class PipelinedGraphExecutorTests
             {
                 PackageRoot = ".", IntegrationsRoot = ".",
                 ExecutionMode = PipelineExecutionMode.Pipelined,
-                CheckpointIntervalCycles = 2
+                CheckpointIntervalCycles = 4,
+                EdgeQueueCapacity = 4   // deep enough for frames to still be queued if the drain is missing
             },
             CancellationToken.None);
 
-        // Silently ignoring the option is exactly the failure mode this refuses to repeat.
-        Assert.False(report.Succeeded);
-        Assert.Contains("checkpointing", report.ErrorMessage);
+        Assert.True(report.Succeeded, report.ErrorMessage);
+
+        // The point of the barrier: at each capture the sink has consumed *everything* the source emitted,
+        // so the snapshot is torn-free. Without the drain the sink would lag by whatever sits in the queue
+        // and these counts would come out below 4, 8, 12.
+        Assert.Equal([4, 8, 12], sink.CountsAtCheckpoint);
+    }
+
+    [Fact]
+    public async Task Pipelined_PersistsCheckpointAndResumesFromIt()
+    {
+        var resumeDir = Path.Combine(Path.GetTempPath(), $"mvf-pipelined-resume-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(resumeDir);
+
+        try
+        {
+            var frames = Enumerable.Range(1, 20)
+                .Select(i => (IFrameEnvelope)new BinaryFrameEnvelope("cam1", i, $"f{i}.bmp", [(byte)i], "image/bmp"))
+                .ToArray();
+
+            PipelineExecutionOptions Options(int maxCycles) => new()
+            {
+                PackageRoot = ".", IntegrationsRoot = ".",
+                ExecutionMode = PipelineExecutionMode.Pipelined,
+                CheckpointIntervalCycles = 2,
+                CheckpointDirectory = resumeDir,
+                MaxCycles = maxCycles
+            };
+
+            // Interrupted by MaxCycles, so the source is not exhausted and the checkpoint must survive.
+            var first = new StatefulCountingRunner("sink1");
+            var firstReport = await new PipelinedGraphExecutor(new FakeActivator(
+                    ("source1", new ListSourceRunner("source1", frames)),
+                    ("sink1", first)))
+                .ExecuteAsync(BuildSourceToSink(), Options(maxCycles: 4), CancellationToken.None);
+
+            Assert.True(firstReport.Succeeded, firstReport.ErrorMessage);
+            Assert.Equal(4, first.Count);
+            Assert.True(File.Exists(Path.Combine(resumeDir, "sink1.state")), "an interrupted run must stay resumable");
+
+            // A fresh executor and a fresh runner: the count can only be right if the state was restored.
+            var second = new StatefulCountingRunner("sink1");
+            var secondReport = await new PipelinedGraphExecutor(new FakeActivator(
+                    ("source1", new ListSourceRunner("source1", frames)),
+                    ("sink1", second)))
+                .ExecuteAsync(BuildSourceToSink(), Options(maxCycles: 2), CancellationToken.None);
+
+            Assert.True(secondReport.Succeeded, secondReport.ErrorMessage);
+            Assert.Equal(6, second.Count);   // 4 restored + 2 more
+        }
+        finally
+        {
+            try { Directory.Delete(resumeDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task Pipelined_ClearsCheckpointWhenTheSourceRunsOut()
+    {
+        var resumeDir = Path.Combine(Path.GetTempPath(), $"mvf-pipelined-clear-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(resumeDir);
+
+        try
+        {
+            var frames = Enumerable.Range(1, 4)
+                .Select(i => (IFrameEnvelope)new BinaryFrameEnvelope("cam1", i, $"f{i}.bmp", [(byte)i], "image/bmp"))
+                .ToArray();
+
+            var report = await new PipelinedGraphExecutor(new FakeActivator(
+                    ("source1", new ListSourceRunner("source1", frames)),
+                    ("sink1", new StatefulCountingRunner("sink1"))))
+                .ExecuteAsync(
+                    BuildSourceToSink(),
+                    new PipelineExecutionOptions
+                    {
+                        PackageRoot = ".", IntegrationsRoot = ".",
+                        ExecutionMode = PipelineExecutionMode.Pipelined,
+                        CheckpointIntervalCycles = 2,
+                        CheckpointDirectory = resumeDir
+                    },
+                    CancellationToken.None);
+
+            Assert.True(report.Succeeded, report.ErrorMessage);
+            Assert.False(File.Exists(Path.Combine(resumeDir, "sink1.state")),
+                "a fully-consumed run has nothing to resume");
+        }
+        finally
+        {
+            try { Directory.Delete(resumeDir, recursive: true); } catch { /* best effort */ }
+        }
     }
 
     // ---- helpers ----
@@ -385,6 +478,44 @@ public sealed class PipelinedGraphExecutorTests
 
             var port = _seen++ % 2 == 0 ? "a" : "b";
             return Task.FromResult(NodeExecutionResult.Single(port, frame));
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// A stateful leaf: counts the frames it consumed, and its checkpoint is that count. It also records
+    /// the count at each capture, which is how "nothing was in flight" becomes observable from a test.
+    /// </summary>
+    private sealed class StatefulCountingRunner(string nodeId) : INodeRunner, ICheckpointable
+    {
+        private readonly List<int> _countsAtCheckpoint = [];
+        public string NodeId { get; } = nodeId;
+        public int Count { get; private set; }
+        public IReadOnlyList<int> CountsAtCheckpoint => _countsAtCheckpoint;
+
+        public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task<NodeExecutionResult> ExecuteAsync(NodeExecutionInputs inputs, CancellationToken cancellationToken)
+        {
+            if (inputs.Get("frame")?.Frame is not null)
+            {
+                Count++;
+            }
+
+            return Task.FromResult(NodeExecutionResult.NoOutput);
+        }
+
+        public Task<byte[]?> CheckpointAsync(CancellationToken cancellationToken)
+        {
+            _countsAtCheckpoint.Add(Count);
+            return Task.FromResult<byte[]?>(BitConverter.GetBytes(Count));
+        }
+
+        public Task RestoreAsync(ReadOnlyMemory<byte> state, CancellationToken cancellationToken)
+        {
+            Count = BitConverter.ToInt32(state.Span);
+            return Task.CompletedTask;
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
