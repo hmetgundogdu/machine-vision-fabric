@@ -64,7 +64,11 @@ public sealed class CognexCameraSession : BackgroundFrameSourceSession
         }
         catch (Exception ex)
         {
+            // Log for the operator, then let it out: the SDK faults the frame channel with it, which is
+            // how the engine learns the camera never produced. Swallowing it here made a failed connect
+            // indistinguishable from an exhausted stream — the run reported success with zero frames.
             Log($"[ERROR] {ex.Message}");
+            throw;
         }
         finally
         {
