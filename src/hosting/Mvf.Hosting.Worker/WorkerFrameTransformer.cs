@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using Mvf.Abstractions;
 using Mvf.Abstractions.Frames;
+using Mvf.Graph.Execution;
 
 namespace Mvf.Hosting.Worker;
 
@@ -13,9 +14,12 @@ namespace Mvf.Hosting.Worker;
 /// then owns (it holds one producer reference until routed).
 /// </summary>
 public sealed class WorkerFrameTransformer(IWorkerChannel worker, IDataPlane dataPlane)
-    : IFrameTransformer, ICheckpointable, IAsyncDisposable
+    : IFrameTransformer, ICheckpointable, IWorkerMetricsSource, IAsyncDisposable
 {
+    private readonly WorkerCallMetrics _metrics = new();
     private int _requestId;
+
+    public WorkerMetricsSnapshot GetWorkerMetrics() => _metrics.Snapshot(worker);
 
     // A supervised channel owns checkpoint/restore (it must hold the last state to recover with);
     // a plain channel falls back to a one-shot capture/restore.
@@ -57,10 +61,15 @@ public sealed class WorkerFrameTransformer(IWorkerChannel worker, IDataPlane dat
             },
         };
 
+        // Timed from the engine side (see WorkerFrameClassifier): a restart-and-retry inside this call
+        // shows up as a latency spike rather than disappearing.
         JsonObject response;
+        var startedAt = WorkerCallMetrics.Start();
+        var failed = true;
         try
         {
             response = await worker.RequestAsync(request, cancellationToken);
+            failed = (string?)response["type"] == "error";
         }
         catch
         {
@@ -69,6 +78,7 @@ public sealed class WorkerFrameTransformer(IWorkerChannel worker, IDataPlane dat
         }
         finally
         {
+            _metrics.Complete(startedAt, failed);
             if (ownInputHandle is { } inputToRelease)
             {
                 dataPlane.Release(inputToRelease);

@@ -22,6 +22,10 @@ public sealed class PipelineNodeState
     public int AcceptedCycles { get; set; }
     public int FaultedCycles { get; set; }
     public long LastDurationMs { get; set; }
+
+    /// <summary>Out-of-process worker restarts observed so far for this node (0 when it runs in-process).</summary>
+    public int WorkerRestarts { get; set; }
+
     public IReadOnlyList<string> LastInputPorts { get; set; } = [];
     public IReadOnlyList<string> LastOutputPorts { get; set; } = [];
 }

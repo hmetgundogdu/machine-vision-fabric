@@ -20,6 +20,13 @@ public sealed class PipelineExecutionReport
     /// </summary>
     public int DroppedFrames { get; init; }
 
+    /// <summary>
+    /// Total out-of-process worker restarts across every node in the run. Recovery is transparent by
+    /// design, so this is the headline number that says a child died and was replaced; per-node detail
+    /// (which module, when, why, warm vs cold) lives in <see cref="NodeExecutionStats.Worker"/>.
+    /// </summary>
+    public int WorkerRestarts { get; init; }
+
     public required TimeSpan Duration { get; init; }
 
     /// <summary>Human-readable error message when Succeeded is false.</summary>

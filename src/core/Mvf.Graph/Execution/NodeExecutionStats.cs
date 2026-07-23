@@ -30,6 +30,12 @@ public sealed class NodeExecutionStats
     /// <summary>Total wall-clock milliseconds spent inside ExecuteAsync across all cycles.</summary>
     public required long TotalDurationMs { get; init; }
 
+    /// <summary>
+    /// Cross-process counters when this node runs out-of-process (worker RPC latency, restarts), or null
+    /// for an in-process node. This is where an absorbed worker crash becomes visible (M3 observability).
+    /// </summary>
+    public WorkerMetricsSnapshot? Worker { get; init; }
+
     /// <summary>Average milliseconds per execution cycle. 0 if no cycles ran.</summary>
     public double AverageDurationMs => TotalCycles > 0 ? (double)TotalDurationMs / TotalCycles : 0;
 }

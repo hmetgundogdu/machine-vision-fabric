@@ -47,13 +47,18 @@ public sealed class PipelineDashboard
         PipelineExecutionOptions options,
         CancellationToken cancellationToken = default)
     {
+        // Copy every run option through — the dashboard only adds observation callbacks. (Before this,
+        // --checkpoint-every / --resume-dir / --backpressure were silently dropped under the TUI.)
         var enriched = new PipelineExecutionOptions
         {
-            PackageRoot      = options.PackageRoot,
-            IntegrationsRoot = options.IntegrationsRoot,
-            MaxCycles        = options.MaxCycles,
-            OnNodeExecuted   = e => _state.OnNodeExecuted(e),
-            OnCycleCompleted = p => _state.OnCycleCompleted(p)
+            PackageRoot              = options.PackageRoot,
+            IntegrationsRoot         = options.IntegrationsRoot,
+            MaxCycles                = options.MaxCycles,
+            CheckpointIntervalCycles = options.CheckpointIntervalCycles,
+            CheckpointDirectory      = options.CheckpointDirectory,
+            BackpressurePolicy       = options.BackpressurePolicy,
+            OnNodeExecuted           = e => _state.OnNodeExecuted(e),
+            OnCycleCompleted         = p => _state.OnCycleCompleted(p)
         };
 
         _state.OnRunStarted(Guid.NewGuid().ToString("N")[..8], _definition.Name);
@@ -155,6 +160,13 @@ public sealed class PipelineDashboard
         // Truncate run ID to 8 chars
         var runId = snapshot.RunId is { Length: > 8 } r ? r[..8] : snapshot.RunId ?? "-";
 
+        // Cross-process recovery, promoted to the header: a restart is transparent to the graph, so
+        // without this a run that lost and replaced a worker looks identical to one that never did.
+        var restarts = _state.GetNodeSnapshot().Sum(n => n.WorkerRestarts);
+        var restartCell = restarts > 0
+            ? $"  [grey]rst:[/][red]{restarts}[/]"
+            : string.Empty;
+
         return new Markup(
             $"[bold deepskyblue1]MVF[/] [grey]|[/] " +
             $"[bold]{Markup.Escape(_definition.Name)}[/]  " +
@@ -162,7 +174,8 @@ public sealed class PipelineDashboard
             $"{status}  " +
             $"[grey]cyc:[/][white]{snapshot.TotalCycles}[/]  " +
             $"[grey]ok:[/][green]{snapshot.AcceptedCycles}[/]  " +
-            $"[grey]t:[/][grey58]{elapsed}[/]");
+            $"[grey]t:[/][grey58]{elapsed}[/]" +
+            restartCell);
     }
 
     private IRenderable BuildLogPanel()

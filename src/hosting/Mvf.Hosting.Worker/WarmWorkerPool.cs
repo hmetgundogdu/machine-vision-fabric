@@ -19,6 +19,7 @@ public sealed class WarmWorkerPool : IAsyncDisposable
     private readonly Queue<StdioWorkerProcess> _ready = new();
     private readonly CancellationTokenSource _shutdown = new();
     private int _warming;   // spares currently being pre-warmed (in-flight), so we never overshoot target
+    private int _spareHits; // acquires served warm — lets a caller report warm vs cold recovery
     private bool _disposed;
 
     private WarmWorkerPool(Func<CancellationToken, Task<StdioWorkerProcess>> spawn, int target)
@@ -32,6 +33,12 @@ public sealed class WarmWorkerPool : IAsyncDisposable
     {
         get { lock (_gate) { return _ready.Count; } }
     }
+
+    /// <summary>
+    /// Total acquires served from a pre-warmed spare rather than the cold-spawn fallback. A caller can
+    /// diff this across an <see cref="AcquireAsync"/> to tell whether that acquire was warm.
+    /// </summary>
+    public int SpareHits => Volatile.Read(ref _spareHits);
 
     /// <summary>Creates a pool and eagerly pre-warms up to <paramref name="targetSpares"/> workers.</summary>
     public static async Task<WarmWorkerPool> StartAsync(
@@ -81,6 +88,7 @@ public sealed class WarmWorkerPool : IAsyncDisposable
                 continue;
             }
 
+            Interlocked.Increment(ref _spareHits);
             _ = ReplenishAsync();
             return spare;
         }

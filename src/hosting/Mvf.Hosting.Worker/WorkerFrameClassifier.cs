@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using Mvf.Abstractions;
 using Mvf.Abstractions.Frames;
+using Mvf.Graph.Execution;
 using Mvf.Graph.Processing;
 
 namespace Mvf.Hosting.Worker;
@@ -16,9 +17,12 @@ namespace Mvf.Hosting.Worker;
 /// classifier publishes it into the data plane for the single RPC and releases it afterwards.</para>
 /// </summary>
 public sealed class WorkerFrameClassifier(IWorkerChannel worker, IDataPlane dataPlane)
-    : IFrameClassifier, ICheckpointable, IAsyncDisposable
+    : IFrameClassifier, ICheckpointable, IWorkerMetricsSource, IAsyncDisposable
 {
+    private readonly WorkerCallMetrics _metrics = new();
     private int _requestId;
+
+    public WorkerMetricsSnapshot GetWorkerMetrics() => _metrics.Snapshot(worker);
 
     // A supervised channel owns checkpoint/restore (it must hold the last state to recover with);
     // a plain channel falls back to a one-shot capture/restore.
@@ -44,13 +48,20 @@ public sealed class WorkerFrameClassifier(IWorkerChannel worker, IDataPlane data
             ["frame"] = frameMessage,
         };
 
+        // Timed from the engine side, so it covers marshalling, the pipe round-trip, and the child's
+        // compute — and, when the child died mid-request, the supervisor's restart + retry. That spike is
+        // the point: a recovered crash shows up as latency instead of vanishing.
         JsonObject response;
+        var startedAt = WorkerCallMetrics.Start();
+        var failed = true;
         try
         {
             response = await worker.RequestAsync(request, cancellationToken);
+            failed = (string?)response["type"] == "error";
         }
         finally
         {
+            _metrics.Complete(startedAt, failed);
             if (ownHandle is { } handle)
             {
                 dataPlane.Release(handle);

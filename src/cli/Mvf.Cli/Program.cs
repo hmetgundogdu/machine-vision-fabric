@@ -356,11 +356,7 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         Console.WriteLine($"Pipeline: {definition.Name}  nodes:{definition.Nodes.Count}  edges:{definition.Edges.Count}");
         await executionHost.StartAsync(definition, options);
         var report = await executionHost.WaitForCompletionAsync();
-        Console.WriteLine($"Succeeded:{report?.Succeeded}  cycles:{report?.TotalCycles}  accepted:{report?.AcceptedCycles}  dropped:{report?.DroppedFrames}  duration:{report?.Duration.TotalSeconds:F2}s");
-        if (report is { DroppedFrames: > 0 })
-            Console.WriteLine($"  backpressure: dropped {report.DroppedFrames} frame(s) (policy=drop, arena full)");
-        foreach (var (nid, ns) in report?.NodeStats ?? new Dictionary<string, Mvf.Graph.Execution.NodeExecutionStats>())
-            Console.WriteLine($"  {nid}: mode={ns.ActivationMode} warmup={ns.WarmupMs}ms cycles={ns.TotalCycles} faults={ns.FaultedCycles} avg={ns.AverageDurationMs:F1}ms");
+        PrintExecutionReport(report);
         if (report is null || !report.Succeeded)
         {
             Console.Error.WriteLine($"Error: {report?.ErrorMessage ?? "unknown"}");
@@ -375,9 +371,52 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
     var dashboard = new PipelineDashboard(tuiHost, definition);
     var dashReport = await dashboard.RunAsync(options);
 
+    // The dashboard is transient (it repaints in place); print the summary so the run leaves a record
+    // in the scrollback — worker restarts and RPC latency included.
+    Console.WriteLine();
+    PrintExecutionReport(dashReport);
+
     if (dashReport is null || !dashReport.Succeeded)
     {
         Environment.ExitCode = 1;
+    }
+}
+
+// Post-run summary shared by the plain and TUI paths: run totals, backpressure, and per-node stats.
+// Worker-backed nodes get a second line of cross-process health — a supervised restart is invisible to
+// the graph (the retry just succeeds), so this is the only place it is recorded.
+void PrintExecutionReport(PipelineExecutionReport? report)
+{
+    Console.WriteLine(
+        $"Succeeded:{report?.Succeeded}  cycles:{report?.TotalCycles}  accepted:{report?.AcceptedCycles}  " +
+        $"dropped:{report?.DroppedFrames}  restarts:{report?.WorkerRestarts}  duration:{report?.Duration.TotalSeconds:F2}s");
+
+    if (report is { DroppedFrames: > 0 })
+    {
+        Console.WriteLine($"  backpressure: dropped {report.DroppedFrames} frame(s) (policy=drop, arena full)");
+    }
+
+    foreach (var (nid, ns) in report?.NodeStats ?? new Dictionary<string, NodeExecutionStats>())
+    {
+        Console.WriteLine(
+            $"  {nid}: mode={ns.ActivationMode} warmup={ns.WarmupMs}ms cycles={ns.TotalCycles} " +
+            $"faults={ns.FaultedCycles} avg={ns.AverageDurationMs:F1}ms");
+
+        if (ns.Worker is not { } w)
+        {
+            continue;
+        }
+
+        // warm=x/y — how many restarts were served by a pre-warmed spare instead of a cold start (L.4).
+        var warm = w.Restarts > 0 ? $" warm={w.WarmRestarts}/{w.Restarts}" : string.Empty;
+        Console.WriteLine(
+            $"      worker={w.ModuleId} rpc={w.Requests} failed={w.FailedRequests} restarts={w.Restarts}{warm} " +
+            $"avg={w.AverageRequestMs:F1}ms max={w.MaxRequestMs:F1}ms");
+
+        if (w.LastRestartUtc is { } at)
+        {
+            Console.WriteLine($"      last restart {at:HH:mm:ss} UTC — {w.LastRestartReason}");
+        }
     }
 }
 

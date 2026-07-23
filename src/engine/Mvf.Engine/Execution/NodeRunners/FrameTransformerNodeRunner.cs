@@ -1,4 +1,5 @@
 using Mvf.Abstractions;
+using Mvf.Graph.Execution;
 
 namespace Mvf.Engine.Execution.NodeRunners;
 
@@ -10,11 +11,16 @@ namespace Mvf.Engine.Execution.NodeRunners;
 /// Input ports : <c>frame</c> (data)
 /// Output ports: <c>frame</c> (data) — emitted only when the transformer returns a frame
 /// </summary>
-internal sealed class FrameTransformerNodeRunner(string nodeId, IFrameTransformer transformer) : INodeRunner, ICheckpointable
+internal sealed class FrameTransformerNodeRunner(string nodeId, IFrameTransformer transformer)
+    : INodeRunner, ICheckpointable, IWorkerMetricsSource
 {
     public string NodeId { get; } = nodeId;
 
     public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    // Surfaces cross-process counters when the transformer runs out-of-process; an in-process one has none.
+    public WorkerMetricsSnapshot? GetWorkerMetrics() =>
+        (transformer as IWorkerMetricsSource)?.GetWorkerMetrics();
 
     // Surfaces the wrapped transformer's checkpoint/restore (worker-backed transformers are
     // checkpointable) so the executor can periodically snapshot it; otherwise a no-op.

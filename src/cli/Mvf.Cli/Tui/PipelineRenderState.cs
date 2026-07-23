@@ -71,6 +71,17 @@ public sealed class PipelineRenderState
             if (e.Faulted)
                 node.FaultedCycles++;
 
+            // A supervised restart is invisible to the graph — the cycle just succeeds on the retry. Log
+            // the moment the count moves so recovery is something the operator sees, not something they
+            // infer from a latency spike.
+            if (e.WorkerRestarts > node.WorkerRestarts)
+            {
+                var recovered = e.WorkerRestarts - node.WorkerRestarts;
+                node.WorkerRestarts = e.WorkerRestarts;
+                AddLog(LogLevel.Warning,
+                    $"[cyc:{e.CycleIndex}] {e.NodeId}  worker restarted x{recovered} (recovered, total {e.WorkerRestarts})");
+            }
+
             var ports = e.HasOutput
                 ? $"→ [{string.Join(", ", e.OutputPortNames)}]"
                 : "→ (no output)";

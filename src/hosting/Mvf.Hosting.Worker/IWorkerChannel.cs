@@ -12,6 +12,13 @@ public interface IWorkerChannel : IAsyncDisposable
     /// <summary>The module id from the child's <c>hello</c> handshake.</summary>
     string ModuleId { get; }
 
+    /// <summary>
+    /// How often this channel had to replace a dead child. A plain channel cannot restart, so it reports
+    /// <see cref="WorkerRestartStats.None"/>; a <see cref="SupervisedWorker"/> reports its real history,
+    /// which is what makes an absorbed crash visible in the execution report.
+    /// </summary>
+    WorkerRestartStats RestartStats => WorkerRestartStats.None;
+
     /// <summary>Sends one request and returns the matching response (log lines skipped).</summary>
     Task<JsonObject> RequestAsync(JsonObject request, CancellationToken cancellationToken);
 }
