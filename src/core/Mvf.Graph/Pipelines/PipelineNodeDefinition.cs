@@ -36,6 +36,15 @@ public sealed class PipelineNodeDefinition
     /// </summary>
     public string? Backpressure { get; set; }
 
+    /// <summary>
+    /// How many instances of this node to run concurrently in pipelined mode. Null or 1 means one, which
+    /// is the only safe default: replicating a node only works when it holds no state across frames, since
+    /// N instances would otherwise diverge into N states and recovery persists exactly one per node.
+    /// A module opts in by declaring <c>maxParallelism</c>; the validator rejects a node asking for more
+    /// than its module allows. Ignored by the serial executor, which always runs one instance.
+    /// </summary>
+    public int? Parallelism { get; set; }
+
     public JsonObject Config { get; set; } = [];
 
     public IReadOnlyList<PipelinePortDefinition> Inputs { get; set; } = [];

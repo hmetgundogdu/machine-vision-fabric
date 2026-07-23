@@ -1,6 +1,7 @@
 using Mvf.Abstractions;
 using Mvf.Abstractions.Frames;
 using Mvf.Engine.Execution;
+using Mvf.Engine.Modules;
 using Mvf.Graph.Execution;
 using Mvf.Graph.Pipelines;
 
@@ -339,7 +340,132 @@ public sealed class PipelinedGraphExecutorTests
         }
     }
 
+    [Fact]
+    public async Task Pipelined_ParallelInstances_KeepOrderAndUseEveryInstance()
+    {
+        var repo = FindRepoRoot();
+        var frames = Enumerable.Range(1, 40)
+            .Select(i => (IFrameEnvelope)new BinaryFrameEnvelope("cam1", i, $"f{i}.bmp", [(byte)i], "image/bmp"))
+            .ToArray();
+
+        var sink = new RecordingSinkRunner("sink1");
+        var built = new List<JitteredWorkerRunner>();
+
+        // Uneven latency per frame is the point: instances finish out of order, so anything that comes out
+        // in order came out of the reorder buffer rather than by luck.
+        var activator = new MultiInstanceActivator(
+            ("source1", () => new ListSourceRunner("source1", frames)),
+            ("work1", () =>
+            {
+                var runner = new JitteredWorkerRunner("work1");
+                built.Add(runner);
+                return runner;
+            }),
+            ("sink1", () => sink));
+
+        var report = await new PipelinedGraphExecutor(activator, dataPlane: null, moduleCatalog: new ModuleCatalog())
+            .ExecuteAsync(
+                BuildSourceWorkerSink(parallelism: 4),
+                new PipelineExecutionOptions
+                {
+                    PackageRoot = ".",
+                    IntegrationsRoot = Path.Combine(repo, "modules"),
+                    ExecutionMode = PipelineExecutionMode.Pipelined,
+                    EdgeQueueCapacity = 4
+                },
+                CancellationToken.None);
+
+        Assert.True(report.Succeeded, report.ErrorMessage);
+        Assert.Equal(4, built.Count);                                   // four real instances were activated
+        Assert.True(built.Count(w => w.Handled > 0) > 1, "work must be spread across instances");
+        Assert.Equal(40, built.Sum(w => w.Handled));                    // every frame handled exactly once
+        Assert.Equal(Enumerable.Range(1, 40), sink.SeenSequences);      // and the sink still sees source order
+    }
+
+    [Fact]
+    public async Task Pipelined_RejectsParallelismAboveTheModuleCeiling()
+    {
+        var repo = FindRepoRoot();
+        var activator = new MultiInstanceActivator(
+            ("source1", () => new ListSourceRunner("source1", [])),
+            ("work1", () => new JitteredWorkerRunner("work1")),
+            ("sink1", () => new RecordingSinkRunner("sink1")));
+
+        var report = await new PipelinedGraphExecutor(activator, dataPlane: null, moduleCatalog: new ModuleCatalog())
+            .ExecuteAsync(
+                BuildSourceWorkerSink(parallelism: 8),   // module declares maxParallelism 4
+                new PipelineExecutionOptions
+                {
+                    PackageRoot = ".",
+                    IntegrationsRoot = Path.Combine(repo, "modules"),
+                    ExecutionMode = PipelineExecutionMode.Pipelined
+                },
+                CancellationToken.None);
+
+        // Clamping to 4 would look like the feature quietly not working; the mismatch has to be visible.
+        Assert.False(report.Succeeded);
+        Assert.Contains("parallelism 8", report.ErrorMessage);
+        Assert.Contains("at most 4", report.ErrorMessage);
+        Assert.Contains("maxParallelism", report.ErrorMessage);
+    }
+
     // ---- helpers ----
+
+    private static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "CLAUDE.md"))
+                && Directory.Exists(Path.Combine(dir.FullName, "modules")))
+            {
+                return dir.FullName;
+            }
+            dir = dir.Parent;
+        }
+        throw new InvalidOperationException("Repository root (with CLAUDE.md + modules/) not found.");
+    }
+
+    /// <summary>source → work (replicated, module-backed) → sink.</summary>
+    private static PipelineDefinition BuildSourceWorkerSink(int parallelism) => new()
+    {
+        Name = "source-worker-sink",
+        Nodes =
+        [
+            new PipelineNodeDefinition
+            {
+                Id = "source1", Kind = "runtime-builtin", Category = "source",
+                Outputs = [new PipelinePortDefinition { Name = "frame", Channel = "data", DataType = "data/frame" }]
+            },
+            new PipelineNodeDefinition
+            {
+                Id = "work1", Kind = "integration-module", Category = "compute", ModuleId = "py.bench-numpy",
+                Parallelism = parallelism,
+                Inputs = [new PipelinePortDefinition { Name = "frame", Channel = "data", DataType = "data/frame" }],
+                Outputs = [new PipelinePortDefinition { Name = "frame", Channel = "data", DataType = "data/frame" }]
+            },
+            new PipelineNodeDefinition
+            {
+                Id = "sink1", Kind = "integration-module", Category = "output", ModuleId = "mvf.file-sink",
+                Inputs = [new PipelinePortDefinition { Name = "frame", Channel = "data", DataType = "data/frame" }]
+            }
+        ],
+        Edges =
+        [
+            new PipelineEdgeDefinition
+            {
+                Id = "e1", Kind = "data",
+                From = new PipelinePortReference { NodeId = "source1", Port = "frame" },
+                To = new PipelinePortReference { NodeId = "work1", Port = "frame" }
+            },
+            new PipelineEdgeDefinition
+            {
+                Id = "e2", Kind = "data",
+                From = new PipelinePortReference { NodeId = "work1", Port = "frame" },
+                To = new PipelinePortReference { NodeId = "sink1", Port = "frame" }
+            }
+        ]
+    };
 
     private static async Task<PipelineExecutionReport> RunAsync(PipelineExecutionMode mode, int frameCount)
     {
@@ -443,6 +569,50 @@ public sealed class PipelinedGraphExecutorTests
     };
 
     // ---- fakes ----
+
+    /// <summary>Activates a fresh runner per call, so a replicated node really gets N distinct instances.</summary>
+    private sealed class MultiInstanceActivator(params (string NodeId, Func<INodeRunner> Factory)[] factories)
+        : IPipelineNodeActivator
+    {
+        private readonly Dictionary<string, Func<INodeRunner>> _factories =
+            factories.ToDictionary(f => f.NodeId, f => f.Factory, StringComparer.OrdinalIgnoreCase);
+
+        public async Task<INodeRunner> ActivateAsync(
+            PipelineNodeDefinition node, PipelineExecutionOptions options, CancellationToken cancellationToken)
+        {
+            var runner = _factories[node.Id]();
+            await runner.ActivateAsync(cancellationToken);
+            return runner;
+        }
+    }
+
+    /// <summary>
+    /// Passes its frame through after an uneven delay, so instances finish out of order — which is what
+    /// makes an in-order sink meaningful rather than accidental.
+    /// </summary>
+    private sealed class JitteredWorkerRunner(string nodeId) : INodeRunner
+    {
+        public string NodeId { get; } = nodeId;
+        public int Handled { get; private set; }
+
+        public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public async Task<NodeExecutionResult> ExecuteAsync(
+            NodeExecutionInputs inputs, CancellationToken cancellationToken)
+        {
+            var frame = inputs.Get("frame");
+            if (frame?.Frame is null)
+            {
+                return NodeExecutionResult.NoOutput;
+            }
+
+            Handled++;
+            await Task.Delay(frame.Frame.SequenceNumber % 5 == 0 ? 12 : 1, cancellationToken);
+            return NodeExecutionResult.Single("frame", frame);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
 
     /// <summary>Re-emits its input frame on both output ports.</summary>
     private sealed class ForkRunner(string nodeId) : INodeRunner

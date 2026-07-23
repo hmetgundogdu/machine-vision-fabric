@@ -163,6 +163,7 @@ public sealed class PipelineExpander
             ModuleId = moduleId,
             ActivationMode = GetString(nodeObj, "activationMode"),
             Backpressure = GetString(nodeObj, "backpressure"),
+            Parallelism = GetInt(nodeObj, "parallelism"),
             Config = CloneConfig(nodeObj),
             Inputs = inputs,
             Outputs = outputs
@@ -204,6 +205,7 @@ public sealed class PipelineExpander
             PrimitiveType = primitiveType,
             ActivationMode = GetString(nodeObj, "activationMode"),
             Backpressure = GetString(nodeObj, "backpressure"),
+            Parallelism = GetInt(nodeObj, "parallelism"),
             Config = CloneConfig(nodeObj),
             Inputs = inputs,
             Outputs = outputs
@@ -305,6 +307,9 @@ public sealed class PipelineExpander
 
     private static string? GetString(JsonObject obj, string property) =>
         obj[property] is JsonValue value && value.TryGetValue<string>(out var s) ? s : null;
+
+    private static int? GetInt(JsonObject obj, string property) =>
+        obj[property] is JsonValue value && value.TryGetValue<int>(out var i) ? i : null;
 
     private static string Capitalize(string value) =>
         value.Length == 0 ? value : char.ToUpperInvariant(value[0]) + value[1..];
