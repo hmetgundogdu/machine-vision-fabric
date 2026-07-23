@@ -12,11 +12,16 @@ namespace Mvf.Engine.Execution.NodeRunners;
 /// Input ports : <c>frame</c> (data)
 /// Output ports: <c>class</c> (control)
 /// </summary>
-internal sealed class FrameClassifierNodeRunner(string nodeId, IFrameClassifier classifier) : INodeRunner, ICheckpointable
+internal sealed class FrameClassifierNodeRunner(string nodeId, IFrameClassifier classifier)
+    : INodeRunner, ICheckpointable, IWorkerMetricsSource
 {
     public string NodeId { get; } = nodeId;
 
     public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    // Surfaces cross-process counters when the classifier runs out-of-process; an in-process one has none.
+    public WorkerMetricsSnapshot? GetWorkerMetrics() =>
+        (classifier as IWorkerMetricsSource)?.GetWorkerMetrics();
 
     // Surfaces the wrapped classifier's checkpoint/restore (worker-backed classifiers are checkpointable)
     // so the executor can periodically snapshot it; a stateless or in-process classifier is a no-op.

@@ -18,4 +18,11 @@ public sealed class NodeExecutionEvent
 
     /// <summary>Port names that had values arriving into the node this cycle.</summary>
     public required IReadOnlyList<string> InputPortNames { get; init; }
+
+    /// <summary>
+    /// Restarts this node's out-of-process worker has needed so far in the run (0 for an in-process node).
+    /// Cumulative, so a consumer sees the count go up on the cycle the crash was absorbed — which is what
+    /// makes recovery visible live rather than only in the final report.
+    /// </summary>
+    public int WorkerRestarts { get; init; }
 }

@@ -130,11 +130,15 @@ public static class GraphRenderer
         var timing  = state.LastDurationMs > 0
             ? $"[grey42]{state.LastDurationMs}ms[/]"
             : string.Empty;
+        // Worker recovery is otherwise invisible (the retry succeeds); "r2" = restarted twice so far.
+        var restarts = state.WorkerRestarts > 0
+            ? $" [red]r{state.WorkerRestarts}[/]"
+            : string.Empty;
 
         var content = new Markup(
             $"{icon} [{catColor}]{Markup.Escape(title)}[/]\n" +
             $"[grey42]{Markup.Escape(sub)}[/]\n" +
-            $"{cycles}  {timing}");
+            $"{cycles}  {timing}{restarts}");
 
         var borderStyle = state.Status switch
         {

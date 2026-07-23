@@ -144,6 +144,11 @@ public sealed class PipelineGraphExecutor(
             _ => new NodeStatsAccumulator(),
             StringComparer.OrdinalIgnoreCase);
 
+        // Cross-process counters, harvested from worker-backed runners before they are disposed (M3
+        // observability): a supervisor restart is transparent to the graph, so without this the run would
+        // end with no record that a child ever died.
+        var workerMetricsByNode = new Dictionary<string, WorkerMetricsSnapshot>(StringComparer.OrdinalIgnoreCase);
+
         // Static, graph-aware data-plane routing. Inactive (heap-only, original behavior) when there is
         // no data plane or the graph has no out-of-process worker nodes.
         var workerNodeIds = BuildWorkerNodeIds(definition, loadedCatalog);
@@ -240,6 +245,14 @@ public sealed class PipelineGraphExecutor(
                         if (faulted) acc.FaultedCycles++;
                     }
 
+                    // Read the worker counters every cycle a worker node runs, so a crash absorbed by the
+                    // supervisor is reported live (TUI) as well as in the final report.
+                    if (runner is IWorkerMetricsSource metricsSource
+                        && metricsSource.GetWorkerMetrics() is { } workerMetrics)
+                    {
+                        workerMetricsByNode[node.Id] = workerMetrics;
+                    }
+
                     options.OnNodeExecuted?.Invoke(new NodeExecutionEvent
                     {
                         RunId = runId,
@@ -248,6 +261,7 @@ public sealed class PipelineGraphExecutor(
                         HasOutput = result.HasOutput,
                         Faulted = faulted,
                         DurationMs = nodeElapsed,
+                        WorkerRestarts = workerMetricsByNode.TryGetValue(node.Id, out var wm) ? wm.Restarts : 0,
                         OutputPortNames = result.HasOutput
                             ? result.All.Select(kvp => kvp.Key).ToList()
                             : [],
@@ -325,31 +339,21 @@ public sealed class PipelineGraphExecutor(
         }
         finally
         {
+            // Final harvest before the children are shut down — disposal ends the worker processes and
+            // takes their counters with them (this also catches a restart during an end-of-run checkpoint).
+            foreach (var (nodeId, runner) in runnerById)
+            {
+                if (runner is IWorkerMetricsSource metricsSource
+                    && metricsSource.GetWorkerMetrics() is { } workerMetrics)
+                {
+                    workerMetricsByNode[nodeId] = workerMetrics;
+                }
+            }
+
             await DisposeAllAsync(runners);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-
-        if (backpressureFailure is not null)
-        {
-            return new PipelineExecutionReport
-            {
-                Succeeded = false,
-                TotalCycles = totalCycles,
-                AcceptedCycles = acceptedCycles,
-                DroppedFrames = droppedFrames,
-                Duration = DateTime.UtcNow - startedAt,
-                ErrorMessage = backpressureFailure,
-                Warnings = warnings
-            };
-        }
-
-        // A cleanly, fully-consumed run has nothing to resume — drop its persisted checkpoint.
-        if (sourceCompleted && checkpointStore is not null)
-        {
-            try { await checkpointStore.ClearAsync(cancellationToken); }
-            catch { /* best effort */ }
-        }
 
         var nodeStats = statsMap.ToDictionary(
             kvp => kvp.Key,
@@ -360,9 +364,35 @@ public sealed class PipelineGraphExecutor(
                 FaultedCycles = kvp.Value.FaultedCycles,
                 TotalDurationMs = kvp.Value.TotalDurationMs,
                 WarmupMs = warmupByNode.GetValueOrDefault(kvp.Key),
-                ActivationMode = activationModeByNode.GetValueOrDefault(kvp.Key, NodeActivationMode.Resident)
+                ActivationMode = activationModeByNode.GetValueOrDefault(kvp.Key, NodeActivationMode.Resident),
+                Worker = workerMetricsByNode.GetValueOrDefault(kvp.Key)
             },
             StringComparer.OrdinalIgnoreCase);
+
+        var workerRestarts = workerMetricsByNode.Values.Sum(m => m.Restarts);
+
+        if (backpressureFailure is not null)
+        {
+            return new PipelineExecutionReport
+            {
+                Succeeded = false,
+                TotalCycles = totalCycles,
+                AcceptedCycles = acceptedCycles,
+                DroppedFrames = droppedFrames,
+                WorkerRestarts = workerRestarts,
+                Duration = DateTime.UtcNow - startedAt,
+                ErrorMessage = backpressureFailure,
+                Warnings = warnings,
+                NodeStats = nodeStats
+            };
+        }
+
+        // A cleanly, fully-consumed run has nothing to resume — drop its persisted checkpoint.
+        if (sourceCompleted && checkpointStore is not null)
+        {
+            try { await checkpointStore.ClearAsync(cancellationToken); }
+            catch { /* best effort */ }
+        }
 
         return new PipelineExecutionReport
         {
@@ -370,6 +400,7 @@ public sealed class PipelineGraphExecutor(
             TotalCycles = totalCycles,
             AcceptedCycles = acceptedCycles,
             DroppedFrames = droppedFrames,
+            WorkerRestarts = workerRestarts,
             Duration = DateTime.UtcNow - startedAt,
             Warnings = warnings,
             NodeStats = nodeStats

@@ -18,6 +18,13 @@ public sealed class SupervisedWorker : IWorkerChannel, ICheckpointable
     private byte[]? _lastState;
     private int _requestId;
 
+    // Recovery history. Restarts are transparent to the caller by design, so without this the crash
+    // would leave no trace at all — this is what the execution report surfaces (M3 observability).
+    private int _restarts;
+    private int _warmRestarts;
+    private DateTime? _lastRestartUtc;
+    private string? _lastRestartReason;
+
     private SupervisedWorker(
         StdioWorkerProcess worker,
         Func<CancellationToken, Task<StdioWorkerProcess>> spawn,
@@ -31,6 +38,9 @@ public sealed class SupervisedWorker : IWorkerChannel, ICheckpointable
     }
 
     public string ModuleId => _worker.ModuleId;
+
+    public WorkerRestartStats RestartStats =>
+        new(_restarts, _warmRestarts, _lastRestartUtc, _lastRestartReason);
 
     /// <summary>
     /// Starts a supervised worker. When <paramref name="pool"/> is given, the initial worker and every
@@ -55,7 +65,7 @@ public sealed class SupervisedWorker : IWorkerChannel, ICheckpointable
         }
         catch (Exception ex) when (ex is not OperationCanceledException && IsWorkerDeath(ex))
         {
-            await RestartAsync(cancellationToken);
+            await RestartAsync(ex.Message, cancellationToken);
             return await _worker.RequestAsync(request, cancellationToken); // retry once on the fresh worker
         }
     }
@@ -72,12 +82,23 @@ public sealed class SupervisedWorker : IWorkerChannel, ICheckpointable
         _lastState = state.IsEmpty ? null : state.ToArray();
     }
 
-    private async Task RestartAsync(CancellationToken cancellationToken)
+    private async Task RestartAsync(string reason, CancellationToken cancellationToken)
     {
         try { await _worker.DisposeAsync(); } catch { /* already dead */ }
 
         // A pre-warmed spare (if pooled) skips the cold-start; restore its state and it is ready to retry.
+        var spareHitsBefore = _pool?.SpareHits ?? 0;
         _worker = _pool is not null ? await _pool.AcquireAsync(cancellationToken) : await _spawn(cancellationToken);
+
+        _restarts++;
+        if (_pool is not null && _pool.SpareHits > spareHitsBefore)
+        {
+            _warmRestarts++;   // recovery skipped the cold-start (L.4)
+        }
+
+        _lastRestartUtc = DateTime.UtcNow;
+        _lastRestartReason = reason;
+
         if (_lastState is { } state)
         {
             await WorkerCheckpoint.RestoreAsync(_worker, _dataPlane, ++_requestId, state, cancellationToken);
