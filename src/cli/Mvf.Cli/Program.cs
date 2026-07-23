@@ -345,6 +345,19 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         EdgeQueueCapacity = edgeQueueCapacity
     };
 
+    // Size the arena from the graph before anything resolves it. Pipelining keeps a queue's worth of
+    // frames per worker edge and several per instance, so a fixed slot count silently caps parallelism —
+    // four instances would stop the run on backpressure. --arena-slots overrides when needed.
+    var arenaBudget = host.Services.GetRequiredService<ArenaSlotBudget>();
+    arenaBudget.Slots = invocation.Options.TryGetValue("arena-slots", out var slots) && int.TryParse(slots, out var slotsInt) && slotsInt > 0
+        ? slotsInt
+        : DataPlaneSizing.RequiredSlots(
+            definition,
+            host.Services.GetRequiredService<ModuleCatalog>(),
+            integrationsRoot,
+            edgeQueueCapacity,
+            executionMode == PipelineExecutionMode.Pipelined);
+
     var validator = host.Services.GetRequiredService<IPipelineDefinitionValidator>();
     var validation = validator.Validate(definition);
 
@@ -484,8 +497,12 @@ IHost BuildHost(IReadOnlyDictionary<string, string?>? overrides = null)
     builder.Services.AddSingleton<ModuleCatalog>();
     builder.Services.AddSingleton<PipelineExpander>();
     // One engine-owned data plane per run, behind the IDataPlane seam. The backing file is created
-    // lazily, so commands with no out-of-process modules pay nothing.
-    builder.Services.AddSingleton<IDataPlane>(_ => new SharedMemoryArena(new SharedMemoryArenaOptions()));
+    // lazily, so commands with no out-of-process modules pay nothing. Slot count comes from the budget,
+    // which execute-graph fills in from the graph once the pipeline is expanded — nothing resolves
+    // IDataPlane before then.
+    builder.Services.AddSingleton<ArenaSlotBudget>();
+    builder.Services.AddSingleton<IDataPlane>(sp => new SharedMemoryArena(
+        new SharedMemoryArenaOptions { SlotCount = sp.GetRequiredService<ArenaSlotBudget>().Slots }));
     builder.Services.AddSingleton<IOutOfProcessModuleHost, Mvf.Hosting.Worker.StdioModuleHost>();
     builder.Services.AddSingleton<IPipelineNodeActivator, PipelineNodeActivator>();
     // Both executors are registered; the dispatcher picks per run from options.ExecutionMode.
@@ -558,7 +575,7 @@ void PrintHelp()
 {
     Console.WriteLine("Mvf.Cli");
     Console.WriteLine("Commands:");
-    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--no-tui]");
+    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--arena-slots <n>] [--no-tui]");
     Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");
     Console.WriteLine("  modules [--root <path>]");
     Console.WriteLine("  packages [--root <path>]");
@@ -573,6 +590,16 @@ async Task<T> ReadJsonAsync<T>(string path)
     var value = await JsonSerializer.DeserializeAsync<T>(stream, jsonOptions, CancellationToken.None);
 
     return value ?? throw new InvalidOperationException($"Could not deserialize JSON file '{path}'.");
+}
+
+/// <summary>
+/// How many arena slots to allocate for this run. Mutable and set once, after the pipeline is expanded
+/// and before anything resolves <c>IDataPlane</c> — the arena's size depends on the graph, but the graph
+/// is only known after the host that owns the expander exists.
+/// </summary>
+internal sealed class ArenaSlotBudget
+{
+    public int Slots { get; set; } = DataPlaneSizing.MinimumSlots;
 }
 
 internal sealed class CliInvocation
