@@ -47,18 +47,11 @@ public sealed class PipelineDashboard
         PipelineExecutionOptions options,
         CancellationToken cancellationToken = default)
     {
-        // Copy every run option through — the dashboard only adds observation callbacks. (Before this,
-        // --checkpoint-every / --resume-dir / --backpressure were silently dropped under the TUI.)
-        var enriched = new PipelineExecutionOptions
+        // The dashboard only adds observation callbacks; `with` carries every other run option through.
+        var enriched = options with
         {
-            PackageRoot              = options.PackageRoot,
-            IntegrationsRoot         = options.IntegrationsRoot,
-            MaxCycles                = options.MaxCycles,
-            CheckpointIntervalCycles = options.CheckpointIntervalCycles,
-            CheckpointDirectory      = options.CheckpointDirectory,
-            BackpressurePolicy       = options.BackpressurePolicy,
-            OnNodeExecuted           = e => _state.OnNodeExecuted(e),
-            OnCycleCompleted         = p => _state.OnCycleCompleted(p)
+            OnNodeExecuted   = e => _state.OnNodeExecuted(e),
+            OnCycleCompleted = p => _state.OnCycleCompleted(p)
         };
 
         _state.OnRunStarted(Guid.NewGuid().ToString("N")[..8], _definition.Name);

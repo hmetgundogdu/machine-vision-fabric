@@ -415,6 +415,15 @@ void PrintExecutionReport(PipelineExecutionReport? report)
             $"  {nid}: mode={ns.ActivationMode} warmup={ns.WarmupMs}ms cycles={ns.TotalCycles} " +
             $"faults={ns.FaultedCycles} avg={ns.AverageDurationMs:F2}ms");
 
+        // Pipelined mode only: where the stage's wall clock went. busy+route is useful work; write means
+        // the consumer is the bottleneck, read means the producer is.
+        if (ns.Stage is { } st)
+        {
+            Console.WriteLine(
+                $"      stage busy={st.BusyMs:F0}ms route={st.RouteMs:F0}ms " +
+                $"writeBlocked={st.WriteBlockedMs:F0}ms readBlocked={st.ReadBlockedMs:F0}ms");
+        }
+
         if (ns.Worker is not { } w)
         {
             continue;

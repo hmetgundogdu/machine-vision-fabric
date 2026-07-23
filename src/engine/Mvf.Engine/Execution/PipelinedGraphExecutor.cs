@@ -134,30 +134,45 @@ public sealed class PipelinedGraphExecutor(
             runCts.Cancel();
         }
 
-        // Routes one node's outputs into its outgoing edge queues. Writing is where a full queue blocks.
+        // Routes one node's outputs into its outgoing edge queues, splitting the cost into publish/deliver
+        // work and time actually parked on a full queue — the two say very different things about a
+        // bottleneck, so they are never mixed.
         async Task<int> RouteAsync(PipelineNodeDefinition node, NodeExecutionResult result, NodeExecutionInputs inputs, long cycleId)
         {
+            var acc = statsByNode[node.Id];
+            var routeStart = Stopwatch.GetTimestamp();
+            var writeTicks = 0L;
+
+            async ValueTask WriteAsync(PipelineEdgeDefinition edge, PortValue value, CancellationToken token)
+            {
+                var writeStart = Stopwatch.GetTimestamp();
+                await channelByEdge[edge.Id].Writer.WriteAsync(new StageMessage(cycleId, value), token);
+                writeTicks += Stopwatch.GetTimestamp() - writeStart;
+            }
+
+            var dropped = 0;
             if (!arenaActive)
             {
-                var plain = 0;
                 foreach (var (portName, value) in result.All)
                 {
                     foreach (var edge in outgoingByPort.TryGetValue(DataPlaneRouter.PortKey(node.Id, portName), out var e)
                         ? e : Enumerable.Empty<PipelineEdgeDefinition>())
                     {
-                        await channelByEdge[edge.Id].Writer.WriteAsync(new StageMessage(cycleId, value), runToken);
+                        await WriteAsync(edge, value, runToken);
                     }
                 }
-
-                return plain;
+            }
+            else
+            {
+                dropped = await DataPlaneRouter.RouteAsync(
+                    node.Id, result, inputs, WriteAsync,
+                    outgoingByPort, workerNodeIds, dataPlane!,
+                    backpressureByNode.GetValueOrDefault(node.Id, options.BackpressurePolicy), runToken);
             }
 
-            return await DataPlaneRouter.RouteAsync(
-                node.Id, result, inputs,
-                async (edge, value, token) =>
-                    await channelByEdge[edge.Id].Writer.WriteAsync(new StageMessage(cycleId, value), token),
-                outgoingByPort, workerNodeIds, dataPlane!,
-                backpressureByNode.GetValueOrDefault(node.Id, options.BackpressurePolicy), runToken);
+            acc.WriteBlockedTicks += writeTicks;
+            acc.RouteTicks += Stopwatch.GetTimestamp() - routeStart - writeTicks;
+            return dropped;
         }
 
         // Runs one node once and books its timing/fault, returning the result (NoOutput when it threw).
@@ -270,10 +285,27 @@ public sealed class PipelinedGraphExecutor(
         async Task RunConsumerStageAsync(PipelineNodeDefinition node, INodeRunner runner, PipelineEdgeDefinition inboundEdge)
         {
             var isSink = NodeRoles.IsSink(node);
+            var acc = statsByNode[node.Id];
+            var reader = channelByEdge[inboundEdge.Id].Reader;
             try
             {
-                await foreach (var message in channelByEdge[inboundEdge.Id].Reader.ReadAllAsync(runToken))
+                // Read by hand rather than await-foreach so the wait for an input is timed on its own:
+                // a starved stage and a busy one look identical from throughput alone.
+                while (true)
                 {
+                    var readStart = Stopwatch.GetTimestamp();
+                    var hasMore = await reader.WaitToReadAsync(runToken);
+                    acc.ReadBlockedTicks += Stopwatch.GetTimestamp() - readStart;
+                    if (!hasMore)
+                    {
+                        break;
+                    }
+
+                    if (!reader.TryRead(out var message))
+                    {
+                        continue;
+                    }
+
                     var context = new NodeExecutionContext
                     {
                         RunId = runId,
@@ -380,7 +412,14 @@ public sealed class PipelinedGraphExecutor(
                 TotalDurationMicros = TicksToMicros(kvp.Value.TotalDurationTicks),
                 WarmupMs = warmupByNode.GetValueOrDefault(kvp.Key),
                 ActivationMode = activationModeByNode.GetValueOrDefault(kvp.Key, NodeActivationMode.Resident),
-                Worker = workerMetricsByNode.GetValueOrDefault(kvp.Key)
+                Worker = workerMetricsByNode.GetValueOrDefault(kvp.Key),
+                Stage = new StageProfile
+                {
+                    BusyMicros = TicksToMicros(kvp.Value.TotalDurationTicks),
+                    RouteMicros = TicksToMicros(kvp.Value.RouteTicks),
+                    WriteBlockedMicros = TicksToMicros(kvp.Value.WriteBlockedTicks),
+                    ReadBlockedMicros = TicksToMicros(kvp.Value.ReadBlockedTicks)
+                }
             },
             StringComparer.OrdinalIgnoreCase);
 
@@ -504,6 +543,9 @@ public sealed class PipelinedGraphExecutor(
         public int TotalCycles;
         public int FaultedCycles;
         public long TotalDurationTicks;
+        public long RouteTicks;
+        public long WriteBlockedTicks;
+        public long ReadBlockedTicks;
         public WorkerMetricsSnapshot? Worker;
     }
 }

@@ -2,8 +2,14 @@ namespace Mvf.Graph.Execution;
 
 /// <summary>
 /// Runtime options passed into the graph executor for a single execution run.
+///
+/// <para>A <b>record</b> on purpose: every layer that wants to add a callback (the execution host, the TUI
+/// dashboard) must use <c>options with { ... }</c>. Both used to hand-copy a subset of the fields instead,
+/// which silently dropped whatever had been added since — <c>--backpressure</c>, <c>--checkpoint-every</c>
+/// and <c>--resume-dir</c> never reached the executor at all. Copying by hand is the bug; <c>with</c>
+/// makes it unrepresentable.</para>
 /// </summary>
-public sealed class PipelineExecutionOptions
+public sealed record PipelineExecutionOptions
 {
     /// <summary>
     /// Absolute path to the package directory.

@@ -43,6 +43,12 @@ public sealed class NodeExecutionStats
     /// </summary>
     public WorkerMetricsSnapshot? Worker { get; init; }
 
+    /// <summary>
+    /// Where this stage's wall-clock time went, in pipelined mode only (null in serial mode, which has no
+    /// stages). This is what tells overlap from lock-step.
+    /// </summary>
+    public StageProfile? Stage { get; init; }
+
     /// <summary>Average milliseconds per execution cycle. 0 if no cycles ran.</summary>
     public double AverageDurationMs => TotalCycles > 0 ? TotalDurationMicros / 1000.0 / TotalCycles : 0;
 }
