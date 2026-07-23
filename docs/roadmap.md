@@ -244,7 +244,11 @@ descriptor-in-header, engine context slot, engine-allocated module state, snapsh
   moving off the worker (`readBlocked` 3.9 s) onto the arena publish (`cam route` 3.9 s) — the ceiling of
   *this* graph, where publish and compute are comparable, not of the mechanism.
   Still refused, with the reason: two edges into one input port.
-  **Remaining in phase 1: graph-derived arena sizing** — now a prerequisite, not a tidy-up: parallelism
-  multiplies frames in flight (edge queue + work queue + executing + reorder), so 4 instances exhaust the
-  default 8-slot arena and stop with the Stall message. Slot count has to come from
-  Σ(queue depths) + Σ(instances).
+  **Step 1e: graph-derived arena sizing — phase 1 complete.** Slot count now comes from the graph
+  (`queue + 3 × instances` per out-of-process node, plus one for the frame a producer holds), computed
+  after expansion and fed to the arena before anything resolves it; `--arena-slots` overrides. Sized
+  rather than policed on purpose — a conservative pre-flight check would have rejected pipelines that run
+  fine today, since the worst case is rarely reached at once. Serial and single-instance pipelined still
+  land on the historical 8, so nothing regresses. This unblocked `parallelism: 4`: 6 MB/2000 cycles reads
+  serial 8.63 s → pipelined 5.25 s → ×2 4.10 s → **×4 3.65 s (2.36× over serial)**, flattening from ×2 to
+  ×4 because `cam.route` is then the wall clock. Cost is honest: 17 slots × 8 MB ≈ 136 MB.

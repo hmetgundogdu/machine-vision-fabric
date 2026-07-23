@@ -136,6 +136,17 @@ frame costs ~1.95 ms to publish and ~2.7 ms to process, so two workers already o
 real inference node at 20 ms against the same 2 ms publish would scale close to linearly.
 
 **Parallelism multiplies frames in flight** — edge queue + work queue + executing + reorder buffer — so it
-needs arena slots to match. 2 instances fit the default 8-slot arena; 4 do not, and the run stops with the
-Stall message naming the fix rather than corrupting anything. Deriving slot count from the graph
-(Σ queue depths + Σ instances) is the next item, and this is what makes it necessary rather than tidy.
+needs arena slots to match. With a fixed 8-slot arena, 2 instances fit and 4 stopped the run on
+backpressure. The slot count is now derived from the graph (`queue + 3 × instances` per worker node, plus
+one for the frame a producer holds), so `parallelism: 4` allocates 17 slots and runs:
+
+| 6 MB, 2000 cycles | wall | f/s | bottleneck |
+|---|---|---|---|
+| serial | 8.63 s | 232 | sum of the stages |
+| pipelined ×1 | 5.25 s | 381 | the Python stage |
+| pipelined ×2 | 4.10 s | 488 | the publish |
+| pipelined ×4 | **3.65 s** | 548 | the publish |
+
+2.36× over serial, with the returns flattening from ×2 to ×4 exactly as the profile predicts — once
+`cam.route` (3.38 s) is the wall clock, more workers cannot help. Note the cost: slots × slot size is real
+memory, so 17 slots at the 8 MB default is ~136 MB. Use `--arena-slots` to override the computed value.
