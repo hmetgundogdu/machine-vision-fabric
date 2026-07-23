@@ -30,8 +30,13 @@ public sealed class PipelinedGraphExecutor(
     IDataPlane? dataPlane = null,
     ModuleCatalog? moduleCatalog = null) : IPipelineGraphExecutor
 {
-    /// <summary>One queued value, tagged with the source cycle it belongs to.</summary>
-    private readonly record struct StageMessage(long CycleId, PortValue Value);
+    /// <summary>
+    /// One queued value, tagged with the source cycle it belongs to. A null <paramref name="Value"/> is a
+    /// <b>void marker</b>: "this edge produced nothing for this cycle". Every edge carries exactly one
+    /// message per cycle, which is what lets a join pair its inputs by position and never deadlock waiting
+    /// on a branch that was not taken.
+    /// </summary>
+    private readonly record struct StageMessage(long CycleId, PortValue? Value);
 
     public async Task<PipelineExecutionReport> ExecuteAsync(
         PipelineDefinition definition,
@@ -134,6 +139,37 @@ public sealed class PipelinedGraphExecutor(
             runCts.Cancel();
         }
 
+        // AcceptedCycles means "cycles where at least one sink received output" — a property of the cycle,
+        // not of a sink. Counting sink executions instead would report 8 for a 4-frame run with three
+        // sinks, i.e. the same report field meaning something different per mode. Every sink sees every
+        // cycle exactly once (void markers guarantee it), so a cycle is decided once all sinks report and
+        // its entry can be dropped — bounded memory, no growing set of ids.
+        var sinkStageCount = executionOrder.Count(NodeRoles.IsSink);
+        var acceptedLock = new object();
+        var sinkReportsByCycle = new Dictionary<long, (int Reports, bool Accepted)>();
+
+        void ReportSinkCycle(long cycleId, bool accepted)
+        {
+            lock (acceptedLock)
+            {
+                sinkReportsByCycle.TryGetValue(cycleId, out var entry);
+                entry = (entry.Reports + 1, entry.Accepted || accepted);
+
+                if (entry.Reports >= sinkStageCount)
+                {
+                    sinkReportsByCycle.Remove(cycleId);
+                    if (entry.Accepted)
+                    {
+                        acceptedCycles++;
+                    }
+                }
+                else
+                {
+                    sinkReportsByCycle[cycleId] = entry;
+                }
+            }
+        }
+
         // Routes one node's outputs into its outgoing edge queues, splitting the cost into publish/deliver
         // work and time actually parked on a full queue — the two say very different things about a
         // bottleneck, so they are never mixed.
@@ -142,12 +178,14 @@ public sealed class PipelinedGraphExecutor(
             var acc = statsByNode[node.Id];
             var routeStart = Stopwatch.GetTimestamp();
             var writeTicks = 0L;
+            var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             async ValueTask WriteAsync(PipelineEdgeDefinition edge, PortValue value, CancellationToken token)
             {
                 var writeStart = Stopwatch.GetTimestamp();
                 await channelByEdge[edge.Id].Writer.WriteAsync(new StageMessage(cycleId, value), token);
                 writeTicks += Stopwatch.GetTimestamp() - writeStart;
+                written.Add(edge.Id);
             }
 
             var dropped = 0;
@@ -168,6 +206,20 @@ public sealed class PipelinedGraphExecutor(
                     node.Id, result, inputs, WriteAsync,
                     outgoingByPort, workerNodeIds, dataPlane!,
                     backpressureByNode.GetValueOrDefault(node.Id, options.BackpressurePolicy), runToken);
+            }
+
+            // Keep every outgoing edge at exactly one message for this cycle. An untaken switch branch, a
+            // transformer that dropped the frame, or a worker edge skipped under the Drop policy all send
+            // a void marker instead of nothing — otherwise a downstream join would wait for a value that
+            // is never coming, and the edges would drift out of step for every later cycle too.
+            foreach (var edge in outboundByNode[node.Id])
+            {
+                if (!written.Contains(edge.Id))
+                {
+                    var writeStart = Stopwatch.GetTimestamp();
+                    await channelByEdge[edge.Id].Writer.WriteAsync(new StageMessage(cycleId, null), runToken);
+                    writeTicks += Stopwatch.GetTimestamp() - writeStart;
+                }
             }
 
             acc.WriteBlockedTicks += writeTicks;
@@ -281,54 +333,103 @@ public sealed class PipelinedGraphExecutor(
             }
         }
 
-        // Every other stage consumes its single input queue until the upstream completes it.
-        async Task RunConsumerStageAsync(PipelineNodeDefinition node, INodeRunner runner, PipelineEdgeDefinition inboundEdge)
+        // Every other stage joins its inbound edges: one message from each, all belonging to the same
+        // cycle, then run once. Because every edge carries exactly one message per cycle, reading one from
+        // each pairs them by construction — no correlation buffer, no head-of-line blocking.
+        async Task RunConsumerStageAsync(
+            PipelineNodeDefinition node, INodeRunner runner, IReadOnlyList<PipelineEdgeDefinition> inboundEdges)
         {
             var isSink = NodeRoles.IsSink(node);
             var acc = statsByNode[node.Id];
-            var reader = channelByEdge[inboundEdge.Id].Reader;
+            var readers = inboundEdges.Select(edge => channelByEdge[edge.Id].Reader).ToArray();
             try
             {
-                // Read by hand rather than await-foreach so the wait for an input is timed on its own:
-                // a starved stage and a busy one look identical from throughput alone.
                 while (true)
                 {
+                    // Read by hand rather than await-foreach so the wait for an input is timed on its own:
+                    // a starved stage and a busy one look identical from throughput alone.
                     var readStart = Stopwatch.GetTimestamp();
-                    var hasMore = await reader.WaitToReadAsync(runToken);
+                    var arrived = new StageMessage?[readers.Length];
+                    var upstreamFinished = false;
+
+                    for (var i = 0; i < readers.Length; i++)
+                    {
+                        while (true)
+                        {
+                            if (!await readers[i].WaitToReadAsync(runToken))
+                            {
+                                upstreamFinished = true;
+                                break;
+                            }
+
+                            if (readers[i].TryRead(out var message))
+                            {
+                                arrived[i] = message;
+                                break;
+                            }
+                        }
+
+                        if (upstreamFinished)
+                        {
+                            break;
+                        }
+                    }
+
                     acc.ReadBlockedTicks += Stopwatch.GetTimestamp() - readStart;
-                    if (!hasMore)
+                    if (upstreamFinished)
                     {
                         break;
                     }
 
-                    if (!reader.TryRead(out var message))
+                    // All inbound edges advance in lockstep, so a mismatch here means the void-marker
+                    // invariant was broken upstream — fail loudly rather than pair the wrong frames.
+                    var cycleId = arrived[0]!.Value.CycleId;
+                    for (var i = 1; i < arrived.Length; i++)
                     {
-                        continue;
+                        if (arrived[i]!.Value.CycleId != cycleId)
+                        {
+                            FailRun($"Node '{node.Id}' joined inputs from different cycles "
+                                  + $"({cycleId} vs {arrived[i]!.Value.CycleId}) — edge messages are out of step.");
+                            return;
+                        }
                     }
 
                     var context = new NodeExecutionContext
                     {
                         RunId = runId,
-                        CycleIndex = (int)Math.Min(int.MaxValue, message.CycleId),
+                        CycleIndex = (int)Math.Min(int.MaxValue, cycleId),
                         CycleStartedAt = DateTime.UtcNow
                     };
-                    var inputs = new NodeExecutionInputs(
-                        new Dictionary<string, PortValue>(StringComparer.OrdinalIgnoreCase)
-                        {
-                            [inboundEdge.To.Port] = message.Value
-                        },
-                        context);
 
-                    var (result, _, _) = await RunOnceAsync(node, runner, inputs);
+                    var values = new Dictionary<string, PortValue>(StringComparer.OrdinalIgnoreCase);
+                    for (var i = 0; i < arrived.Length; i++)
+                    {
+                        if (arrived[i]!.Value.Value is { } value)
+                        {
+                            values[inboundEdges[i].To.Port] = value;
+                        }
+                    }
 
                     if (isSink)
                     {
-                        Interlocked.Increment(ref acceptedCycles);
+                        ReportSinkCycle(cycleId, values.Count > 0);
                     }
 
-                    Interlocked.Add(ref droppedFrames, await RouteAsync(node, result, inputs, message.CycleId));
+                    // Nothing reached this node this cycle. The serial executor would run it against an
+                    // empty bus and get NoOutput, so skip the call and pass the void on — same result,
+                    // without paying for a node that has nothing to do.
+                    if (values.Count == 0)
+                    {
+                        Interlocked.Add(ref droppedFrames,
+                            await RouteAsync(node, NodeExecutionResult.NoOutput, NodeExecutionInputs.Empty, cycleId));
+                        continue;
+                    }
 
-                    // This node has run, so it no longer occupies its arena input edge.
+                    var inputs = new NodeExecutionInputs(values, context);
+                    var (result, _, _) = await RunOnceAsync(node, runner, inputs);
+                    Interlocked.Add(ref droppedFrames, await RouteAsync(node, result, inputs, cycleId));
+
+                    // This node has run, so it no longer occupies its arena input edges.
                     if (arenaActive)
                     {
                         DataPlaneRouter.ReleaseArenaInputs(inputs, dataPlane!);
@@ -356,12 +457,12 @@ public sealed class PipelinedGraphExecutor(
             foreach (var node in executionOrder)
             {
                 var runner = runnerById[node.Id];
-                var inbound = inboundByNode[node.Id].FirstOrDefault();
+                var inbound = inboundByNode[node.Id].ToList();
                 stages.Add(Task.Run(async () =>
                 {
                     try
                     {
-                        if (inbound is null)
+                        if (inbound.Count == 0)
                         {
                             await RunSourceStageAsync(node, runner);
                         }
@@ -458,13 +559,18 @@ public sealed class PipelinedGraphExecutor(
 
         foreach (var node in executionOrder)
         {
-            var inbound = definition.Edges.Count(e =>
-                StringComparer.OrdinalIgnoreCase.Equals(e.To.NodeId, node.Id));
-            if (inbound > 1)
+            // Two edges into one port would race: whichever arrived first would win, and the join would
+            // then be one message out of step on that edge forever. The serial port bus silently
+            // overwrites instead; neither is a semantics worth guessing at.
+            var duplicatePort = definition.Edges
+                .Where(e => StringComparer.OrdinalIgnoreCase.Equals(e.To.NodeId, node.Id))
+                .GroupBy(e => e.To.Port, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault(g => g.Count() > 1);
+            if (duplicatePort is not null)
             {
-                return $"Node '{node.Id}' has {inbound} incoming edges. Pipelined mode cannot join several "
-                     + "inputs yet — that needs correlation by cycle id plus markers for branches that "
-                     + "produce nothing. Run this pipeline in serial mode.";
+                return $"Node '{node.Id}' has {duplicatePort.Count()} edges into the single input port "
+                     + $"'{duplicatePort.Key}'. Pipelined mode needs one producer per input port so a join "
+                     + "stays in step. Run this pipeline in serial mode.";
             }
 
             if (ResolveActivationMode(node, catalog) == NodeActivationMode.OnDemand)
