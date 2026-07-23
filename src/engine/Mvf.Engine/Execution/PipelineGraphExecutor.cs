@@ -494,53 +494,15 @@ public sealed class PipelineGraphExecutor(
     /// the accumulated states. A runner reporting no state is remembered and skipped thereafter; any
     /// failure is warned about, never fatal.
     /// </summary>
-    private static async Task CheckpointRunnersAsync(
+    private static Task CheckpointRunnersAsync(
         IReadOnlyList<INodeRunner> runners,
         HashSet<string> stateless,
         Dictionary<string, byte[]> lastStates,
         ICheckpointStore? store,
         List<string> warnings,
-        CancellationToken cancellationToken)
-    {
-        var changed = false;
-        foreach (var runner in runners)
-        {
-            if (stateless.Contains(runner.NodeId) || runner is not ICheckpointable checkpointable)
-            {
-                continue;
-            }
-
-            try
-            {
-                var state = await checkpointable.CheckpointAsync(cancellationToken);
-                if (state is null)
-                {
-                    stateless.Add(runner.NodeId);
-                }
-                else
-                {
-                    lastStates[runner.NodeId] = state;
-                    changed = true;
-                }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                warnings.Add($"Checkpoint failed for node '{runner.NodeId}': {ex.Message}");
-            }
-        }
-
-        if (store is not null && changed && lastStates.Count > 0)
-        {
-            try
-            {
-                await store.SaveAsync(lastStates, cancellationToken);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                warnings.Add($"Checkpoint persist failed: {ex.Message}");
-            }
-        }
-    }
+        CancellationToken cancellationToken) =>
+        CheckpointCoordinator.CaptureAsync(
+            runners, stateless, lastStates, store, warnings.Add, cancellationToken);
 
     private static bool IsSourceNode(PipelineNodeDefinition node) => NodeRoles.IsSource(node);
 
