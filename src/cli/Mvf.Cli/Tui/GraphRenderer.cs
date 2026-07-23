@@ -127,8 +127,8 @@ public static class GraphRenderer
         var cycles  = state.TotalCycles == 0
             ? "[grey42]waiting[/]"
             : $"[grey42]cyc[/][white]{state.TotalCycles}[/] [grey42]ok[/][green]{state.AcceptedCycles}[/]";
-        var timing  = state.LastDurationMs > 0
-            ? $"[grey42]{state.LastDurationMs}ms[/]"
+        var timing  = state.LastDurationMicros > 0
+            ? $"[grey42]{DurationText.Format(state.LastDurationMicros)}[/]"
             : string.Empty;
         // Worker recovery is otherwise invisible (the retry succeeds); "r2" = restarted twice so far.
         var restarts = state.WorkerRestarts > 0

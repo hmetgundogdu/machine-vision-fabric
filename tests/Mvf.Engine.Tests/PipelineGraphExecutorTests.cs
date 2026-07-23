@@ -124,6 +124,37 @@ public sealed class PipelineGraphExecutorTests
         Assert.Equal(3, report.NodeStats["source1"].TotalCycles);
     }
 
+    /// <summary>
+    /// These fakes run in well under a millisecond. Timing them in whole milliseconds truncated every
+    /// cycle to zero, so a fast node reported as costing nothing — and could even come out cheaper than
+    /// the worker RPC nested inside it. Node timing is measured in microseconds.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_TimesSubMillisecondNodes()
+    {
+        var frames = Enumerable.Range(1, 3)
+            .Select(i => (IFrameEnvelope)new BinaryFrameEnvelope("cam1", i, $"frame{i}.jpg", [(byte)i]))
+            .ToArray();
+
+        var activator = new FakeNodeActivator(
+            ("source1", new FakeSourceRunner("source1", frames)),
+            ("gate1", new FakeGateRunner("gate1", gateOpen: true)),
+            ("branch1", new IfPrimitiveNodeRunnerWrapper("branch1")),
+            ("sink1", new FakeSinkRunner("sink1")));
+
+        var executor = new PipelineGraphExecutor(activator);
+        var report = await executor.ExecuteAsync(BuildTypicalDefinition(), new PipelineExecutionOptions
+        {
+            PackageRoot = ".",
+            IntegrationsRoot = "."
+        }, CancellationToken.None);
+
+        var sink = report.NodeStats["sink1"];
+        Assert.True(sink.TotalCycles > 0);
+        Assert.True(sink.TotalDurationMicros > 0, "a node that ran must not be reported as free");
+        Assert.True(sink.AverageDurationMs > 0);
+    }
+
     [Fact]
     public async Task ExecuteAsync_ContextPassedToNodes()
     {

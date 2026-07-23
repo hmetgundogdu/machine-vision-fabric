@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Mvf.Graph.Execution;
 using Mvf.Graph.Pipelines;
 using Mvf.Abstractions;
@@ -224,7 +225,7 @@ public sealed class PipelineGraphExecutor(
                     }
 
                     NodeExecutionResult result;
-                    var nodeStart = DateTime.UtcNow;
+                    var nodeStart = Stopwatch.GetTimestamp();
                     var faulted = false;
                     string? faultMessage = null;
 
@@ -240,11 +241,14 @@ public sealed class PipelineGraphExecutor(
                         faultMessage = ex.Message;
                     }
 
-                    var nodeElapsed = (long)(DateTime.UtcNow - nodeStart).TotalMilliseconds;
+                    // Raw ticks, converted once at report time: a local pipeline stage is routinely
+                    // sub-millisecond, so rounding to any unit per cycle threw the cost away — whole
+                    // milliseconds reported fast nodes as entirely free.
+                    var nodeTicks = Stopwatch.GetTimestamp() - nodeStart;
                     if (statsMap.TryGetValue(node.Id, out var acc))
                     {
                         acc.TotalCycles++;
-                        acc.TotalDurationMs += nodeElapsed;
+                        acc.TotalDurationTicks += nodeTicks;
                         if (faulted) acc.FaultedCycles++;
                     }
 
@@ -263,7 +267,7 @@ public sealed class PipelineGraphExecutor(
                         CycleIndex = totalCycles,
                         HasOutput = result.HasOutput,
                         Faulted = faulted,
-                        DurationMs = nodeElapsed,
+                        DurationMicros = TicksToMicros(nodeTicks),
                         WorkerRestarts = workerMetricsByNode.TryGetValue(node.Id, out var wm) ? wm.Restarts : 0,
                         OutputPortNames = result.HasOutput
                             ? result.All.Select(kvp => kvp.Key).ToList()
@@ -374,7 +378,7 @@ public sealed class PipelineGraphExecutor(
                 NodeId = kvp.Key,
                 TotalCycles = kvp.Value.TotalCycles,
                 FaultedCycles = kvp.Value.FaultedCycles,
-                TotalDurationMs = kvp.Value.TotalDurationMs,
+                TotalDurationMicros = TicksToMicros(kvp.Value.TotalDurationTicks),
                 WarmupMs = warmupByNode.GetValueOrDefault(kvp.Key),
                 ActivationMode = activationModeByNode.GetValueOrDefault(kvp.Key, NodeActivationMode.Resident),
                 Worker = workerMetricsByNode.GetValueOrDefault(kvp.Key)
@@ -800,11 +804,14 @@ public sealed class PipelineGraphExecutor(
         }
     }
 
+    /// <summary>Stopwatch ticks → microseconds. Done in double so a long run cannot overflow the scale-up.</summary>
+    private static long TicksToMicros(long ticks) => (long)(ticks * (1_000_000.0 / Stopwatch.Frequency));
+
     private sealed class NodeStatsAccumulator
     {
         public int TotalCycles;
         public int FaultedCycles;
-        public long TotalDurationMs;
+        public long TotalDurationTicks;
     }
 
     /// <summary>
