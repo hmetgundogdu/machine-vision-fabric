@@ -152,9 +152,9 @@ public sealed class PipelineGraphExecutor(
 
         // Static, graph-aware data-plane routing. Inactive (heap-only, original behavior) when there is
         // no data plane or the graph has no out-of-process worker nodes.
-        var workerNodeIds = BuildWorkerNodeIds(definition, loadedCatalog);
+        var workerNodeIds = DataPlaneRouter.BuildWorkerNodeIds(definition, loadedCatalog);
         var arenaActive = dataPlane is not null && workerNodeIds.Count > 0;
-        var outgoingByPort = arenaActive ? BuildOutgoingByPort(definition) : null;
+        var outgoingByPort = arenaActive ? DataPlaneRouter.BuildOutgoingByPort(definition) : null;
 
         var portBus = new GraphPortBus();
         var totalCycles = 0;
@@ -298,11 +298,19 @@ public sealed class PipelineGraphExecutor(
                     if (arenaActive)
                     {
                         // Phase 1 — route outputs, AddRef arena buffers for the edges they now occupy.
-                        droppedFrames += await RouteOutputsWithDataPlaneAsync(
-                            node.Id, result, inputs, portBus, outgoingByPort!, workerNodeIds, dataPlane!,
+                        // Delivery is a synchronous port-bus write here: in serial mode an edge holds at
+                        // most one value, so there is never anything to wait for.
+                        droppedFrames += await DataPlaneRouter.RouteAsync(
+                            node.Id, result, inputs,
+                            (edge, value, _) =>
+                            {
+                                portBus.Set(edge.To.NodeId, edge.To.Port, value);
+                                return ValueTask.CompletedTask;
+                            },
+                            outgoingByPort!, workerNodeIds, dataPlane!,
                             backpressureByNode.GetValueOrDefault(node.Id, options.BackpressurePolicy), cancellationToken);
                         // Phase 2 — this node has run, so it no longer occupies its arena input edges.
-                        ReleaseArenaInputs(inputs, dataPlane!);
+                        DataPlaneRouter.ReleaseArenaInputs(inputs, dataPlane!);
                     }
                     else
                     {
@@ -475,247 +483,11 @@ public sealed class PipelineGraphExecutor(
         return runDefault;
     }
 
-    /// <summary>Node ids whose module runs out-of-process (a non-<c>dotnet</c> runtime in the catalog).</summary>
-    private static IReadOnlySet<string> BuildWorkerNodeIds(
-        PipelineDefinition definition,
-        IReadOnlyDictionary<string, ModuleCatalogEntry>? catalog)
-    {
-        var workers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (catalog is null)
-        {
-            return workers;
-        }
 
-        foreach (var node in definition.Nodes)
-        {
-            if (node.ModuleId is not null
-                && catalog.TryGetValue(node.ModuleId, out var entry)
-                && !string.Equals(entry.Manifest.Runtime, "dotnet", StringComparison.OrdinalIgnoreCase))
-            {
-                workers.Add(node.Id);
-            }
-        }
-
-        return workers;
-    }
-
-    private static Dictionary<string, List<PipelineEdgeDefinition>> BuildOutgoingByPort(PipelineDefinition definition)
-    {
-        var map = new Dictionary<string, List<PipelineEdgeDefinition>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var edge in definition.Edges)
-        {
-            var key = PortKey(edge.From.NodeId, edge.From.Port);
-            if (!map.TryGetValue(key, out var list))
-            {
-                list = [];
-                map[key] = list;
-            }
-
-            list.Add(edge);
-        }
-
-        return map;
-    }
-
+    // Superseded by DataPlaneRouter.PortKey (shared with the pipelined executor). Still here only because
+    // this line carries a raw NUL byte as its separator, which blocks exact-match editing — delete it by
+    // hand; nothing calls it. That NUL is also why this file reads as "binary" to grep.
     private static string PortKey(string nodeId, string port) => $"{nodeId} {port}";
-
-    /// <summary>
-    /// Routes a node's outputs with graph-aware transport selection and <b>live-edge-occupancy</b>
-    /// reference counting — a buffer's refcount equals the number of edges currently carrying it.
-    /// <list type="bullet">
-    ///   <item><b>Heap frame</b> that fans out to workers: published into the arena once (refcount =
-    ///   worker edges); the arena handle goes to workers, in-process consumers keep the heap frame.</item>
-    ///   <item><b>Arena frame</b> (a worker's output, or a pass-through node re-emitting an arena input):
-    ///   every consumer reads the arena, so it is <see cref="IDataPlane.AddRef"/>'d by the number of
-    ///   outgoing edges and delivered to all of them.</item>
-    ///   <item>Control signals and in-process-only frames are routed by reference, unchanged.</item>
-    /// </list>
-    /// A newly produced arena buffer (not one of this node's inputs) carries a producer hold from
-    /// reservation; once routed, that hold is dropped so its refcount is exactly its live edge count.
-    /// AddRef runs here (Phase 1), before the caller releases this node's arena inputs (Phase 2), so a
-    /// forwarded buffer never transiently reaches zero.
-    /// </summary>
-    private static async Task<int> RouteOutputsWithDataPlaneAsync(
-        string sourceNodeId,
-        NodeExecutionResult result,
-        NodeExecutionInputs inputs,
-        GraphPortBus portBus,
-        IReadOnlyDictionary<string, List<PipelineEdgeDefinition>> outgoingByPort,
-        IReadOnlySet<string> workerNodeIds,
-        IDataPlane dataPlane,
-        BackpressurePolicy policy,
-        CancellationToken cancellationToken)
-    {
-        var dropped = 0;
-
-        // Arena buffers this node received as inputs — an output carrying one of these is a forwarded
-        // pass-through, not a newly produced buffer, so it keeps no producer hold to drop.
-        var inputArenaHandles = new HashSet<ArenaHandle>();
-        foreach (var (_, value) in inputs.All)
-        {
-            if (value.Frame is ArenaFrameEnvelope arenaInput)
-            {
-                inputArenaHandles.Add(arenaInput.Handle);
-            }
-        }
-
-        var producedArenaHandles = new HashSet<ArenaHandle>();
-
-        foreach (var (portName, value) in result.All)
-        {
-            var edges = outgoingByPort.TryGetValue(PortKey(sourceNodeId, portName), out var e) ? e : null;
-
-            if (value.Frame is ArenaFrameEnvelope arenaFrame)
-            {
-                // Arena-born or forwarded: every consumer reads the arena in place.
-                var edgeCount = edges?.Count ?? 0;
-                dataPlane.AddRef(arenaFrame.Handle, edgeCount);
-                if (edges is not null)
-                {
-                    foreach (var edge in edges)
-                    {
-                        portBus.Set(edge.To.NodeId, edge.To.Port, value);
-                    }
-                }
-
-                producedArenaHandles.Add(arenaFrame.Handle);
-                continue;
-            }
-
-            if (edges is null)
-            {
-                continue;
-            }
-
-            if (value.Frame is not null)
-            {
-                var workerEdgeCount = edges.Count(edge => workerNodeIds.Contains(edge.To.NodeId));
-                if (workerEdgeCount > 0)
-                {
-                    var (outcome, arenaValue) = await TryPublishFrameForWorkersAsync(
-                        value.Frame, workerEdgeCount, dataPlane, cancellationToken);
-
-                    if (outcome == PublishOutcome.Published)
-                    {
-                        foreach (var edge in edges)
-                        {
-                            var deliver = workerNodeIds.Contains(edge.To.NodeId) ? arenaValue! : value;
-                            portBus.Set(edge.To.NodeId, edge.To.Port, deliver);
-                        }
-
-                        // Published with refcount == worker-edge count (no producer hold), so each worker
-                        // release balances it — this buffer is not tracked for a producer-hold drop.
-                        continue;
-                    }
-
-                    if (outcome == PublishOutcome.PayloadTooLarge)
-                    {
-                        // Not backpressure: a frame that never fits a slot can't be fixed by waiting or
-                        // by dropping every frame forever. Stop with an actionable message under any policy.
-                        throw new DataPlaneBackpressureException(
-                            $"Frame on '{sourceNodeId}.{portName}' exceeds the arena slot capacity " +
-                            $"({dataPlane.SlotSize} bytes) and can never be published — increase the slot size.");
-                    }
-
-                    // Arena momentarily full → the lossless-vs-lossy choice.
-                    if (policy == BackpressurePolicy.Stall)
-                    {
-                        throw new DataPlaneBackpressureException(
-                            $"Data plane full while publishing '{sourceNodeId}.{portName}' to {workerEdgeCount} " +
-                            "worker edge(s); a lossless (stall) run cannot proceed — raise the arena slot count " +
-                            "or set the backpressure policy to drop.");
-                    }
-
-                    // Drop: out-of-process consumers miss this frame; in-process consumers on the same
-                    // output still receive the heap frame. The source keeps running (bounded latency).
-                    foreach (var edge in edges)
-                    {
-                        if (!workerNodeIds.Contains(edge.To.NodeId))
-                        {
-                            portBus.Set(edge.To.NodeId, edge.To.Port, value);
-                        }
-                    }
-
-                    dropped++;
-                    continue;
-                }
-            }
-
-            foreach (var edge in edges)
-            {
-                portBus.Set(edge.To.NodeId, edge.To.Port, value);
-            }
-        }
-
-        // Drop the producer hold on buffers born at this node (a worker's output). Forwarded input
-        // buffers keep their occupancy and are released in Phase 2 instead.
-        foreach (var handle in producedArenaHandles)
-        {
-            if (!inputArenaHandles.Contains(handle))
-            {
-                dataPlane.Release(handle);
-            }
-        }
-
-        return dropped;
-    }
-
-    /// <summary>Why a publish attempt did not place a frame in the arena.</summary>
-    private enum PublishOutcome
-    {
-        /// <summary>The frame is in the arena; the returned value carries its handle.</summary>
-        Published,
-
-        /// <summary>The arena is momentarily full — every slot carries a live buffer (backpressure).</summary>
-        ArenaFull,
-
-        /// <summary>The frame is larger than a slot and can never be published (a sizing error).</summary>
-        PayloadTooLarge
-    }
-
-    /// <summary>
-    /// Copies a heap frame into the arena once (refcount = its worker-edge count) and, on failure,
-    /// classifies whether the arena was merely full (backpressure) or the frame can never fit a slot.
-    /// The caller turns that classification into the configured policy.
-    /// </summary>
-    private static async Task<(PublishOutcome Outcome, PortValue? Value)> TryPublishFrameForWorkersAsync(
-        IFrameEnvelope frame,
-        int referenceCount,
-        IDataPlane dataPlane,
-        CancellationToken cancellationToken)
-    {
-        byte[] bytes;
-        await using (var stream = await frame.OpenReadAsync(cancellationToken))
-        using (var buffer = new MemoryStream())
-        {
-            await stream.CopyToAsync(buffer, cancellationToken);
-            bytes = buffer.ToArray();
-        }
-
-        // An encoded frame is an opaque byte blob (u8, length N); its media type/decoding is the
-        // consumer's concern. Raw tensors get a richer descriptor when those payload types land.
-        var descriptor = new PayloadDescriptor(PayloadMediaType.Blob, PayloadElementType.UInt8, [bytes.Length]);
-        if (dataPlane.TryPublish(descriptor, bytes, referenceCount, out var handle))
-        {
-            return (PublishOutcome.Published, PortValue.FromFrame(new ArenaFrameEnvelope(dataPlane, handle, frame)));
-        }
-
-        // A payload that can never fit a slot is a permanent sizing error, not transient backpressure.
-        var tooLarge = PayloadDescriptor.HeaderSize + (long)bytes.Length > dataPlane.SlotSize;
-        return (tooLarge ? PublishOutcome.PayloadTooLarge : PublishOutcome.ArenaFull, null);
-    }
-
-    /// <summary>Releases one reference for each arena-backed frame this node consumed, now that it has run.</summary>
-    private static void ReleaseArenaInputs(NodeExecutionInputs inputs, IDataPlane dataPlane)
-    {
-        foreach (var (_, value) in inputs.All)
-        {
-            if (value.Frame is ArenaFrameEnvelope arenaFrame)
-            {
-                dataPlane.Release(arenaFrame.Handle);
-            }
-        }
-    }
 
     /// <summary>
     /// Captures each checkpointable runner's state (best-effort) and, when a store is present, persists
@@ -770,14 +542,9 @@ public sealed class PipelineGraphExecutor(
         }
     }
 
-    private static bool IsSourceNode(PipelineNodeDefinition node) =>
-        string.Equals(node.Category, "source", StringComparison.OrdinalIgnoreCase)
-        || (string.Equals(node.Kind, "runtime-builtin", StringComparison.OrdinalIgnoreCase)
-            && string.Equals(node.BuiltinType, "folder-sequence-source", StringComparison.OrdinalIgnoreCase));
+    private static bool IsSourceNode(PipelineNodeDefinition node) => NodeRoles.IsSource(node);
 
-    private static bool IsSinkNode(PipelineNodeDefinition node) =>
-        string.Equals(node.Category, "output", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(node.Category, "sink", StringComparison.OrdinalIgnoreCase);
+    private static bool IsSinkNode(PipelineNodeDefinition node) => NodeRoles.IsSink(node);
 
     private static PipelineExecutionReport Failure(string message, DateTime startedAt) =>
         new()
@@ -813,11 +580,4 @@ public sealed class PipelineGraphExecutor(
         public int FaultedCycles;
         public long TotalDurationTicks;
     }
-
-    /// <summary>
-    /// Thrown when a producer cannot place a frame in the arena and the run cannot continue: a lossless
-    /// (stall) policy meeting an exhausted arena, or a frame that can never fit a slot. Caught by the
-    /// executor and turned into a failed report with an actionable message.
-    /// </summary>
-    private sealed class DataPlaneBackpressureException(string message) : Exception(message);
 }

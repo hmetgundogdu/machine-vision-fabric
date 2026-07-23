@@ -50,14 +50,11 @@ public sealed class PipelineExecutionHost(IPipelineGraphExecutor executor) : IPi
 
             _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
-            // Inject progress callback so snapshot stays current during execution
-            var enrichedOptions = new PipelineExecutionOptions
+            // Intercept the progress callback so the snapshot stays current; everything else must pass
+            // through untouched. `with` guarantees that — hand-copying the fields here is what used to
+            // drop the execution mode, backpressure policy and checkpoint settings on every run.
+            var enrichedOptions = options with
             {
-                PackageRoot = options.PackageRoot,
-                IntegrationsRoot = options.IntegrationsRoot,
-                MaxCycles = options.MaxCycles,
-                // Forward OnNodeExecuted directly — host does not need to intercept it
-                OnNodeExecuted = options.OnNodeExecuted,
                 OnCycleCompleted = progress =>
                 {
                     _state = new SnapshotState(PipelineExecutionStatus.Running)

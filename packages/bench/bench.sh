@@ -16,6 +16,8 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$REPO_ROOT"
 
 CYCLES=${CYCLES:-2000}
+MODE=${MODE:-serial}       # serial | pipelined
+QUEUE=${QUEUE:-4}          # pipelined only: per-edge queue depth
 FRAMES_DIR=packages/bench/assets/frames
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
@@ -37,7 +39,8 @@ run() { # pipeline_file  size_bytes  label
   local pipeline=$1 size=$2 label=$3
   local out cycles dur node rpc restarts fps gbps
   out=$(dotnet run --project src/cli/Mvf.Cli --no-build -- \
-        execute-graph --path "$pipeline" --package packages/bench --max-cycles "$CYCLES" --no-tui 2>&1) || true
+        execute-graph --path "$pipeline" --package packages/bench --max-cycles "$CYCLES" \
+        --mode "$MODE" --queue "$QUEUE" --no-tui 2>&1) || true
 
   # A benchmark must never quote numbers from a run that failed or that lost a worker mid-flight.
   if ! echo "$out" | grep -q 'Succeeded:True'; then
@@ -63,7 +66,7 @@ run() { # pipeline_file  size_bytes  label
          "$label" "$mb" "$fps" "$gbps" "$node" "$rpc" "$dur" "$cycles"
 }
 
-printf "== data-plane benchmark: %s cycles per row, real python3 + numpy, serial executor ==\n" "$CYCLES"
+printf "== data-plane benchmark: %s cycles per row, real python3 + numpy, %s executor ==\n" "$CYCLES" "$MODE"
 printf "%-6s %10s | %9s | %10s | %11s | %10s |\n" "mode" "frame" "throughput" "throughput" "node" "py rtt"
 for size in 65536 1048576 2097152 6291456; do
   gen "$size"

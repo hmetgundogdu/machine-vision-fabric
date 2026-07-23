@@ -322,6 +322,17 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         ? BackpressurePolicy.Drop
         : BackpressurePolicy.Stall;
 
+    // Scheduling model. Serial (default) runs one frame at a time; pipelined overlaps the stages over
+    // bounded per-edge queues, where --queue is both the queue depth and the backpressure knob.
+    var executionMode = invocation.Options.TryGetValue("mode", out var em)
+        && string.Equals(em, "pipelined", StringComparison.OrdinalIgnoreCase)
+        ? PipelineExecutionMode.Pipelined
+        : PipelineExecutionMode.Serial;
+
+    var edgeQueueCapacity = invocation.Options.TryGetValue("queue", out var q) && int.TryParse(q, out var qInt) && qInt > 0
+        ? qInt
+        : 2;
+
     var options = new PipelineExecutionOptions
     {
         PackageRoot = packageRoot,
@@ -329,7 +340,9 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         MaxCycles = maxCycles,
         CheckpointIntervalCycles = checkpointEvery,
         CheckpointDirectory = checkpointDirectory,
-        BackpressurePolicy = backpressure
+        BackpressurePolicy = backpressure,
+        ExecutionMode = executionMode,
+        EdgeQueueCapacity = edgeQueueCapacity
     };
 
     var validator = host.Services.GetRequiredService<IPipelineDefinitionValidator>();
@@ -402,6 +415,15 @@ void PrintExecutionReport(PipelineExecutionReport? report)
             $"  {nid}: mode={ns.ActivationMode} warmup={ns.WarmupMs}ms cycles={ns.TotalCycles} " +
             $"faults={ns.FaultedCycles} avg={ns.AverageDurationMs:F2}ms");
 
+        // Pipelined mode only: where the stage's wall clock went. busy+route is useful work; write means
+        // the consumer is the bottleneck, read means the producer is.
+        if (ns.Stage is { } st)
+        {
+            Console.WriteLine(
+                $"      stage busy={st.BusyMs:F0}ms route={st.RouteMs:F0}ms " +
+                $"writeBlocked={st.WriteBlockedMs:F0}ms readBlocked={st.ReadBlockedMs:F0}ms");
+        }
+
         if (ns.Worker is not { } w)
         {
             continue;
@@ -466,7 +488,10 @@ IHost BuildHost(IReadOnlyDictionary<string, string?>? overrides = null)
     builder.Services.AddSingleton<IDataPlane>(_ => new SharedMemoryArena(new SharedMemoryArenaOptions()));
     builder.Services.AddSingleton<IOutOfProcessModuleHost, Mvf.Hosting.Worker.StdioModuleHost>();
     builder.Services.AddSingleton<IPipelineNodeActivator, PipelineNodeActivator>();
-    builder.Services.AddSingleton<IPipelineGraphExecutor, PipelineGraphExecutor>();
+    // Both executors are registered; the dispatcher picks per run from options.ExecutionMode.
+    builder.Services.AddSingleton<PipelineGraphExecutor>();
+    builder.Services.AddSingleton<PipelinedGraphExecutor>();
+    builder.Services.AddSingleton<IPipelineGraphExecutor, ModeDispatchingGraphExecutor>();
     builder.Services.AddTransient<IPipelineExecutionHost, PipelineExecutionHost>();
 
     return builder.Build();
@@ -533,7 +558,7 @@ void PrintHelp()
 {
     Console.WriteLine("Mvf.Cli");
     Console.WriteLine("Commands:");
-    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--no-tui]");
+    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--no-tui]");
     Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");
     Console.WriteLine("  modules [--root <path>]");
     Console.WriteLine("  packages [--root <path>]");

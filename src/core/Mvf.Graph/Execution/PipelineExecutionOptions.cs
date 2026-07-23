@@ -2,8 +2,14 @@ namespace Mvf.Graph.Execution;
 
 /// <summary>
 /// Runtime options passed into the graph executor for a single execution run.
+///
+/// <para>A <b>record</b> on purpose: every layer that wants to add a callback (the execution host, the TUI
+/// dashboard) must use <c>options with { ... }</c>. Both used to hand-copy a subset of the fields instead,
+/// which silently dropped whatever had been added since — <c>--backpressure</c>, <c>--checkpoint-every</c>
+/// and <c>--resume-dir</c> never reached the executor at all. Copying by hand is the bug; <c>with</c>
+/// makes it unrepresentable.</para>
 /// </summary>
-public sealed class PipelineExecutionOptions
+public sealed record PipelineExecutionOptions
 {
     /// <summary>
     /// Absolute path to the package directory.
@@ -44,6 +50,22 @@ public sealed class PipelineExecutionOptions
     /// consumers and keeps the source running. Inactive when the graph has no out-of-process workers.
     /// </summary>
     public BackpressurePolicy BackpressurePolicy { get; init; } = BackpressurePolicy.Stall;
+
+    /// <summary>
+    /// How the graph is driven. <see cref="PipelineExecutionMode.Serial"/> (default) runs one node at a
+    /// time with a single frame in flight, so throughput is the sum of the stage latencies — deterministic
+    /// and the mode every existing test assumes. <see cref="PipelineExecutionMode.Pipelined"/> runs each
+    /// node as its own stage over bounded per-edge queues, so stages overlap and throughput approaches the
+    /// slowest single stage.
+    /// </summary>
+    public PipelineExecutionMode ExecutionMode { get; init; } = PipelineExecutionMode.Serial;
+
+    /// <summary>
+    /// How many values one edge may hold in <see cref="PipelineExecutionMode.Pipelined"/> mode. This is
+    /// the backpressure knob: a full queue blocks its producer. It also bounds arena occupancy, since
+    /// every queued frame holds a slot.
+    /// </summary>
+    public int EdgeQueueCapacity { get; init; } = 2;
 
     /// <summary>
     /// Optional callback invoked at the end of each completed cycle.
