@@ -39,6 +39,13 @@ public sealed class PipelinedGraphExecutor(
     /// </summary>
     private readonly record struct StageMessage(long CycleId, PortValue? Value);
 
+    /// <summary>The moving parts of a replicated node: a shared work queue, N executors, one ordering emitter.</summary>
+    private sealed record ParallelStage(
+        Channel<(long CycleId, NodeExecutionInputs Inputs)> Work,
+        Channel<(long CycleId, NodeExecutionResult Result, NodeExecutionInputs? Inputs)> Done,
+        IReadOnlyList<Task> Executors,
+        Task Emitter);
+
     public async Task<PipelineExecutionReport> ExecuteAsync(
         PipelineDefinition definition,
         PipelineExecutionOptions options,
@@ -92,17 +99,31 @@ public sealed class PipelinedGraphExecutor(
         // any stage runs, is the pipelined equivalent of serial's restore-before-cycle-0.
         var runners = new List<INodeRunner>(executionOrder.Count);
         var runnerById = new Dictionary<string, INodeRunner>(StringComparer.OrdinalIgnoreCase);
+        var instancesByNode = new Dictionary<string, List<INodeRunner>>(StringComparer.OrdinalIgnoreCase);
         try
         {
             foreach (var node in executionOrder)
             {
+                var instanceCount = ResolveParallelism(node, loadedCatalog);
                 var activateStart = Stopwatch.GetTimestamp();
-                var runner = await nodeActivator.ActivateAsync(node, options, cancellationToken);
-                warmupByNode[node.Id] = (long)Stopwatch.GetElapsedTime(activateStart).TotalMilliseconds;
-                runners.Add(runner);
-                runnerById[node.Id] = runner;
 
-                await CheckpointCoordinator.RestoreAsync(runner, restoredStates, Warn, cancellationToken);
+                // One activation per instance: the activator spawns a worker per call, so N instances are
+                // N independent processes — a crash still costs exactly one frame and SupervisedWorker
+                // recovers it unchanged.
+                var instances = new List<INodeRunner>(instanceCount);
+                for (var i = 0; i < instanceCount; i++)
+                {
+                    instances.Add(await nodeActivator.ActivateAsync(node, options, cancellationToken));
+                }
+
+                warmupByNode[node.Id] = (long)Stopwatch.GetElapsedTime(activateStart).TotalMilliseconds;
+                runners.AddRange(instances);
+                instancesByNode[node.Id] = instances;
+                runnerById[node.Id] = instances[0];
+
+                // Only instance 0 carries state — a replicated node is stateless by contract, so there is
+                // nothing to restore into the others.
+                await CheckpointCoordinator.RestoreAsync(instances[0], restoredStates, Warn, cancellationToken);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -310,10 +331,11 @@ public sealed class PipelinedGraphExecutor(
                 message = ex.Message;
             }
 
+            // A replicated node has N executors sharing this accumulator.
             var acc = statsByNode[node.Id];
-            acc.TotalCycles++;
-            acc.TotalDurationTicks += Stopwatch.GetTimestamp() - start;
-            if (faulted) acc.FaultedCycles++;
+            Interlocked.Increment(ref acc.TotalCycles);
+            Interlocked.Add(ref acc.TotalDurationTicks, Stopwatch.GetTimestamp() - start);
+            if (faulted) Interlocked.Increment(ref acc.FaultedCycles);
 
             var runner_ = runner;   // metrics are read on the stage's own thread, so no shared-state race
             if (runner_ is IWorkerMetricsSource metrics && metrics.GetWorkerMetrics() is { } snapshot)
@@ -409,11 +431,56 @@ public sealed class PipelinedGraphExecutor(
         // cycle, then run once. Because every edge carries exactly one message per cycle, reading one from
         // each pairs them by construction — no correlation buffer, no head-of-line blocking.
         async Task RunConsumerStageAsync(
-            PipelineNodeDefinition node, INodeRunner runner, IReadOnlyList<PipelineEdgeDefinition> inboundEdges)
+            PipelineNodeDefinition node,
+            IReadOnlyList<INodeRunner> instances,
+            IReadOnlyList<PipelineEdgeDefinition> inboundEdges)
         {
             var isSink = NodeRoles.IsSink(node);
             var acc = statsByNode[node.Id];
             var readers = inboundEdges.Select(edge => channelByEdge[edge.Id].Reader).ToArray();
+
+            // With one instance the join loop runs the node inline and order is trivially preserved. With
+            // N, the loop becomes a dispatcher: instances finish out of order, so results pass through a
+            // single emitter that releases them in cycle order (decision: strict order at sinks, always).
+            var parallel = instances.Count > 1
+                ? StartParallelInstances(node, instances)
+                : null;
+
+            async Task ProcessAsync(long cycleId, NodeExecutionResult? voidResult, NodeExecutionInputs? inputs)
+            {
+                if (parallel is null)
+                {
+                    if (voidResult is { } skipped)
+                    {
+                        Interlocked.Add(ref droppedFrames,
+                            await RouteAsync(node, skipped, NodeExecutionInputs.Empty, cycleId));
+                    }
+                    else
+                    {
+                        var (result, _, _) = await RunOnceAsync(node, instances[0], inputs!);
+                        Interlocked.Add(ref droppedFrames, await RouteAsync(node, result, inputs!, cycleId));
+                        if (arenaActive)
+                        {
+                            DataPlaneRouter.ReleaseArenaInputs(inputs!, dataPlane!);
+                        }
+                    }
+
+                    NoteLeafCompleted(node.Id, cycleId);
+                    return;
+                }
+
+                // A void cycle skips the instances entirely but must still reach the emitter, or the
+                // cycle sequence it reorders against would have a hole in it.
+                if (voidResult is { } skippedResult)
+                {
+                    await parallel.Done.Writer.WriteAsync((cycleId, skippedResult, null), runToken);
+                }
+                else
+                {
+                    await parallel.Work.Writer.WriteAsync((cycleId, inputs!), runToken);
+                }
+            }
+
             try
             {
                 while (true)
@@ -492,31 +559,83 @@ public sealed class PipelinedGraphExecutor(
                     // without paying for a node that has nothing to do.
                     if (values.Count == 0)
                     {
-                        Interlocked.Add(ref droppedFrames,
-                            await RouteAsync(node, NodeExecutionResult.NoOutput, NodeExecutionInputs.Empty, cycleId));
-                        NoteLeafCompleted(node.Id, cycleId);
+                        await ProcessAsync(cycleId, NodeExecutionResult.NoOutput, null);
                         continue;
                     }
 
-                    var inputs = new NodeExecutionInputs(values, context);
-                    var (result, _, _) = await RunOnceAsync(node, runner, inputs);
-                    Interlocked.Add(ref droppedFrames, await RouteAsync(node, result, inputs, cycleId));
-
-                    // This node has run, so it no longer occupies its arena input edges.
-                    if (arenaActive)
-                    {
-                        DataPlaneRouter.ReleaseArenaInputs(inputs, dataPlane!);
-                    }
-
-                    // Reported after the release, so a leaf at cycle C means C's buffers are back in the
-                    // arena — that is what makes the drained point safe to snapshot.
-                    NoteLeafCompleted(node.Id, cycleId);
+                    await ProcessAsync(cycleId, null, new NodeExecutionInputs(values, context));
                 }
             }
             finally
             {
+                // Drain the instances before declaring the stage finished, so every in-flight frame is
+                // routed and every leaf report lands before downstream sees the edge complete.
+                if (parallel is not null)
+                {
+                    parallel.Work.Writer.TryComplete();
+                    try { await Task.WhenAll(parallel.Executors); } catch { /* surfaced via FailRun */ }
+                    parallel.Done.Writer.TryComplete();
+                    try { await parallel.Emitter; } catch { /* surfaced via FailRun */ }
+                }
+
                 CompleteOutputs(node);
             }
+        }
+
+        // N instances of one node: a work queue they pull from, and a single emitter that puts their
+        // results back into cycle order before routing. The emitter is also the only writer to this node's
+        // outgoing edges, which keeps the single-writer channel contract intact.
+        ParallelStage StartParallelInstances(PipelineNodeDefinition node, IReadOnlyList<INodeRunner> instances)
+        {
+            var work = Channel.CreateBounded<(long CycleId, NodeExecutionInputs Inputs)>(
+                new BoundedChannelOptions(instances.Count)
+                {
+                    SingleReader = false, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait
+                });
+
+            var done = Channel.CreateBounded<(long CycleId, NodeExecutionResult Result, NodeExecutionInputs? Inputs)>(
+                new BoundedChannelOptions(instances.Count + 1)
+                {
+                    SingleReader = true, SingleWriter = false, FullMode = BoundedChannelFullMode.Wait
+                });
+
+            var executors = instances.Select(instance => Task.Run(async () =>
+            {
+                await foreach (var item in work.Reader.ReadAllAsync(runToken))
+                {
+                    var (result, _, _) = await RunOnceAsync(node, instance, item.Inputs);
+                    await done.Writer.WriteAsync((item.CycleId, result, item.Inputs), runToken);
+                }
+            }, CancellationToken.None)).ToList();
+
+            var emitter = Task.Run(async () =>
+            {
+                // At most instances.Count - 1 results can be waiting for an earlier one, so this buffer is
+                // bounded by the parallelism, not by the run length.
+                var pending = new Dictionary<long, (NodeExecutionResult Result, NodeExecutionInputs? Inputs)>();
+                var nextToEmit = 0L;
+
+                await foreach (var item in done.Reader.ReadAllAsync(runToken))
+                {
+                    pending[item.CycleId] = (item.Result, item.Inputs);
+
+                    while (pending.Remove(nextToEmit, out var ready))
+                    {
+                        Interlocked.Add(ref droppedFrames, await RouteAsync(
+                            node, ready.Result, ready.Inputs ?? NodeExecutionInputs.Empty, nextToEmit));
+
+                        if (arenaActive && ready.Inputs is { } consumed)
+                        {
+                            DataPlaneRouter.ReleaseArenaInputs(consumed, dataPlane!);
+                        }
+
+                        NoteLeafCompleted(node.Id, nextToEmit);
+                        nextToEmit++;
+                    }
+                }
+            }, CancellationToken.None);
+
+            return new ParallelStage(work, done, executors, emitter);
         }
 
         void CompleteOutputs(PipelineNodeDefinition node)
@@ -533,7 +652,7 @@ public sealed class PipelinedGraphExecutor(
             var stages = new List<Task>(executionOrder.Count);
             foreach (var node in executionOrder)
             {
-                var runner = runnerById[node.Id];
+                var instances = instancesByNode[node.Id];
                 var inbound = inboundByNode[node.Id].ToList();
                 stages.Add(Task.Run(async () =>
                 {
@@ -541,11 +660,11 @@ public sealed class PipelinedGraphExecutor(
                     {
                         if (inbound.Count == 0)
                         {
-                            await RunSourceStageAsync(node, runner);
+                            await RunSourceStageAsync(node, instances[0]);
                         }
                         else
                         {
-                            await RunConsumerStageAsync(node, runner, inbound);
+                            await RunConsumerStageAsync(node, instances, inbound);
                         }
                     }
                     catch (OperationCanceledException)
@@ -649,6 +768,18 @@ public sealed class PipelinedGraphExecutor(
                      + "stays in step. Run this pipeline in serial mode.";
             }
 
+            // Replication is opt-in at the module, because only the module author knows whether it keeps
+            // state across frames — the engine cannot see that, and N instances of a stateful module means
+            // N silently diverging states. Refuse rather than clamp, so the mismatch is visible.
+            var requested = ResolveParallelism(node, catalog);
+            var allowed = ResolveMaxParallelism(node, catalog);
+            if (requested > allowed)
+            {
+                return $"Node '{node.Id}' asks for parallelism {requested} but its module allows at most "
+                     + $"{allowed}. A module opts into replication with \"maxParallelism\" in module.json, "
+                     + "which asserts it holds no state across frames.";
+            }
+
             if (ResolveActivationMode(node, catalog) == NodeActivationMode.OnDemand)
             {
                 return $"Node '{node.Id}' is on-demand. Lazy activation is serial-only for now; in pipelined "
@@ -678,6 +809,30 @@ public sealed class PipelinedGraphExecutor(
 
         return NodeActivationMode.Resident;
     }
+
+    /// <summary>
+    /// How many instances of a node to run: the node's request, defaulting to 1. The module's declared
+    /// ceiling is enforced separately (see <see cref="DescribeUnsupported"/>) so the failure names both
+    /// numbers instead of silently clamping — a pipeline that asked for 8 and quietly got 1 would look
+    /// like the feature simply did not work.
+    /// </summary>
+    private static int ResolveParallelism(
+        PipelineNodeDefinition node,
+        IReadOnlyDictionary<string, ModuleCatalogEntry>? catalog)
+    {
+        _ = catalog;
+        return node.Parallelism is { } requested && requested > 1 ? requested : 1;
+    }
+
+    private static int ResolveMaxParallelism(
+        PipelineNodeDefinition node,
+        IReadOnlyDictionary<string, ModuleCatalogEntry>? catalog) =>
+        node.ModuleId is { } id
+        && catalog is not null
+        && catalog.TryGetValue(id, out var entry)
+        && entry.Manifest.MaxParallelism is { } max
+            ? Math.Max(1, max)
+            : 1;
 
     private static BackpressurePolicy ResolveBackpressurePolicy(
         PipelineNodeDefinition node,

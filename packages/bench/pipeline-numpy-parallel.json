@@ -1,0 +1,12 @@
+{
+  "name": "bench-numpy-parallel",
+  "version": "1.0.0",
+  "description": "Same as pipeline-numpy, but the Python stage runs 2 instances. Only legal because py.bench-numpy declares maxParallelism 4 — it computes a mean per frame and keeps no state, so replicating it cannot diverge. NOTE: parallelism multiplies the frames in flight (edge queue + work queue + executing + reorder), so it needs arena slots to match; 2 instances fit the default 8-slot arena, 4 do not until slot count is derived from the graph. Compare against pipeline-numpy with MODE=pipelined.",
+  "nodes": [
+    { "id": "cam",   "module": "mvf.folder-source", "config": { "sourceFolder": "assets/frames", "loop": true } },
+    { "id": "bench", "module": "py.bench-numpy", "parallelism": 2 }
+  ],
+  "edges": [
+    { "from": "cam.frame", "to": "bench.frame" }
+  ]
+}

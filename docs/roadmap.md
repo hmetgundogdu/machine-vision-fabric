@@ -234,5 +234,17 @@ descriptor-in-header, engine context slot, engine-allocated module state, snapsh
   bench: `--checkpoint-every 100` is indistinguishable from no checkpointing (5.18 s vs 5.19 s),
   `--checkpoint-every 10` costs ~10% (5.69 s) — roughly one pipeline depth of latency per barrier,
   amortised over N.
+  **Step 1d: per-node parallelism.** `"parallelism": N` on a node runs N instances of it; results pass
+  through a single emitter that restores source order, so the always-strict-order decision holds without
+  the caller doing anything. Replication is **opt-in at the module** (`maxParallelism` in `module.json`,
+  default 1) because only the author knows whether it keeps state across frames — the engine cannot see
+  that, and N instances of a stateful module means N silently diverging states; a node asking for more
+  than its module allows fails with both numbers rather than being clamped. Measured (6 MB, 2000 cycles):
+  serial 8.63 s → pipelined 5.25 s → 2 instances **4.10 s**, and the stage profile shows the bottleneck
+  moving off the worker (`readBlocked` 3.9 s) onto the arena publish (`cam route` 3.9 s) — the ceiling of
+  *this* graph, where publish and compute are comparable, not of the mechanism.
   Still refused, with the reason: two edges into one input port.
-  Remaining in phase 1: per-node parallelism + reorder buffer, graph-derived arena sizing.
+  **Remaining in phase 1: graph-derived arena sizing** — now a prerequisite, not a tidy-up: parallelism
+  multiplies frames in flight (edge queue + work queue + executing + reorder), so 4 instances exhaust the
+  default 8-slot arena and stop with the Stall message. Slot count has to come from
+  Σ(queue depths) + Σ(instances).

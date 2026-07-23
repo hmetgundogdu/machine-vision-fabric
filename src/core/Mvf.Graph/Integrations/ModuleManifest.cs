@@ -37,4 +37,13 @@ public sealed class ModuleManifest
     /// folder-replay source to <c>stall</c> without per-pipeline wiring.
     /// </summary>
     public string? Backpressure { get; init; }
+
+    /// <summary>
+    /// The most instances of this module the engine may run concurrently. Null → 1, so nothing is ever
+    /// replicated by accident. Raising it is the module author's assertion that the module keeps no state
+    /// across frames — the engine cannot verify that, and getting it wrong means N silently diverging
+    /// states. Leave it at 1 for anything stateful, and for a runtime that parallelises better internally
+    /// (ONNX Runtime intra-op threads, GPU batching), where N processes would just mean N model copies.
+    /// </summary>
+    public int? MaxParallelism { get; init; }
 }

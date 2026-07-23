@@ -4,5 +4,6 @@
   "version": "1.0.0",
   "kind": "classifier",
   "runtime": "python",
-  "entry": "classifier.py"
+  "entry": "classifier.py",
+  "maxParallelism": 4
 }

@@ -111,3 +111,31 @@ bench: busy=5120ms route=6ms     writeBlocked=0ms    readBlocked=11ms
 
 Read the four buckets as a decision procedure: high `writeBlocked` means look downstream, high
 `readBlocked` means look upstream, and a stage where all four are small is not being scheduled at all.
+
+## Per-node parallelism
+
+`pipeline-numpy-parallel.json` runs the Python stage as 2 instances (`"parallelism": 2`), legal only
+because `py.bench-numpy` declares `maxParallelism: 4` — it means a frame and keeps no state, so replicas
+cannot diverge. 6 MB, 2000 cycles:
+
+| | wall | bottleneck |
+|---|---|---|
+| serial | 8.63 s | sum of the stages |
+| pipelined, 1 instance | 5.25 s | the Python stage (`busy` ≈ wall) |
+| pipelined, 2 instances | **4.10 s** | the **publish** (`cam route` ≈ wall) |
+
+```
+cam:   busy=35ms   route=3910ms  writeBlocked=25ms   readBlocked=0ms
+bench: busy=5433ms route=12ms    writeBlocked=0ms    readBlocked=3927ms
+```
+
+Only 1.28× from doubling the workers, and the profile says exactly why: `bench.readBlocked` is now larger
+than the wall clock minus its own busy — the worker is **starved**, and `cam.route` (the arena publish)
+has become the constraint. That is the honest ceiling of this graph, not a limit of the mechanism: here a
+frame costs ~1.95 ms to publish and ~2.7 ms to process, so two workers already overtake the producer. A
+real inference node at 20 ms against the same 2 ms publish would scale close to linearly.
+
+**Parallelism multiplies frames in flight** — edge queue + work queue + executing + reorder buffer — so it
+needs arena slots to match. 2 instances fit the default 8-slot arena; 4 do not, and the run stops with the
+Stall message naming the fix rather than corrupting anything. Deriving slot count from the graph
+(Σ queue depths + Σ instances) is the next item, and this is what makes it necessary rather than tidy.

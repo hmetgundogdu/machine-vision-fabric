@@ -89,6 +89,20 @@ public sealed class PipelineDefinitionValidator : IPipelineDefinitionValidator
             });
         }
 
+        // Structural check only. Whether the node may have *this many* instances depends on the module's
+        // declared ceiling, which the executor resolves (node → module max), the same split as
+        // activationMode and backpressure.
+        if (node.Parallelism is { } parallelism && parallelism < 1)
+        {
+            issues.Add(new PipelineValidationIssue
+            {
+                Code = "pipeline.node.invalid-parallelism",
+                Severity = "error",
+                Message = $"Node '{node.Id}' has parallelism {parallelism}; it must be at least 1.",
+                NodeId = node.Id
+            });
+        }
+
         if (string.Equals(node.Kind, "integration-module", StringComparison.OrdinalIgnoreCase))
         {
             if (string.IsNullOrWhiteSpace(node.ModuleId))
