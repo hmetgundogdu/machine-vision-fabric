@@ -21,11 +21,21 @@ public sealed class PipelineNodeState
     public int TotalCycles { get; set; }
     public int AcceptedCycles { get; set; }
     public int FaultedCycles { get; set; }
-    public long LastDurationMs { get; set; }
+    public long LastDurationMicros { get; set; }
 
     /// <summary>Out-of-process worker restarts observed so far for this node (0 when it runs in-process).</summary>
     public int WorkerRestarts { get; set; }
 
     public IReadOnlyList<string> LastInputPorts { get; set; } = [];
     public IReadOnlyList<string> LastOutputPorts { get; set; } = [];
+}
+
+/// <summary>
+/// Renders a node duration. A local stage is routinely sub-millisecond, so whole milliseconds would
+/// show most of the graph as "0ms"; below 10ms one decimal is kept.
+/// </summary>
+internal static class DurationText
+{
+    public static string Format(long micros) =>
+        micros < 10_000 ? $"{micros / 1000.0:F1}ms" : $"{micros / 1000}ms";
 }

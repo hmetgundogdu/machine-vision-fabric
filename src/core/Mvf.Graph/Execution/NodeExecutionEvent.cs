@@ -11,7 +11,11 @@ public sealed class NodeExecutionEvent
     public required int CycleIndex { get; init; }
     public required bool HasOutput { get; init; }
     public required bool Faulted { get; init; }
-    public required long DurationMs { get; init; }
+    /// <summary>Wall-clock microseconds this node spent in ExecuteAsync — see NodeExecutionStats.</summary>
+    public required long DurationMicros { get; init; }
+
+    /// <summary>The same duration in milliseconds, rounded.</summary>
+    public long DurationMs => (long)Math.Round(DurationMicros / 1000.0);
 
     /// <summary>Port names that carried values out of the node this cycle.</summary>
     public required IReadOnlyList<string> OutputPortNames { get; init; }

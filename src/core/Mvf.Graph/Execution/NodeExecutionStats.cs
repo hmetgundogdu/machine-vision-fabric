@@ -27,8 +27,15 @@ public sealed class NodeExecutionStats
     /// <summary>Number of cycles where the node threw an exception (warnings).</summary>
     public required int FaultedCycles { get; init; }
 
+    /// <summary>
+    /// Total wall-clock microseconds spent inside ExecuteAsync across all cycles. Microseconds because
+    /// millisecond resolution truncated every sub-millisecond cycle to zero, which made a fast node look
+    /// free and could report a node as cheaper than the worker RPC nested inside it.
+    /// </summary>
+    public required long TotalDurationMicros { get; init; }
+
     /// <summary>Total wall-clock milliseconds spent inside ExecuteAsync across all cycles.</summary>
-    public required long TotalDurationMs { get; init; }
+    public long TotalDurationMs => (long)Math.Round(TotalDurationMicros / 1000.0);
 
     /// <summary>
     /// Cross-process counters when this node runs out-of-process (worker RPC latency, restarts), or null
@@ -37,5 +44,5 @@ public sealed class NodeExecutionStats
     public WorkerMetricsSnapshot? Worker { get; init; }
 
     /// <summary>Average milliseconds per execution cycle. 0 if no cycles ran.</summary>
-    public double AverageDurationMs => TotalCycles > 0 ? (double)TotalDurationMs / TotalCycles : 0;
+    public double AverageDurationMs => TotalCycles > 0 ? TotalDurationMicros / 1000.0 / TotalCycles : 0;
 }

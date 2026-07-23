@@ -62,7 +62,7 @@ public sealed class PipelineRenderState
 
             node.Status = e.Faulted ? NodeLifecycleStatus.Faulted : NodeLifecycleStatus.Done;
             node.TotalCycles++;
-            node.LastDurationMs = e.DurationMs;
+            node.LastDurationMicros = e.DurationMicros;
             node.LastInputPorts = e.InputPortNames;
             node.LastOutputPorts = e.OutputPortNames;
 
@@ -86,7 +86,7 @@ public sealed class PipelineRenderState
                 ? $"→ [{string.Join(", ", e.OutputPortNames)}]"
                 : "→ (no output)";
             var lvl = e.Faulted ? LogLevel.Error : LogLevel.Info;
-            AddLog(lvl, $"[cyc:{e.CycleIndex}] {e.NodeId}  {ports}  ({e.DurationMs}ms)");
+            AddLog(lvl, $"[cyc:{e.CycleIndex}] {e.NodeId}  {ports}  ({DurationText.Format(e.DurationMicros)})");
         }
     }
 

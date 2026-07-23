@@ -400,7 +400,7 @@ void PrintExecutionReport(PipelineExecutionReport? report)
     {
         Console.WriteLine(
             $"  {nid}: mode={ns.ActivationMode} warmup={ns.WarmupMs}ms cycles={ns.TotalCycles} " +
-            $"faults={ns.FaultedCycles} avg={ns.AverageDurationMs:F1}ms");
+            $"faults={ns.FaultedCycles} avg={ns.AverageDurationMs:F2}ms");
 
         if (ns.Worker is not { } w)
         {
@@ -411,7 +411,7 @@ void PrintExecutionReport(PipelineExecutionReport? report)
         var warm = w.Restarts > 0 ? $" warm={w.WarmRestarts}/{w.Restarts}" : string.Empty;
         Console.WriteLine(
             $"      worker={w.ModuleId} rpc={w.Requests} failed={w.FailedRequests} restarts={w.Restarts}{warm} " +
-            $"avg={w.AverageRequestMs:F1}ms max={w.MaxRequestMs:F1}ms");
+            $"avg={w.AverageRequestMs:F2}ms max={w.MaxRequestMs:F2}ms");
 
         if (w.LastRestartUtc is { } at)
         {
