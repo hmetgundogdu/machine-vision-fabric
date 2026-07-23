@@ -200,3 +200,21 @@ descriptor-in-header, engine context slot, engine-allocated module state, snapsh
   no network/gRPC.
 - **Data plane (M2):** ✅ Transport decided — our own **shared memory**, no network. Detailed
   design still to be done together with the user (gated).
+- **Pipelined executor (2026-07-23):** ✅ Gate opened, shape agreed; not started. The serial executor
+  stays as-is and pipelined arrives as an **opt-in mode behind `IPipelineGraphExecutor`**, so the
+  deterministic path (and the suite) is untouched. Agreed:
+  1. **Checkpointing = epoch barrier** — drain the pipeline every N frames, then snapshot. Keeps M2.5's
+     "quiesced ⇒ torn-free" guarantee literally true instead of replacing it; aligned/Chandy-Lamport
+     barriers are a later option if the drain hiccup ever costs real throughput.
+  2. **Strict source order at sinks, always.** Not a per-port opt-out — for inspection and traceability
+     an out-of-order result is worse than a slower one.
+  3. **Per-node parallelism (N worker instances) is in phase 1**, not deferred.
+  (3) is what makes this more than a refactor, and it collides with recovery: **a stateful node cannot be
+  replicated** — N instances means N divergent states, and M2.5 keeps exactly one `<nodeId>.state` per node.
+  So parallelism must be *declared and validated*: `parallelism > 1` is legal only for a module that is
+  stateless (no `on_checkpoint`/`on_restore`), and the validator rejects the combination — same shape as
+  the existing `activationMode`/`backpressure` resolution. It also needs frame **sequence numbers as a
+  first-class ordering key**, a **bounded reorder buffer** on a parallel stage's output (a third
+  backpressure surface, and the one that can head-of-line block), and `WarmWorkerPool` generalized from
+  restart-spares to a live instance pool. Arena sizing stops being a constant: in-flight slots =
+  Σ(queue depths) + Σ(instances), so slot count becomes computable from the graph.
