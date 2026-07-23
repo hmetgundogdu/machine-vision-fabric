@@ -218,3 +218,12 @@ descriptor-in-header, engine context slot, engine-allocated module state, snapsh
   backpressure surface, and the one that can head-of-line block), and `WarmWorkerPool` generalized from
   restart-spares to a live instance pool. Arena sizing stops being a constant: in-flight slots =
   Σ(queue depths) + Σ(instances), so slot count becomes computable from the graph.
+- **Pipelined executor — step 1 built (2026-07-23).** Opt-in `--mode pipelined [--queue n]`; serial stays
+  the default and unchanged. **Measured 1.91× on the 6 MB numpy bench** (210 → 402 f/s); the gain tracks how
+  much work the worker actually does, so a no-op worker gains nothing. `NodeExecutionStats.Stage`
+  (busy/route/writeBlocked/readBlocked) makes that legible and finally attributes the arena publish, which
+  no node owned before. **Step 1b: multi-input joins**, via a **void marker** — every edge carries exactly
+  one message per cycle, so a join reads one from each edge and pairs by construction, and an untaken
+  switch branch cannot stall it. `multilang-demo` now runs pipelined with byte-identical routing to serial.
+  Still refused, with the reason: checkpointing (needs epoch barriers) and two edges into one input port.
+  Remaining in phase 1: epoch barriers, per-node parallelism + reorder buffer, graph-derived arena sizing.

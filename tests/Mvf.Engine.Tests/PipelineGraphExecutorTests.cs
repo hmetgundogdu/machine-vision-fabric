@@ -125,9 +125,9 @@ public sealed class PipelineGraphExecutorTests
     }
 
     /// <summary>
-    /// These fakes run in well under a millisecond. Timing them in whole milliseconds truncated every
-    /// cycle to zero, so a fast node reported as costing nothing — and could even come out cheaper than
-    /// the worker RPC nested inside it. Node timing is measured in microseconds.
+    /// A node doing 200 µs of work per cycle is real work that whole-millisecond timing floored to zero,
+    /// so a fast node reported as costing nothing — and could even come out cheaper than the worker RPC
+    /// nested inside it. Node timing is accumulated in raw ticks and converted once, so this survives.
     /// </summary>
     [Fact]
     public async Task ExecuteAsync_TimesSubMillisecondNodes()
@@ -140,7 +140,7 @@ public sealed class PipelineGraphExecutorTests
             ("source1", new FakeSourceRunner("source1", frames)),
             ("gate1", new FakeGateRunner("gate1", gateOpen: true)),
             ("branch1", new IfPrimitiveNodeRunnerWrapper("branch1")),
-            ("sink1", new FakeSinkRunner("sink1")));
+            ("sink1", new BusyForRunner("sink1", TimeSpan.FromMicroseconds(200))));
 
         var executor = new PipelineGraphExecutor(activator);
         var report = await executor.ExecuteAsync(BuildTypicalDefinition(), new PipelineExecutionOptions
@@ -151,8 +151,30 @@ public sealed class PipelineGraphExecutorTests
 
         var sink = report.NodeStats["sink1"];
         Assert.True(sink.TotalCycles > 0);
-        Assert.True(sink.TotalDurationMicros > 0, "a node that ran must not be reported as free");
+        Assert.True(
+            sink.TotalDurationMicros >= 100 * sink.TotalCycles,
+            $"200µs/cycle must not be floored away; got {sink.TotalDurationMicros}µs over {sink.TotalCycles} cycles");
         Assert.True(sink.AverageDurationMs > 0);
+    }
+
+    /// <summary>Burns a fixed, sub-millisecond amount of time per cycle so timing can be asserted.</summary>
+    private sealed class BusyForRunner(string nodeId, TimeSpan perCycle) : INodeRunner
+    {
+        public string NodeId { get; } = nodeId;
+        public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task<NodeExecutionResult> ExecuteAsync(NodeExecutionInputs inputs, CancellationToken cancellationToken)
+        {
+            var start = System.Diagnostics.Stopwatch.GetTimestamp();
+            while (System.Diagnostics.Stopwatch.GetElapsedTime(start) < perCycle)
+            {
+                Thread.SpinWait(50);
+            }
+
+            return Task.FromResult(NodeExecutionResult.NoOutput);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     [Fact]
