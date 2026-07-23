@@ -46,6 +46,22 @@ public sealed class PipelineExecutionOptions
     public BackpressurePolicy BackpressurePolicy { get; init; } = BackpressurePolicy.Stall;
 
     /// <summary>
+    /// How the graph is driven. <see cref="PipelineExecutionMode.Serial"/> (default) runs one node at a
+    /// time with a single frame in flight, so throughput is the sum of the stage latencies — deterministic
+    /// and the mode every existing test assumes. <see cref="PipelineExecutionMode.Pipelined"/> runs each
+    /// node as its own stage over bounded per-edge queues, so stages overlap and throughput approaches the
+    /// slowest single stage.
+    /// </summary>
+    public PipelineExecutionMode ExecutionMode { get; init; } = PipelineExecutionMode.Serial;
+
+    /// <summary>
+    /// How many values one edge may hold in <see cref="PipelineExecutionMode.Pipelined"/> mode. This is
+    /// the backpressure knob: a full queue blocks its producer. It also bounds arena occupancy, since
+    /// every queued frame holds a slot.
+    /// </summary>
+    public int EdgeQueueCapacity { get; init; } = 2;
+
+    /// <summary>
     /// Optional callback invoked at the end of each completed cycle.
     /// Use to observe real-time progress without polling.
     /// </summary>
