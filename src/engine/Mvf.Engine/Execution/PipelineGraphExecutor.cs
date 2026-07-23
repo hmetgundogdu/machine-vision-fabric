@@ -62,11 +62,16 @@ public sealed class PipelineGraphExecutor(
         var warmupByNode = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         var activationModeByNode = new Dictionary<string, NodeActivationMode>(StringComparer.OrdinalIgnoreCase);
 
+        // Per-producing-node backpressure policy (node override → module default → run default), so a
+        // source can pick lossless vs lossy (folder-replay stalls, live camera drops).
+        var backpressureByNode = new Dictionary<string, BackpressurePolicy>(StringComparer.OrdinalIgnoreCase);
+
         // Resolve every node's loading profile first (cheap — no activation). Resident nodes are
         // preloaded before cycle 0; on-demand nodes are activated lazily on first use (L.3).
         foreach (var node in executionOrder)
         {
             activationModeByNode[node.Id] = ResolveActivationMode(node, loadedCatalog);
+            backpressureByNode[node.Id] = ResolveBackpressurePolicy(node, loadedCatalog, options.BackpressurePolicy);
         }
 
         // Durable checkpoints (engine-crash resume) when a directory is configured; otherwise captures
@@ -265,7 +270,7 @@ public sealed class PipelineGraphExecutor(
                         // Phase 1 — route outputs, AddRef arena buffers for the edges they now occupy.
                         droppedFrames += await RouteOutputsWithDataPlaneAsync(
                             node.Id, result, inputs, portBus, outgoingByPort!, workerNodeIds, dataPlane!,
-                            options.BackpressurePolicy, cancellationToken);
+                            backpressureByNode.GetValueOrDefault(node.Id, options.BackpressurePolicy), cancellationToken);
                         // Phase 2 — this node has run, so it no longer occupies its arena input edges.
                         ReleaseArenaInputs(inputs, dataPlane!);
                     }
@@ -394,6 +399,32 @@ public sealed class PipelineGraphExecutor(
         }
 
         return NodeActivationMode.Resident;
+    }
+
+    /// <summary>
+    /// Resolves a producing node's backpressure policy: an explicit per-node <c>backpressure</c> wins, then
+    /// the module-declared default, then the run-level default. An unparseable value (rejected by the
+    /// validator) falls back to the next source.
+    /// </summary>
+    private static BackpressurePolicy ResolveBackpressurePolicy(
+        PipelineNodeDefinition node,
+        IReadOnlyDictionary<string, ModuleCatalogEntry>? catalog,
+        BackpressurePolicy runDefault)
+    {
+        if (node.Backpressure is { Length: > 0 } nodePolicy && BackpressurePolicies.TryParse(nodePolicy, out var policy))
+        {
+            return policy;
+        }
+
+        if (node.ModuleId is { } id
+            && catalog is not null
+            && catalog.TryGetValue(id, out var entry)
+            && BackpressurePolicies.TryParse(entry.Manifest.Backpressure, out var modulePolicy))
+        {
+            return modulePolicy;
+        }
+
+        return runDefault;
     }
 
     /// <summary>Node ids whose module runs out-of-process (a non-<c>dotnet</c> runtime in the catalog).</summary>

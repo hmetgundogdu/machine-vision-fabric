@@ -4,6 +4,7 @@ using Mvf.Graph.Execution;
 using Mvf.Graph.Pipelines;
 using Mvf.Engine.Execution;
 using Mvf.Engine.Modules;
+using Mvf.Engine.Pipelines;
 
 namespace Mvf.Engine.Tests;
 
@@ -82,8 +83,71 @@ public sealed class PipelineGraphExecutorBackpressureTests
         Assert.Contains("slot", report.ErrorMessage!, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task PerNodeOverride_DropBeatsRunLevelStall_DropsAndSucceeds()
+    {
+        // Run default is Stall (lossless), but the source declares backpressure=drop (e.g. live camera).
+        var repo = FindRepoRoot();
+        var dataPlane = new FullDataPlane(slotSize: int.MaxValue);
+        var frames = new IFrameEnvelope[]
+        {
+            new BinaryFrameEnvelope("cam1", 1, "f1.bmp", [1, 2, 3], "image/bmp"),
+            new BinaryFrameEnvelope("cam1", 2, "f2.bmp", [4, 5, 6], "image/bmp")
+        };
+        var activator = new FakeActivator(
+            ("source1", new FakeSourceRunner("source1", frames)),
+            ("class1", new FrameRecordingRunner("class1")));
+
+        var report = await ExecuteAsync(activator, dataPlane, repo, BackpressurePolicy.Stall, sourceBackpressure: "drop");
+
+        Assert.True(report.Succeeded);          // the per-source override won over the lossless run default
+        Assert.Equal(2, report.DroppedFrames);
+    }
+
+    [Fact]
+    public async Task PerNodeOverride_StallBeatsRunLevelDrop_FailsRun()
+    {
+        // Run default is Drop (lossy), but the source declares backpressure=stall (e.g. folder replay).
+        var repo = FindRepoRoot();
+        var dataPlane = new FullDataPlane(slotSize: int.MaxValue);
+        var frames = new IFrameEnvelope[] { new BinaryFrameEnvelope("cam1", 1, "f1.bmp", [1, 2, 3], "image/bmp") };
+        var activator = new FakeActivator(
+            ("source1", new FakeSourceRunner("source1", frames)),
+            ("class1", new FrameRecordingRunner("class1")));
+
+        var report = await ExecuteAsync(activator, dataPlane, repo, BackpressurePolicy.Drop, sourceBackpressure: "stall");
+
+        Assert.False(report.Succeeded);         // the per-source override won over the lossy run default
+        Assert.Equal(0, report.DroppedFrames);
+        Assert.NotNull(report.ErrorMessage);
+    }
+
+    [Fact]
+    public void Validator_RejectsUnknownBackpressure()
+    {
+        var validator = new PipelineDefinitionValidator();
+        var definition = new PipelineDefinition
+        {
+            Name = "bad",
+            Nodes =
+            [
+                new PipelineNodeDefinition
+                {
+                    Id = "source1", Kind = "integration-module", Category = "source", ModuleId = "mvf.realworld-cognex-camera",
+                    Backpressure = "drop-ish",
+                    Outputs = [new PipelinePortDefinition { Name = "frame", Channel = "data", DataType = "data/frame" }]
+                }
+            ]
+        };
+
+        var result = validator.Validate(definition);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Issues, i => i.Code == "pipeline.node.invalid-backpressure");
+    }
+
     private static async Task<PipelineExecutionReport> ExecuteAsync(
-        FakeActivator activator, IDataPlane dataPlane, string repo, BackpressurePolicy policy)
+        FakeActivator activator, IDataPlane dataPlane, string repo, BackpressurePolicy policy, string? sourceBackpressure = null)
     {
         var executor = new PipelineGraphExecutor(activator, dataPlane, new ModuleCatalog());
         var options = new PipelineExecutionOptions
@@ -94,10 +158,10 @@ public sealed class PipelineGraphExecutorBackpressureTests
             BackpressurePolicy = policy
         };
 
-        return await executor.ExecuteAsync(SourceToWorker(), options, CancellationToken.None);
+        return await executor.ExecuteAsync(SourceToWorker(sourceBackpressure), options, CancellationToken.None);
     }
 
-    private static PipelineDefinition SourceToWorker() => new()
+    private static PipelineDefinition SourceToWorker(string? sourceBackpressure = null) => new()
     {
         Name = "source-to-worker",
         Nodes =
@@ -105,6 +169,7 @@ public sealed class PipelineGraphExecutorBackpressureTests
             new PipelineNodeDefinition
             {
                 Id = "source1", Kind = "integration-module", Category = "source", ModuleId = "mvf.realworld-cognex-camera",
+                Backpressure = sourceBackpressure,
                 Outputs = [new PipelinePortDefinition { Name = "frame", Channel = "data", DataType = "data/frame", AllowMultipleEdges = true }]
             },
             new PipelineNodeDefinition

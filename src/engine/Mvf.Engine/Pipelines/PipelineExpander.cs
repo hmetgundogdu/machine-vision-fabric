@@ -162,6 +162,7 @@ public sealed class PipelineExpander
             Category = category,
             ModuleId = moduleId,
             ActivationMode = GetString(nodeObj, "activationMode"),
+            Backpressure = GetString(nodeObj, "backpressure"),
             Config = CloneConfig(nodeObj),
             Inputs = inputs,
             Outputs = outputs
@@ -202,6 +203,7 @@ public sealed class PipelineExpander
             Category = "flow-control",
             PrimitiveType = primitiveType,
             ActivationMode = GetString(nodeObj, "activationMode"),
+            Backpressure = GetString(nodeObj, "backpressure"),
             Config = CloneConfig(nodeObj),
             Inputs = inputs,
             Outputs = outputs

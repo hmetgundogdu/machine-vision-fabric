@@ -27,6 +27,15 @@ public sealed class PipelineNodeDefinition
     /// </summary>
     public string? ActivationMode { get; set; }
 
+    /// <summary>
+    /// Per-node data-plane backpressure override ("stall" | "drop") for when this node's output can't be
+    /// published because the arena is full. Null means "not specified" — the module's declared
+    /// <c>backpressure</c> default applies, then the run-level default. Lets a source pick lossless vs
+    /// lossy (folder-replay stalls, live camera drops). Parsed via <c>BackpressurePolicies.TryParse</c>;
+    /// an unknown value is rejected by the validator.
+    /// </summary>
+    public string? Backpressure { get; set; }
+
     public JsonObject Config { get; set; } = [];
 
     public IReadOnlyList<PipelinePortDefinition> Inputs { get; set; } = [];

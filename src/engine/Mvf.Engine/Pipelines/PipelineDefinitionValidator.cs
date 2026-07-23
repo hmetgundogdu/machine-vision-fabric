@@ -1,3 +1,4 @@
+using Mvf.Graph.Execution;
 using Mvf.Graph.Pipelines;
 using Mvf.Graph.Runtime;
 using Mvf.Abstractions;
@@ -72,6 +73,18 @@ public sealed class PipelineDefinitionValidator : IPipelineDefinitionValidator
                 Code = "pipeline.node.invalid-activation-mode",
                 Severity = "error",
                 Message = $"Node '{node.Id}' has an unknown activationMode '{mode}'. Supported: {NodeActivationModes.Supported}.",
+                NodeId = node.Id
+            });
+        }
+
+        // A specified per-node backpressure policy must be a known one (per-source override).
+        if (node.Backpressure is { Length: > 0 } backpressure && !BackpressurePolicies.TryParse(backpressure, out _))
+        {
+            issues.Add(new PipelineValidationIssue
+            {
+                Code = "pipeline.node.invalid-backpressure",
+                Severity = "error",
+                Message = $"Node '{node.Id}' has an unknown backpressure '{backpressure}'. Supported: {BackpressurePolicies.Supported}.",
                 NodeId = node.Id
             });
         }

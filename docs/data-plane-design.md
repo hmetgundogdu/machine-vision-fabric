@@ -282,9 +282,11 @@ the outcome is explicit, counted, and policy-driven.
 
 **Implementation:** `BackpressurePolicy` (Graph.Execution) on `PipelineExecutionOptions` (default `Stall`);
 the executor classifies a failed publish as `ArenaFull` vs `PayloadTooLarge` from `dataPlane.SlotSize`;
-`report.DroppedFrames` surfaces drops; CLI `execute-graph --backpressure stall|drop`. The policy is a
-**run-level** default for now; the design intent is a **per-source** override (folder-replay lossless, live
-camera lossy) — that lands with source-node config wiring in a later slice.
+`report.DroppedFrames` surfaces drops; CLI `execute-graph --backpressure stall|drop` sets the run-level
+default. **Per-source override (done):** a producing node's `backpressure` field ("stall"|"drop") — or a
+module-declared default in `module.json` — overrides the run default, resolved **node → module → run
+default** per producing node (`BackpressurePolicies.TryParse`; validator rejects `pipeline.node.invalid-backpressure`).
+So a folder-replay source can declare `stall` (lossless) and a live camera `drop` (lossy) in the same run.
 
-**Not yet done (future M3 slices):** per-source policy override; a real block-the-producer Stall once the
-executor pipelines; credit-based flow when producers and consumers run concurrently.
+**Not yet done (future M3 slices):** a real block-the-producer Stall once the executor pipelines;
+credit-based flow when producers and consumers run concurrently.

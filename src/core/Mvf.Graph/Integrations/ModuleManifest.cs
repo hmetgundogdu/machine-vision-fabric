@@ -29,4 +29,12 @@ public sealed class ModuleManifest
     /// land in later L-track slices.
     /// </summary>
     public string? Lifecycle { get; init; }
+
+    /// <summary>
+    /// Module-declared default data-plane backpressure policy ("stall" | "drop") when this module's output
+    /// can't be published because the arena is full. Null → the run-level default. A pipeline node's
+    /// <c>backpressure</c> overrides it. Lets a live-camera source default to <c>drop</c> and a
+    /// folder-replay source to <c>stall</c> without per-pipeline wiring.
+    /// </summary>
+    public string? Backpressure { get; init; }
 }

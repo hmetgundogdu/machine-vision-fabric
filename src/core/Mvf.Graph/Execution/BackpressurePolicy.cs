@@ -30,3 +30,31 @@ public enum BackpressurePolicy
     /// </summary>
     Drop
 }
+
+/// <summary>Parsing for the per-node <c>backpressure</c> / manifest default string, so a source can
+/// override the run-level policy (a folder-replay stalls, a live camera drops) as a real, validated field.</summary>
+public static class BackpressurePolicies
+{
+    /// <summary>The accepted string values, for validation messages.</summary>
+    public const string Supported = "stall, drop";
+
+    /// <summary>Parses "stall" / "drop" (case-insensitive). Unknown → false.</summary>
+    public static bool TryParse(string? value, out BackpressurePolicy policy)
+    {
+        switch (value?.Trim().ToLowerInvariant())
+        {
+            case "stall":
+                policy = BackpressurePolicy.Stall;
+                return true;
+            case "drop":
+                policy = BackpressurePolicy.Drop;
+                return true;
+            default:
+                policy = BackpressurePolicy.Stall;
+                return false;
+        }
+    }
+
+    public static string ToWireString(BackpressurePolicy policy) =>
+        policy == BackpressurePolicy.Drop ? "drop" : "stall";
+}
