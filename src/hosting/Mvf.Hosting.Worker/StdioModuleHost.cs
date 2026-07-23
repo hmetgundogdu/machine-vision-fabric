@@ -18,7 +18,7 @@ public sealed class StdioModuleHost(IDataPlane dataPlane) : IOutOfProcessModuleH
         OutOfProcessModuleActivation activation,
         CancellationToken cancellationToken)
     {
-        var worker = await SupervisedWorker.StartAsync(Spawn(activation), dataPlane, cancellationToken);
+        var worker = await StartSupervisedAsync(activation, cancellationToken);
         return new WorkerFrameClassifier(worker, dataPlane);
     }
 
@@ -26,9 +26,28 @@ public sealed class StdioModuleHost(IDataPlane dataPlane) : IOutOfProcessModuleH
         OutOfProcessModuleActivation activation,
         CancellationToken cancellationToken)
     {
-        var worker = await SupervisedWorker.StartAsync(Spawn(activation), dataPlane, cancellationToken);
+        var worker = await StartSupervisedAsync(activation, cancellationToken);
         return new WorkerFrameTransformer(worker, dataPlane);
     }
+
+    // Starts the supervised worker, backed by a warm pool when MVF_WARM_SPARES > 0 so a restart swaps in a
+    // pre-warmed spare instead of paying the cold-start (process spawn + model/device warmup). Default 0
+    // keeps the original cold-restart behavior.
+    private async Task<SupervisedWorker> StartSupervisedAsync(
+        OutOfProcessModuleActivation activation,
+        CancellationToken cancellationToken)
+    {
+        var spawn = Spawn(activation);
+        var warmSpares = ReadWarmSpares();
+        var pool = warmSpares > 0
+            ? await WarmWorkerPool.StartAsync(spawn, warmSpares, cancellationToken)
+            : null;
+
+        return await SupervisedWorker.StartAsync(spawn, dataPlane, cancellationToken, pool);
+    }
+
+    private static int ReadWarmSpares() =>
+        int.TryParse(Environment.GetEnvironmentVariable("MVF_WARM_SPARES"), out var n) && n > 0 ? n : 0;
 
     // A restartable spawn: the supervisor calls this to (re)launch the same module.
     private Func<CancellationToken, Task<StdioWorkerProcess>> Spawn(OutOfProcessModuleActivation activation)

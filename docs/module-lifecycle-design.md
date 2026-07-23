@@ -72,7 +72,8 @@ Declared per module (default) and overridable per pipeline node:
 - **L.2** — Explicit readiness signal over stdio (sd_notify-style); startup-vs-liveness separation so a
   slow model load isn't mistaken for a hang.
 - **L.3** — On-demand & idle-unload (Triton EXPLICIT / lazy-load) — needs a real short-helper node.
-- **L.4** — Warm pools (pre-warmed instances hide cold-start / restart).
+- **L.4** — Warm pools (pre-warmed instances hide cold-start / restart). *Done:* `WarmWorkerPool` +
+  `SupervisedWorker` pooled restart; enabled per worker via `MVF_WARM_SPARES` (default 0 = cold restart).
 - **L.5** — Hot-reload / package watch (Triton POLL). Frontier.
 
 ## Honest scope note

@@ -13,26 +13,38 @@ public sealed class SupervisedWorker : IWorkerChannel, ICheckpointable
 {
     private readonly Func<CancellationToken, Task<StdioWorkerProcess>> _spawn;
     private readonly IDataPlane _dataPlane;
+    private readonly WarmWorkerPool? _pool;
     private StdioWorkerProcess _worker;
     private byte[]? _lastState;
     private int _requestId;
 
-    private SupervisedWorker(StdioWorkerProcess worker, Func<CancellationToken, Task<StdioWorkerProcess>> spawn, IDataPlane dataPlane)
+    private SupervisedWorker(
+        StdioWorkerProcess worker,
+        Func<CancellationToken, Task<StdioWorkerProcess>> spawn,
+        IDataPlane dataPlane,
+        WarmWorkerPool? pool)
     {
         _worker = worker;
         _spawn = spawn;
         _dataPlane = dataPlane;
+        _pool = pool;
     }
 
     public string ModuleId => _worker.ModuleId;
 
+    /// <summary>
+    /// Starts a supervised worker. When <paramref name="pool"/> is given, the initial worker and every
+    /// restart come from the pre-warmed pool (no cold-start on the recovery hot path); the pool is owned
+    /// here and disposed with the supervisor. Without a pool, restarts cold-spawn (original behavior).
+    /// </summary>
     public static async Task<SupervisedWorker> StartAsync(
         Func<CancellationToken, Task<StdioWorkerProcess>> spawn,
         IDataPlane dataPlane,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        WarmWorkerPool? pool = null)
     {
-        var worker = await spawn(cancellationToken);
-        return new SupervisedWorker(worker, spawn, dataPlane);
+        var worker = pool is not null ? await pool.AcquireAsync(cancellationToken) : await spawn(cancellationToken);
+        return new SupervisedWorker(worker, spawn, dataPlane, pool);
     }
 
     public async Task<JsonObject> RequestAsync(JsonObject request, CancellationToken cancellationToken)
@@ -64,7 +76,8 @@ public sealed class SupervisedWorker : IWorkerChannel, ICheckpointable
     {
         try { await _worker.DisposeAsync(); } catch { /* already dead */ }
 
-        _worker = await _spawn(cancellationToken);
+        // A pre-warmed spare (if pooled) skips the cold-start; restore its state and it is ready to retry.
+        _worker = _pool is not null ? await _pool.AcquireAsync(cancellationToken) : await _spawn(cancellationToken);
         if (_lastState is { } state)
         {
             await WorkerCheckpoint.RestoreAsync(_worker, _dataPlane, ++_requestId, state, cancellationToken);
@@ -77,5 +90,12 @@ public sealed class SupervisedWorker : IWorkerChannel, ICheckpointable
     /// <summary>Test hook: crash the current child so the next request exercises recovery.</summary>
     internal void KillCurrentWorkerForTest() => _worker.KillForTest();
 
-    public ValueTask DisposeAsync() => _worker.DisposeAsync();
+    public async ValueTask DisposeAsync()
+    {
+        await _worker.DisposeAsync();
+        if (_pool is not null)
+        {
+            await _pool.DisposeAsync();
+        }
+    }
 }
