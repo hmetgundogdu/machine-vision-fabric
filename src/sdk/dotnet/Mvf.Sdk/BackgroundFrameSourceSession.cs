@@ -45,8 +45,11 @@ public abstract class BackgroundFrameSourceSession : IFrameSourceSession
             {
                 await producerTask;
             }
-            catch (OperationCanceledException)
+            catch
             {
+                // A producer fault was already delivered to the reader via TryComplete(ex) — that is the
+                // path the engine observes. Rethrowing it here would only turn cleanup into a second,
+                // duplicate failure (and mask whatever the caller was disposing for).
             }
         }
 

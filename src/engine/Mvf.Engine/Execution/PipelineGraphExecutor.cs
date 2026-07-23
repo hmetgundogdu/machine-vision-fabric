@@ -161,6 +161,7 @@ public sealed class PipelineGraphExecutor(
         var droppedFrames = 0;
         var sourceCompleted = false;
         string? backpressureFailure = null;
+        string? sourceFailure = null;
 
         try
         {
@@ -225,6 +226,7 @@ public sealed class PipelineGraphExecutor(
                     NodeExecutionResult result;
                     var nodeStart = DateTime.UtcNow;
                     var faulted = false;
+                    string? faultMessage = null;
 
                     try
                     {
@@ -235,6 +237,7 @@ public sealed class PipelineGraphExecutor(
                         warnings.Add($"Node '{node.Id}' threw during execution: {ex.Message}");
                         result = NodeExecutionResult.NoOutput;
                         faulted = true;
+                        faultMessage = ex.Message;
                     }
 
                     var nodeElapsed = (long)(DateTime.UtcNow - nodeStart).TotalMilliseconds;
@@ -270,6 +273,15 @@ public sealed class PipelineGraphExecutor(
 
                     if (IsSourceNode(node) && !result.HasOutput)
                     {
+                        // A source that threw is not an exhausted stream. Both look like "no frame" here,
+                        // and conflating them made a camera that never connected report a clean, successful
+                        // run of zero cycles. Record the failure; the run below ends unsuccessfully and,
+                        // crucially, keeps its checkpoint (there is nothing "completed" to resume past).
+                        if (faulted)
+                        {
+                            sourceFailure = $"Source node '{node.Id}' failed: {faultMessage}";
+                        }
+
                         sourcesExhausted = true;
                         break;
                     }
@@ -296,7 +308,7 @@ public sealed class PipelineGraphExecutor(
 
                 if (sourcesExhausted)
                 {
-                    sourceCompleted = true;
+                    sourceCompleted = sourceFailure is null;   // a failed source has not consumed its stream
                     break;
                 }
 
@@ -371,7 +383,8 @@ public sealed class PipelineGraphExecutor(
 
         var workerRestarts = workerMetricsByNode.Values.Sum(m => m.Restarts);
 
-        if (backpressureFailure is not null)
+        // Either way the run stopped early for a reason the operator must see, not a clean end of stream.
+        if ((backpressureFailure ?? sourceFailure) is { } runFailure)
         {
             return new PipelineExecutionReport
             {
@@ -381,7 +394,7 @@ public sealed class PipelineGraphExecutor(
                 DroppedFrames = droppedFrames,
                 WorkerRestarts = workerRestarts,
                 Duration = DateTime.UtcNow - startedAt,
-                ErrorMessage = backpressureFailure,
+                ErrorMessage = runFailure,
                 Warnings = warnings,
                 NodeStats = nodeStats
             };
