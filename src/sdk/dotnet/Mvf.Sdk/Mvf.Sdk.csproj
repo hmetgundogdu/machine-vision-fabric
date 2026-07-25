@@ -5,6 +5,25 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <PackageId>MachineVisionFabric.Sdk</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>MachineVisionFabric contributors</Authors>
+    <Description>SDK for authoring MachineVisionFabric integration modules (typed graph nodes: sources, processors, classifiers, sinks) on the local edge runtime.</Description>
+    <PackageTags>machine-vision;edge;pipeline;onnx;industrial</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/hmetgundogdu/machine-vision-fabric</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\..\core\Mvf.Graph\Mvf.Graph.csproj" />
     <ProjectReference Include="..\..\..\core\Mvf.Abstractions\Mvf.Abstractions.csproj" />

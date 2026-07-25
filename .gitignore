@@ -26,3 +26,15 @@ temp/
 tmp/
 
 publish/
+
+# OS / editor
+.DS_Store
+**/.DS_Store
+.idea/
+
+# Runtime pipeline state & output
+**/.mvf/
+**/out/
+
+# C++ SDK build trees
+src/sdk/cpp/build/

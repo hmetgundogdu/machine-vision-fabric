@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  dotnet-sdk-nuget:
+    name: .NET SDK → NuGet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Pack
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          dotnet pack src/sdk/dotnet/Mvf.Sdk/Mvf.Sdk.csproj -c Release \
+            -p:Version="$VERSION" -o dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget
+          path: dist/*.*nupkg
+
+  python-sdk-wheel:
+    name: Python SDK → wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build src/sdk/python --outdir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel
+          path: dist/*
+
+  cpp-sdk:
+    name: C++ SDK (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  label: linux-x64 }
+          - { os: macos-latest,   label: osx-arm64 }
+          - { os: windows-latest, label: win-x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S src/sdk/cpp -B build/cpp -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/cpp --config Release
+      - name: Stage (headers + shared library)
+        run: cmake --install build/cpp --config Release --prefix stage
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path stage/* -DestinationPath "mvf-sdk-cpp-${{ matrix.label }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpp-${{ matrix.label }}
+          path: mvf-sdk-cpp-${{ matrix.label }}.zip
+
+  cli:
+    name: CLI (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  label: linux-x64, rid: linux-x64 }
+          - { os: macos-latest,   label: osx-arm64, rid: osx-arm64 }
+          - { os: windows-latest, label: win-x64,   rid: win-x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Publish (CLI + integration modules + packages)
+        shell: pwsh
+        run: ./publish.ps1 -Runtime ${{ matrix.rid }} -SelfContained $true -Output publish/mvf
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path publish/mvf/* -DestinationPath "mvf-cli-${{ matrix.label }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.label }}
+          path: mvf-cli-${{ matrix.label }}.zip
+
+  release:
+    name: Publish GitHub Release
+    needs: [dotnet-sdk-nuget, python-sdk-wheel, cpp-sdk, cli]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
