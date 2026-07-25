@@ -82,16 +82,20 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
-      - name: Publish (CLI + integration modules + packages)
+      # Just the CLI: a single self-contained executable per OS (no dotnet on PATH needed,
+      # no integration modules or packages bundled).
+      - name: Publish CLI (single-file, self-contained)
         shell: pwsh
-        run: ./publish.ps1 -Runtime ${{ matrix.rid }} -SelfContained $true -Output publish/mvf
-      - name: Package
-        shell: pwsh
-        run: Compress-Archive -Path publish/mvf/* -DestinationPath "mvf-cli-${{ matrix.label }}.zip"
+        run: |
+          dotnet publish src/cli/Mvf.Cli/Mvf.Cli.csproj -c Release -r ${{ matrix.rid }} `
+            --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -o cli-out --nologo
+          $ext = if ($IsWindows) { ".exe" } else { "" }
+          Copy-Item "cli-out/Mvf.Cli$ext" "mvf-cli-${{ matrix.label }}$ext"
       - uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.label }}
-          path: mvf-cli-${{ matrix.label }}.zip
+          path: mvf-cli-${{ matrix.label }}*
 
   release:
     name: Publish GitHub Release
