@@ -1,7 +1,10 @@
+using System.Text.Json.Nodes;
 using Mvf.Graph.Execution;
 using Mvf.Graph.Pipelines;
 using Mvf.Graph.Runtime;
+using Mvf.Graph.Values;
 using Mvf.Abstractions;
+using Mvf.Engine.Values;
 
 namespace Mvf.Engine.Pipelines;
 
@@ -128,6 +131,18 @@ public sealed class PipelineDefinitionValidator : IPipelineDefinitionValidator
                     NodeId = node.Id
                 });
             }
+            else if (string.Equals(node.PrimitiveType, "value", StringComparison.OrdinalIgnoreCase))
+            {
+                ValidateValueNode(node, issues);
+            }
+            else if (string.Equals(node.PrimitiveType, "select", StringComparison.OrdinalIgnoreCase))
+            {
+                ValidateSelectNode(node, issues);
+            }
+            else if (string.Equals(node.PrimitiveType, "loop", StringComparison.OrdinalIgnoreCase))
+            {
+                ValidateLoopNode(node, issues);
+            }
         }
         else if (string.Equals(node.Kind, "runtime-builtin", StringComparison.OrdinalIgnoreCase))
         {
@@ -155,6 +170,222 @@ public sealed class PipelineDefinitionValidator : IPipelineDefinitionValidator
 
         ValidatePorts(node.Id, node.Inputs, "input", issues);
         ValidatePorts(node.Id, node.Outputs, "output", issues);
+        ValidateBindings(node, issues);
+    }
+
+    /// <summary>
+    /// Live-editable config fields (`bindings`) must be type-safe: each declares a known value type and a
+    /// valid schema, so an edit from the CLI can be checked before it re-activates the node. The value
+    /// itself lives in <c>config</c> and is checked wherever it enters (pre-pass, live edit), so nothing
+    /// value-specific is judged here.
+    /// </summary>
+    private static void ValidateBindings(PipelineNodeDefinition node, ICollection<PipelineValidationIssue> issues)
+    {
+        if (node.Bindings.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var binding in ModuleBindings.Read(node.Bindings))
+        {
+            if (!binding.TypeKnown)
+            {
+                issues.Add(new PipelineValidationIssue
+                {
+                    Code = "pipeline.node.invalid-binding-type",
+                    Severity = "error",
+                    Message = $"Node '{node.Id}' binding '{binding.Field}' declares type '{binding.RawType}'. "
+                            + $"Supported: {ControlValueTypes.Supported}.",
+                    NodeId = node.Id
+                });
+            }
+
+            if (!JsonSchemaCheck.TryValidateSchema(binding.Schema, out var schemaError))
+            {
+                issues.Add(new PipelineValidationIssue
+                {
+                    Code = "pipeline.node.invalid-binding-schema",
+                    Severity = "error",
+                    Message = $"Node '{node.Id}' binding '{binding.Field}' has an invalid schema: {schemaError}.",
+                    NodeId = node.Id
+                });
+            }
+        }
+    }
+
+    /// <summary>
+    /// A <c>value</c> node produces one typed value the graph cannot compute, so the things that can be
+    /// wrong about it are all knowable statically: an unknown type, a schema that is not a schema, a
+    /// literal that does not match either, or no way at all to obtain a value.
+    /// </summary>
+    private static void ValidateValueNode(PipelineNodeDefinition node, ICollection<PipelineValidationIssue> issues)
+    {
+        var config = ValuePrimitiveConfig.Read(node.Config);
+
+        if (!config.TypeKnown)
+        {
+            issues.Add(new PipelineValidationIssue
+            {
+                Code = "pipeline.node.invalid-value-type",
+                Severity = "error",
+                Message = $"Value node '{node.Id}' declares type '{config.RawType}'. Supported: {ControlValueTypes.Supported}.",
+                NodeId = node.Id
+            });
+        }
+
+        if (!config.ShapeKnown)
+        {
+            issues.Add(new PipelineValidationIssue
+            {
+                Code = "pipeline.node.invalid-value-shape",
+                Severity = "error",
+                Message = $"Value node '{node.Id}' declares shape '{config.RawShape}'. Supported: {ValuePrimitiveConfig.ShapesSupported}.",
+                NodeId = node.Id
+            });
+        }
+
+        var schemaValid = JsonSchemaCheck.TryValidateSchema(config.Schema, out var schemaError);
+        if (!schemaValid)
+        {
+            issues.Add(new PipelineValidationIssue
+            {
+                Code = "pipeline.node.invalid-schema",
+                Severity = "error",
+                Message = $"Value node '{node.Id}' has an invalid schema: {schemaError}.",
+                NodeId = node.Id
+            });
+        }
+
+        // A literal is checked here rather than at run time because it is the one source that is fully
+        // known at authoring time — the operator should never see a type error a file could have shown.
+        if (config.HasLiteral)
+        {
+            if (config.TypeKnown && !ControlValueTypes.MatchesShape(config.Shape, config.Type, config.Literal))
+            {
+                var expected = config.Shape == ControlValueShape.List
+                    ? $"a list of '{config.RawType}'"
+                    : $"type '{config.RawType}'";
+
+                issues.Add(new PipelineValidationIssue
+                {
+                    Code = "pipeline.node.literal-type-mismatch",
+                    Severity = "error",
+                    Message = $"Value node '{node.Id}' has a literal that is not {expected}.",
+                    NodeId = node.Id
+                });
+            }
+            else if (schemaValid
+                     && !JsonSchemaCheck.TryValidateShaped(config.Shape, config.Schema, config.Literal, out var literalError))
+            {
+                issues.Add(new PipelineValidationIssue
+                {
+                    Code = "pipeline.node.literal-type-mismatch",
+                    Severity = "error",
+                    Message = $"Value node '{node.Id}' has a literal that does not match its schema: {literalError}.",
+                    NodeId = node.Id
+                });
+            }
+        }
+
+        // No literal, no binding to look up, no default: nothing a resolver could even be asked about,
+        // because a resolver stores its answer under a binding name.
+        if (!config.HasLiteral && config.Binding is null && !config.HasDefault)
+        {
+            issues.Add(new PipelineValidationIssue
+            {
+                Code = "pipeline.node.unresolvable-value",
+                Severity = "error",
+                Message = $"Value node '{node.Id}' declares no literal, binding or default, so it can never "
+                        + "produce a value. Add one of them.",
+                NodeId = node.Id
+            });
+        }
+    }
+
+    /// <summary>
+    /// A <c>select</c> narrows a collection, so the criterion and the elements must be the same type.
+    /// The expander always derives both from one declared type; this catches a hand-written or
+    /// studio-generated node where they drifted apart.
+    /// </summary>
+    private static void ValidateSelectNode(PipelineNodeDefinition node, ICollection<PipelineValidationIssue> issues)
+    {
+        var config = SelectPrimitiveConfig.Read(node.Config);
+
+        if (!config.ModeKnown)
+        {
+            issues.Add(new PipelineValidationIssue
+            {
+                Code = "pipeline.node.select-invalid-mode",
+                Severity = "error",
+                Message = $"Select node '{node.Id}' has mode '{config.RawMode}'. Supported: {SelectModes.Supported}.",
+                NodeId = node.Id
+            });
+        }
+
+        if (!config.TypeKnown)
+        {
+            issues.Add(new PipelineValidationIssue
+            {
+                Code = "pipeline.node.invalid-value-type",
+                Severity = "error",
+                Message = $"Select node '{node.Id}' declares type '{config.RawType}'. Supported: {ControlValueTypes.Supported}.",
+                NodeId = node.Id
+            });
+        }
+
+        var items = node.Inputs.FirstOrDefault(p => string.Equals(p.Name, "items", StringComparison.OrdinalIgnoreCase));
+        var criterion = node.Inputs.FirstOrDefault(p => string.Equals(p.Name, "criterion", StringComparison.OrdinalIgnoreCase));
+
+        if (items is null
+            || criterion is null
+            || !ControlPortTypes.TryParse(items.DataType, out _, out var itemType)
+            || !ControlPortTypes.TryParse(criterion.DataType, out _, out var criterionType))
+        {
+            return;
+        }
+
+        if (itemType != criterionType)
+        {
+            issues.Add(new PipelineValidationIssue
+            {
+                Code = "pipeline.node.select-type-mismatch",
+                Severity = "error",
+                Message = $"Select node '{node.Id}' narrows '{items.DataType}' with a criterion of "
+                        + $"'{criterion.DataType}'; both must have the same element type.",
+                NodeId = node.Id
+            });
+        }
+    }
+
+    /// <summary>
+    /// A <c>loop</c> is the graph's iteration authority: it owns the termination policy and carries pause.
+    /// Two things can be wrong with it statically: an unknown termination policy, and a <c>count</c> policy
+    /// with no positive count — a loop told to stop after N cycles but never told N would never stop.
+    /// </summary>
+    private static void ValidateLoopNode(PipelineNodeDefinition node, ICollection<PipelineValidationIssue> issues)
+    {
+        var config = LoopPrimitiveConfig.Read(node.Config);
+
+        if (!config.ModeKnown)
+        {
+            issues.Add(new PipelineValidationIssue
+            {
+                Code = "pipeline.node.loop-invalid-mode",
+                Severity = "error",
+                Message = $"Loop node '{node.Id}' has mode '{config.RawMode}'. Supported: {LoopModes.Supported}.",
+                NodeId = node.Id
+            });
+        }
+        else if (config.Mode == LoopMode.Count && config.Count is not > 0)
+        {
+            issues.Add(new PipelineValidationIssue
+            {
+                Code = "pipeline.node.loop-missing-count",
+                Severity = "error",
+                Message = $"Loop node '{node.Id}' has mode 'count' but no positive 'count'. Add \"count\": N.",
+                NodeId = node.Id
+            });
+        }
     }
 
     private static void ValidatePorts(
@@ -218,6 +449,26 @@ public sealed class PipelineDefinitionValidator : IPipelineDefinitionValidator
                 Message = $"Edge '{edge.Id}' references missing target node '{edge.To.NodeId}'.",
                 EdgeId = edge.Id
             });
+            return;
+        }
+
+        // A loop edge (`save -> cycle`) is a node-level connection that closes the cycle. It moves no value,
+        // so there is nothing to type: only that both nodes exist (checked above) and the target really is a
+        // loop. No port, channel or data-type checks apply.
+        if (string.Equals(edge.Kind, "loop", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!string.Equals(toNode.PrimitiveType, "loop", StringComparison.OrdinalIgnoreCase))
+            {
+                issues.Add(new PipelineValidationIssue
+                {
+                    Code = "pipeline.edge.invalid-loop-target",
+                    Severity = "error",
+                    Message = $"Edge '{edge.Id}' is a loop edge but its target '{edge.To.NodeId}' is not a loop node.",
+                    EdgeId = edge.Id,
+                    NodeId = edge.To.NodeId
+                });
+            }
+
             return;
         }
 

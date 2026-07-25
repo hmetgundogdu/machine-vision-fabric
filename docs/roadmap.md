@@ -252,3 +252,70 @@ descriptor-in-header, engine context slot, engine-allocated module state, snapsh
   land on the historical 8, so nothing regresses. This unblocked `parallelism: 4`: 6 MB/2000 cycles reads
   serial 8.63 s → pipelined 5.25 s → ×2 4.10 s → **×4 3.65 s (2.36× over serial)**, flattening from ×2 to
   ×4 because `cam.route` is then the wall clock. Cost is honest: 17 slots × 8 MB ≈ 136 MB.
+- **`value` + `select` primitives — built (2026-07-23).** Two values a dataflow graph could not express:
+  one the graph cannot compute (a threshold, an output folder, which camera), and narrowing a collection.
+  Kept as **separate primitives** — producing a value has nothing to do with collections, and merging them
+  would give one node with two unrelated jobs and a config where half the fields are always ignored. The
+  interactive camera picker is then not a feature but `discover → select` with an unresolved criterion,
+  which is one composition among many.
+  Primitives rather than a module, because the engine needs a binding store, resolution before the cycle
+  loop and validator typing rules either way; a module would add indirection on top of that *and* make the
+  graph language depend on a plugin being installed. What stays outside the core is *how* a value is
+  obtained (`IValueResolver`) and *discovering* candidates (a module) — the same minimal-core shape as
+  `IDataPlane` and `IOutOfProcessModuleHost`.
+  Types are ordinary: `control/value:<t>` and `control/list:<t>` over `string|int|number|bool|json`,
+  checked by the existing edge rule. A `json` value may declare a JSON Schema, enforced wherever a value
+  enters the graph — which keeps "the camera record" typed without the core knowing what a camera is.
+  **Resolution happens before cycle 0**, in a CLI pre-pass: the loop runs per frame, so prompting inside
+  it is absurd and blocking on a human breaks unattended operation (the TUI repaints every 120 ms and
+  could not share the terminal anyway). Bindings live in `.mvf/bindings.json`, **outside the package**, so
+  the same `pipeline.json` deploys to ten panel PCs byte-identically and each binds to its own camera.
+  Unattended is the default posture: `--no-prompt`, an environment variable per binding, and an
+  unresolved value fails before cycle 0 naming the binding and the file to set it in. Serial only for now
+  — pipelined refuses both primitives up front, since a node with no inputs has no queue to pace it.
+  Design and open questions in `docs/value-and-select-design.md`.
+- **Live tuning (2026-07-23).** A resolved `value` is a constant but not a frozen one: each one registers
+  a `LiveValue`, and the TUI edits it mid-run (tab/↑↓ to pick, enter to edit); the node picks the change up
+  on its **next** cycle. This does not undo moving prompts out of the loop — that rule was never "values
+  must not change", it was **the loop must never wait for a human**. A prompt binds the pipeline to a
+  person; an asynchronous setting change does not. Cost on the hot path is one volatile read, and the
+  emitted result is rebuilt only when the setting actually changed. A new setting goes through the same
+  type + schema check as a literal or a stored binding — a running graph is the last place that should
+  accept an ill-typed value. **What is tunable is decided by when the value is consumed:** a threshold is
+  consumed per frame, so turning it means something; which camera to open is consumed at activation, so
+  changing it is reconfiguration, not tuning, and is not offered. Changes persist to the binding
+  immediately; a value with no binding is tunable but not persisted, because its only durable home would
+  be a literal in `pipeline.json` — the portable artifact a per-machine tuning session must not rewrite.
+  No mouse: Spectre.Console's live display gives no mouse events, so click-to-edit belongs to the studio.
+- **List-shaped values (2026-07-23).** `"shape": "list"` on a `value` makes its port `control/list:<t>`,
+  which is what a `select`'s items port consumes — so `value → select ← value` is a real chain today,
+  before the discovery module exists. Justified rather than convenient: `select` already emits a
+  collection in `mode: many`, a set of candidates *is* one value the graph cannot compute, and a literal
+  candidate list is the "simulator first" stand-in the project asks for everywhere else. For a list the
+  declared schema describes an **element**, so the same schema reads the same whether a record arrives
+  alone or in bulk. `packages/value-demo` now wires three values into two selects — each with its own
+  type, binding and consumer, which is the load test for "`value` produces one value, it is not a form".
+- **The picker is live (2026-07-23).** The pre-pass walks the edge into `select.items`; when the producer
+  is a list-shaped `value` whose collection is already settled, it hands those elements to the resolver as
+  `ValueRequest.Choices`, and the terminal renders a list to pick from instead of asking for an identifier
+  the operator would have to read off another screen. With a `by`, what is stored is that property of the
+  chosen element, not the whole record — so the binding survives a later discovery run that returns the
+  same camera with different incidental fields. The pre-pass now walks in **topological order**, which is
+  what guarantees a collection is settled before anything offers it. Still missing: candidates from a
+  *module*, which means activating and running a discovery node before cycle 0 — a real decision about
+  pre-pass lifecycle rather than a lookup. Everything downstream of the seam is done.
+  This also made the two criterion sources readable as an authoring choice: a `select` with its own
+  `binding` is picked once per machine and then silent; a criterion arriving on an edge from a `value` node
+  is a live tunable instead. `packages/value-demo` now shows both.
+- **Picking mid-run (2026-07-23).** A `select` whose criterion is its own binding is now a live tunable,
+  and one that picks rather than types: the runner publishes the collection it is narrowing every cycle
+  (reference-compared, so a steady list costs one comparison), and the dashboard renders those as a
+  selection list. The candidates are therefore the ones the graph is narrowing *right now*, not the ones
+  resolved at startup — which is what makes this work later when discovery re-runs. A choice stores the
+  property named by `by`, the same rule the first-run picker follows, so both write the same binding.
+  A `select` fed by an **edge** is deliberately not offered: the edge would overwrite the tuning on the
+  next cycle, and a control that silently does nothing is worse than no control. The pre-pass marks those
+  and the activator skips them; the `value` behind the edge is the tunable instead.
+  `LiveValue.PublishChoices` is public where `Set` is internal, and the asymmetry is the contract — a new
+  setting must pass the type/schema check, whereas candidates are an observation of what the graph already
+  carries.

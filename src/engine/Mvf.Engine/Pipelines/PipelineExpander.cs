@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using Mvf.Engine.Modules;
 using Mvf.Graph.Integrations;
 using Mvf.Graph.Pipelines;
+using Mvf.Graph.Values;
 
 namespace Mvf.Engine.Pipelines;
 
@@ -13,6 +14,8 @@ namespace Mvf.Engine.Pipelines;
 /// <list type="bullet">
 ///   <item>module node: <c>{ "id": "blackCheck1", "module": "mvf.black-screen-check", "config": {…} }</c></item>
 ///   <item>primitive node: <c>{ "id": "fork1", "primitive": "fork" }</c> (fork/switch outputs come from its leaving edges)</item>
+///   <item>value primitive: <c>{ "id": "t", "primitive": "value", "config": { "type": "int", "binding": "…" } }</c>
+///     (its port type comes from the declared <c>type</c>)</item>
 ///   <item>edge: <c>{ "from": "camera1.frame", "to": "fork1.frame" }</c> (id + kind derived)</item>
 /// </list>
 /// Ports and category come from the module's <see cref="IntegrationCapabilityKind"/> (read
@@ -80,18 +83,30 @@ public sealed class PipelineExpander
             }
         }
 
+        // The loop's tail is closed by a plain node-level edge (`save -> cycle`). It moves no value, so it
+        // needs no typed port on either end — it is connected by id. Recognised here by its target being a
+        // loop node; the validator then checks only that the nodes exist, not ports/types.
+        var loopNodeIds = nodes
+            .Where(n => string.Equals(n.PrimitiveType, "loop", StringComparison.OrdinalIgnoreCase))
+            .Select(n => n.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         var edges = new List<PipelineEdgeDefinition>(parsedEdges.Count);
         foreach (var parsed in parsedEdges)
         {
-            var kind = parsed.ExplicitKind
-                ?? (outputChannelByPort.TryGetValue((parsed.FromNode, parsed.FromPort), out var channel) ? channel : "data");
+            var isLoopEdge = loopNodeIds.Contains(parsed.ToNode);
+            var kind = isLoopEdge
+                ? "loop"
+                : parsed.ExplicitKind
+                  ?? (outputChannelByPort.TryGetValue((parsed.FromNode, parsed.FromPort), out var channel) ? channel : "data");
 
             edges.Add(new PipelineEdgeDefinition
             {
                 Id = parsed.Id ?? $"e{parsed.Index + 1}",
                 Kind = kind,
-                From = new PipelinePortReference { NodeId = parsed.FromNode, Port = parsed.FromPort },
-                To = new PipelinePortReference { NodeId = parsed.ToNode, Port = parsed.ToPort },
+                // A loop edge is by id; drop any ports so it reads as the structural connection it is.
+                From = new PipelinePortReference { NodeId = parsed.FromNode, Port = isLoopEdge ? string.Empty : parsed.FromPort },
+                To = new PipelinePortReference { NodeId = parsed.ToNode, Port = isLoopEdge ? string.Empty : parsed.ToPort },
                 Condition = parsed.Condition
             });
         }
@@ -165,6 +180,7 @@ public sealed class PipelineExpander
             Backpressure = GetString(nodeObj, "backpressure"),
             Parallelism = GetInt(nodeObj, "parallelism"),
             Config = CloneConfig(nodeObj),
+            Bindings = CloneBindings(nodeObj),
             Inputs = inputs,
             Outputs = outputs
         };
@@ -177,6 +193,7 @@ public sealed class PipelineExpander
     {
         var primitiveType = GetString(nodeObj, "primitive")!;
         var leavingPorts = leavingPortsByNode.TryGetValue(id, out var ports) ? ports : [];
+        var config = nodeObj["config"] as JsonObject ?? [];
 
         var (inputs, outputs) = primitiveType.ToLowerInvariant() switch
         {
@@ -192,8 +209,19 @@ public sealed class PipelineExpander
                 [DataPort("frame"), ControlPort("productPresent", BooleanGateSignalType)],
                 [DataPort("acceptedFrame")]),
 
+            "value" => ValuePorts(config),
+
+            "select" => SelectPorts(config),
+
+            // A `loop` carries no data — it owns iteration (via its config `mode`) and pause. It has no
+            // ports. The tail closes the cycle with a plain node-level edge (`save -> cycle`, by id), which
+            // needs no typed port because it moves no value; see the loop-edge handling below.
+            "loop" => (
+                (IReadOnlyList<PipelinePortDefinition>)[],
+                (IReadOnlyList<PipelinePortDefinition>)[]),
+
             _ => throw new PipelineExpansionException(
-                $"Node '{id}' references unknown primitive '{primitiveType}'. Supported: fork, switch, if.")
+                $"Node '{id}' references unknown primitive '{primitiveType}'. Supported: fork, switch, if, value, select, loop.")
         };
 
         return new PipelineNodeDefinition
@@ -201,7 +229,7 @@ public sealed class PipelineExpander
             Id = id,
             DisplayName = GetString(nodeObj, "displayName") ?? Capitalize(primitiveType),
             Kind = "embedded-primitive",
-            Category = "flow-control",
+            Category = IsValuePrimitive(primitiveType) ? "value" : "flow-control",
             PrimitiveType = primitiveType,
             ActivationMode = GetString(nodeObj, "activationMode"),
             Backpressure = GetString(nodeObj, "backpressure"),
@@ -211,6 +239,57 @@ public sealed class PipelineExpander
             Outputs = outputs
         };
     }
+
+    /// <summary>
+    /// A <c>value</c> node's single output, typed from its declared <c>type</c>.
+    ///
+    /// <para>An unknown type is carried through verbatim (<c>control/value:whatever</c>) rather than
+    /// thrown on: the validator reports <c>pipeline.node.invalid-value-type</c> with the node id, which
+    /// is a far better message than an expansion failure — the same split as activationMode and
+    /// backpressure, where the expander carries and the validator judges.</para>
+    /// </summary>
+    private static (IReadOnlyList<PipelinePortDefinition> Inputs, IReadOnlyList<PipelinePortDefinition> Outputs)
+        ValuePorts(JsonObject config)
+    {
+        var type = GetString(config, "type") ?? "string";
+
+        // "shape": "list" makes it a collection port, which is what a `select`'s items port consumes. Still
+        // one value the graph cannot compute — a set of candidates is a value like any other.
+        var list = string.Equals(GetString(config, "shape"), "list", StringComparison.OrdinalIgnoreCase);
+        var prefix = list ? ControlPortTypes.ListPrefix : ControlPortTypes.ValuePrefix;
+
+        return ([], [ControlPort("value", prefix + type)]);
+    }
+
+    /// <summary>
+    /// A <c>select</c> node's ports. The element type is declared on the node rather than inferred from
+    /// the incoming edge, so its ports are known before the graph is wired; a disagreement with the
+    /// producer then surfaces as an ordinary <c>pipeline.edge.data-type-mismatch</c>.
+    ///
+    /// <para><c>criterion</c> is optional — the criterion may equally be written in config as
+    /// <c>where</c>, or be resolved before the run.</para>
+    /// </summary>
+    private static (IReadOnlyList<PipelinePortDefinition> Inputs, IReadOnlyList<PipelinePortDefinition> Outputs)
+        SelectPorts(JsonObject config)
+    {
+        var type = GetString(config, "type") ?? "json";
+        var many = string.Equals(GetString(config, "mode"), "many", StringComparison.OrdinalIgnoreCase);
+
+        return (
+            [
+                ControlPort("items", ControlPortTypes.ListPrefix + type),
+                ControlPort("criterion", ControlPortTypes.ValuePrefix + type, required: false)
+            ],
+            [
+                ControlPort(
+                    "selected",
+                    (many ? ControlPortTypes.ListPrefix : ControlPortTypes.ValuePrefix) + type)
+            ]);
+    }
+
+    private static bool IsValuePrimitive(string primitiveType) =>
+        string.Equals(primitiveType, "value", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(primitiveType, "select", StringComparison.OrdinalIgnoreCase);
 
     private static PipelinePortDefinition[] DerivedOutputs(string id, string primitiveType, IReadOnlyList<string> leavingPorts)
     {
@@ -287,7 +366,16 @@ public sealed class PipelineExpander
         }
 
         var dot = reference.IndexOf('.');
-        if (dot <= 0 || dot == reference.Length - 1)
+
+        // A bare node id (no port) is how a node-level loop edge is written (`save -> cycle`). It is valid
+        // only when the edge targets a loop; a normal edge left without a port fails validation later with
+        // a precise "missing port" message rather than here.
+        if (dot < 0)
+        {
+            return (reference.Trim(), string.Empty);
+        }
+
+        if (dot == 0 || dot == reference.Length - 1)
         {
             throw new PipelineExpansionException(
                 $"Edge #{index + 1} '{side}' must be 'nodeId.port' but was '{reference}'.");
@@ -299,11 +387,14 @@ public sealed class PipelineExpander
     private static JsonObject CloneConfig(JsonObject nodeObj) =>
         nodeObj["config"] is JsonObject config ? (JsonObject)config.DeepClone() : [];
 
+    private static JsonObject CloneBindings(JsonObject nodeObj) =>
+        nodeObj["bindings"] is JsonObject bindings ? (JsonObject)bindings.DeepClone() : [];
+
     private static PipelinePortDefinition DataPort(string name, bool allowMultipleEdges = false) =>
         new() { Name = name, Channel = "data", DataType = DataFrameType, AllowMultipleEdges = allowMultipleEdges };
 
-    private static PipelinePortDefinition ControlPort(string name, string dataType) =>
-        new() { Name = name, Channel = "control", DataType = dataType };
+    private static PipelinePortDefinition ControlPort(string name, string dataType, bool required = true) =>
+        new() { Name = name, Channel = "control", DataType = dataType, Required = required };
 
     private static string? GetString(JsonObject obj, string property) =>
         obj[property] is JsonValue value && value.TryGetValue<string>(out var s) ? s : null;

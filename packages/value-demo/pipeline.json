@@ -1,0 +1,48 @@
+{
+  "name": "value-demo",
+  "version": "1.0.0",
+  "description": "Hardware-free demo of `value` and `select`. 'cameras' publishes a candidate list (a stand-in for the discovery module). 'pickOne' resolves its criterion from its own binding, so the first run shows a picker and you choose a camera; later runs read the binding and never ask. 'pickProtocol' takes its criterion from a `value` node on an edge instead, which makes it a live tunable in the TUI. Run it with: execute-graph --package packages/value-demo --max-cycles 200",
+  "nodes": [
+    { "id": "cam", "module": "mvf.folder-source", "displayName": "Folder Source",
+      "config": { "sourceFolder": "../multilang-demo/assets/frames", "loop": true, "frameIntervalMs": 300 } },
+
+    { "id": "save", "module": "mvf.dataset-writer", "displayName": "Save",
+      "config": { "outputRoot": "out", "sessionPrefix": "demo" } },
+
+    { "id": "cameras", "primitive": "value", "displayName": "Discovered cameras",
+      "config": {
+        "type": "json",
+        "shape": "list",
+        "binding": "camera.candidates",
+        "prompt": "Camera candidates",
+        "schema": { "type": "object", "required": ["serial", "protocol"] },
+        "default": [
+          { "serial": "ABC123", "protocol": "gige", "address": "10.0.0.4" },
+          { "serial": "DEF456", "protocol": "gige", "address": "10.0.0.5" },
+          { "serial": "GHI789", "protocol": "usb",  "address": "usb://0" }
+        ]
+      } },
+
+    { "id": "pickOne", "primitive": "select", "displayName": "Pick one camera",
+      "config": {
+        "mode": "one",
+        "by": "serial",
+        "binding": "camera.serial",
+        "prompt": "Select a camera"
+      } },
+
+    { "id": "wantedProtocol", "primitive": "value", "displayName": "Wanted protocol",
+      "config": { "type": "json", "literal": "gige" } },
+
+    { "id": "pickProtocol", "primitive": "select", "displayName": "Keep that protocol",
+      "config": { "mode": "many", "by": "protocol" } }
+  ],
+  "edges": [
+    { "from": "cam.frame", "to": "save.frame" },
+
+    { "from": "cameras.value",        "to": "pickOne.items" },
+
+    { "from": "cameras.value",        "to": "pickProtocol.items" },
+    { "from": "wantedProtocol.value", "to": "pickProtocol.criterion" }
+  ]
+}
