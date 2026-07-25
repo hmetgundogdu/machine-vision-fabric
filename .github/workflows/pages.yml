@@ -8,20 +8,19 @@ on:
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
-# Allow the workflow to publish to Pages.
+# Only needs to push the built site to the gh-pages branch — no Pages API,
+# so no first-time-enablement 404/403. Enable Pages once from that branch:
+# Settings → Pages → Source: "Deploy from a branch" → gh-pages → / (root).
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
-# One deploy at a time; don't cancel an in-flight release.
 concurrency:
-  group: pages
+  group: pages-branch
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build site
+  deploy:
+    name: Build & publish to gh-pages
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,21 +35,10 @@ jobs:
       - name: Build
         working-directory: web
         run: npm run build
-      # NOTE: enable Pages once in the repo UI first —
-      # Settings → Pages → Build and deployment → Source: "GitHub Actions".
-      # The default workflow token cannot create the Pages site itself.
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: web/dist
-
-  deploy:
-    name: Deploy to Pages
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: web/dist
+          publish_branch: gh-pages
+          force_orphan: true
