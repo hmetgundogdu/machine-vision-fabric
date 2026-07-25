@@ -11,12 +11,13 @@ devices. It keeps running without a central server; a central system is optional
 for observability.
 
 <p align="center">
-  <img src="docs/assets/cli-demo.svg" alt="mvf CLI running the inspection-demo pipeline" width="820">
+  <img src="docs/assets/cli-demo.svg" alt="mvf CLI live graph dashboard running inspection-demo" width="860">
 </p>
 
-The screenshot above is a real headless run of `packages/inspection-demo` — a 13-node graph
-(camera simulator → threshold → fork → Python brightness/counter/invert workers → routed
-dataset sinks) executing end-to-end with **no hardware**.
+Above is the CLI's **live graph dashboard** running `packages/inspection-demo` — a 13-node graph
+(folder-source simulator → fork → Python brightness/counter + invert workers → switch → routed
+dataset sinks) executing end-to-end with **no hardware**. Node boxes are colour-coded by
+category, show their live config and per-node stats, and the executing node is highlighted.
 
 ## Why MVF
 
@@ -108,7 +109,6 @@ dotnet run --project src/cli/Mvf.Cli -- execute-graph --package packages/inspect
 | `value-demo` | typed value / select primitives |
 | `multilang-demo` | .NET + Python nodes in one graph |
 | `py-brightness-demo`, `py-invert-demo` | single Python classifier / transformer |
-| `cognex-dark-capture` | real Cognex auto-trigger capture + dark-frame branch |
 
 ## SDKs — author your own modules
 
@@ -141,9 +141,25 @@ int main() {
 }
 ```
 
-**.NET** — reference `MachineVisionFabric.Sdk` and derive from `FrameProcessorModuleBase`,
-`FrameClassifierModuleBase`, `FrameSourceModuleBase`, or `FrameSinkModuleBase`.
-See [`docs/sdk-quickstart.md`](docs/sdk-quickstart.md).
+**.NET** — reference `MachineVisionFabric.Sdk` and derive from a module base
+(`FrameProcessorModuleBase`, `FrameClassifierModuleBase`, `FrameSourceModuleBase`,
+`FrameSinkModuleBase`). A processor returns an accept/reject decision:
+
+```csharp
+public sealed class BrightnessGateModule : FrameProcessorModuleBase<BrightnessGateOptions>
+{
+    protected override IntegrationModuleDescriptor BuildDescriptor() =>
+        IntegrationModuleDescriptorBuilder.CreateProcessor<BrightnessGateOptions>(
+            "mvf.example-brightness-gate", "Brightness Gate", "1.0.0", "brightness-gate",
+            "Accepts a frame only when its mean byte value meets a threshold.");
+
+    protected override IFrameProcessor CreateProcessor(BrightnessGateOptions o) => new Gate(o);
+    // ...IFrameProcessor.EvaluateAsync returns a FrameProcessorDecision (accept/reject)
+}
+```
+
+Full runnable example: [`modules/dotnet-brightness-gate/`](modules/dotnet-brightness-gate/) ·
+authoring guide: [`docs/sdk-quickstart.md`](docs/sdk-quickstart.md).
 
 ## Releases & CI
 

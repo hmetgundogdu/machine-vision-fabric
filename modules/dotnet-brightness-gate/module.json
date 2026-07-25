@@ -1,0 +1,8 @@
+{
+  "id": "mvf.example-brightness-gate",
+  "name": "Brightness Gate (.NET example)",
+  "version": "1.0.0",
+  "kind": "processor",
+  "runtime": "dotnet",
+  "entry": "Mvf.Example.BrightnessGate.dll"
+}

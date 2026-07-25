@@ -27,6 +27,7 @@
     <Project Path="modules/MachineVisionFabric.Integrations.DatasetWriter/MachineVisionFabric.Integrations.DatasetWriter.csproj" />
     <Project Path="modules/MachineVisionFabric.Integrations.BlackScreenCheck/MachineVisionFabric.Integrations.BlackScreenCheck.csproj" />
     <Project Path="modules/MachineVisionFabric.Integrations.FolderSource/MachineVisionFabric.Integrations.FolderSource.csproj" />
+    <Project Path="modules/dotnet-brightness-gate/Mvf.Example.BrightnessGate.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/Mvf.SchemaExporter/Mvf.SchemaExporter.csproj" />

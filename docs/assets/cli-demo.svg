@@ -1,32 +1,84 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="432" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13.5">
+<svg xmlns="http://www.w3.org/2000/svg" width="944" height="384" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
   <style>
-    .d{fill:#c9d1d9}.dim{fill:#8b949e}.g{fill:#3fb950}.grn{fill:#7ee787}.b{fill:#79c0ff}.p{fill:#d2a8ff}
+    .src{fill:#00afff}.cmp{fill:#af87ff}.cls{fill:#ff6ac1}.flow{fill:#ffd700}.sink{fill:#00fa9a}
+    .badge{fill:#5fafff}.type{fill:#808080}.dim{fill:#6c6c6c}.wht{fill:#c9d1d9}.ok{fill:#3fb950}
+    .act{fill:#ffff00}.cfg{fill:#8fb8ff}.edge{fill:#5fafff}.ctl{fill:#d75fd7}.hint{fill:#6e7681}
+    text{font-size:11px}
+    .b{stroke-width:1.5;fill:#0d1117}
   </style>
-  <!-- window -->
-  <rect x="0.5" y="0.5" width="899" height="431" rx="10" fill="#0d1117" stroke="#30363d"/>
-  <rect x="0.5" y="0.5" width="899" height="36" rx="10" fill="#161b22" stroke="#30363d"/>
-  <rect x="0.5" y="26" width="899" height="11" fill="#161b22"/>
-  <line x1="0.5" y1="36.5" x2="899.5" y2="36.5" stroke="#30363d"/>
-  <circle cx="22" cy="18" r="6" fill="#ff5f56"/>
-  <circle cx="42" cy="18" r="6" fill="#ffbd2e"/>
-  <circle cx="62" cy="18" r="6" fill="#27c93f"/>
-  <text x="450" y="23" text-anchor="middle" class="dim">mvf — machine-vision-fabric</text>
+  <rect x="0.5" y="0.5" width="943" height="383" rx="10" fill="#0d1117" stroke="#30363d"/>
+  <rect x="0.5" y="0.5" width="943" height="34" rx="10" fill="#161b22" stroke="#30363d"/>
+  <rect x="0.5" y="24" width="943" height="11" fill="#161b22"/>
+  <line x1="0.5" y1="34.5" x2="943.5" y2="34.5" stroke="#30363d"/>
+  <circle cx="21" cy="17" r="5.5" fill="#ff5f56"/><circle cx="40" cy="17" r="5.5" fill="#ffbd2e"/><circle cx="59" cy="17" r="5.5" fill="#27c93f"/>
+  <text x="472" y="21" text-anchor="middle" class="hint">mvf — execute-graph · inspection-demo (live)</text>
 
-  <!-- terminal body -->
-  <text x="24" y="70" xml:space="preserve"><tspan class="grn">$ </tspan><tspan class="b">mvf </tspan><tspan class="d">execute-graph --package packages/inspection-demo</tspan></text>
-  <text x="24" y="92" xml:space="preserve"><tspan class="dim">Pipeline: </tspan><tspan class="b">inspection-demo</tspan><tspan class="dim">   nodes:</tspan><tspan class="d">13</tspan><tspan class="dim">   edges:</tspan><tspan class="d">16</tspan></text>
-  <text x="24" y="114" xml:space="preserve"><tspan class="dim">Succeeded:</tspan><tspan class="g">True</tspan><tspan class="dim">   cycles:</tspan><tspan class="d">3</tspan><tspan class="dim">   accepted:</tspan><tspan class="d">3</tspan><tspan class="dim">   dropped:</tspan><tspan class="d">0</tspan><tspan class="dim">   restarts:</tspan><tspan class="d">0</tspan><tspan class="dim">   duration:</tspan><tspan class="d">0.76s</tspan></text>
+  <text x="20" y="52" class="hint">◄ layers 1–5 of 6 ►   ▶ active   ✔ done   ○ idle</text>
 
-  <text x="24" y="136" xml:space="preserve"><tspan class="b">  cam         </tspan><tspan class="p">Resident  </tspan><tspan class="d">warmup=21ms  cycles=3  avg=167.85ms</tspan></text>
-  <text x="24" y="158" xml:space="preserve"><tspan class="b">  thr         </tspan><tspan class="p">Resident  </tspan><tspan class="d">cycles=3  avg=0.01ms</tspan></text>
-  <text x="24" y="180" xml:space="preserve"><tspan class="b">  fork        </tspan><tspan class="p">Resident  </tspan><tspan class="d">cycles=3  avg=0.04ms</tspan></text>
-  <text x="24" y="202" xml:space="preserve"><tspan class="b">  bright      </tspan><tspan class="p">Resident  </tspan><tspan class="d">warmup=74ms  cycles=3  avg=1.21ms</tspan></text>
-  <text x="24" y="224" xml:space="preserve"><tspan class="dim">      └ worker </tspan><tspan class="p">py.brightness-classifier</tspan><tspan class="d">  rpc=3  avg=0.66ms</tspan></text>
-  <text x="24" y="246" xml:space="preserve"><tspan class="b">  count       </tspan><tspan class="p">Resident  </tspan><tspan class="d">cycles=3  avg=0.19ms</tspan></text>
-  <text x="24" y="268" xml:space="preserve"><tspan class="dim">      └ worker </tspan><tspan class="p">py.frame-counter</tspan><tspan class="d">  rpc=3  avg=0.18ms</tspan></text>
-  <text x="24" y="290" xml:space="preserve"><tspan class="b">  invert      </tspan><tspan class="p">Resident  </tspan><tspan class="d">cycles=3  avg=0.65ms</tspan></text>
-  <text x="24" y="312" xml:space="preserve"><tspan class="dim">      └ worker </tspan><tspan class="p">py.invert-transformer</tspan><tspan class="d">  rpc=3  avg=0.22ms</tspan></text>
-  <text x="24" y="334" xml:space="preserve"><tspan class="dim">  sinks       </tspan><tspan class="b">route  sample  saveInverted  saveBlack  saveOk  saveSample  cycle</tspan></text>
+  <!-- edge arrows (─ data / ╌ control) -->
+  <text x="163" y="200" class="edge">─frame▶</text>
+  <text x="353" y="136" class="edge">─frame▶</text>
+  <text x="353" y="260" class="edge">─frame▶</text>
+  <text x="543" y="136" class="ctl">╌class▶</text>
+  <text x="543" y="260" class="edge">─frame▶</text>
+  <text x="733" y="112" class="edge">─frame▶</text>
+  <text x="733" y="200" class="edge">─frame▶</text>
+  <text x="733" y="288" class="edge">─frame▶</text>
 
-  <text x="24" y="378" xml:space="preserve"><tspan class="g">✓ </tspan><tspan class="d">inspection-demo — 13 nodes · 3 cycles · 0 faults · </tspan><tspan class="grn">hardware-free</tspan></text>
+  <!-- cam : source (done) -->
+  <rect class="b" x="20" y="158" width="140" height="74" rx="7" stroke="#00afff"/>
+  <text x="30" y="176"><tspan class="ok">✔ </tspan><tspan class="src">cam</tspan></text>
+  <text x="30" y="192"><tspan class="badge">M </tspan><tspan class="type">folder-source</tspan></text>
+  <text x="30" y="208"><tspan class="dim">dir=</tspan><tspan class="cfg">frames/*</tspan></text>
+  <text x="30" y="224"><tspan class="dim">×</tspan><tspan class="wht">3</tspan><tspan class="dim"> ok</tspan><tspan class="ok">3</tspan><tspan class="dim">  168ms</tspan></text>
+
+  <!-- fork : flow-control (done) -->
+  <rect class="b" x="210" y="158" width="140" height="74" rx="7" stroke="#ffd700"/>
+  <text x="220" y="176"><tspan class="ok">✔ </tspan><tspan class="flow">fork</tspan></text>
+  <text x="220" y="192"><tspan class="flow">P </tspan><tspan class="type">fork</tspan></text>
+  <text x="220" y="216"><tspan class="dim">×</tspan><tspan class="wht">3</tspan><tspan class="dim"> ok</tspan><tspan class="ok">3</tspan></text>
+
+  <!-- bright : classify (ACTIVE) -->
+  <rect class="b" x="400" y="94" width="140" height="74" rx="7" stroke="#ffff00" stroke-width="2"/>
+  <text x="410" y="112"><tspan class="act">▶ </tspan><tspan class="cls">bright</tspan></text>
+  <text x="410" y="128"><tspan class="badge">M </tspan><tspan class="type">brightness-cls</tspan></text>
+  <text x="410" y="144"><tspan class="cfg">thr=40</tspan><tspan class="dim"> ✎</tspan></text>
+  <text x="410" y="160"><tspan class="dim">×</tspan><tspan class="wht">3</tspan><tspan class="dim"> ok</tspan><tspan class="ok">3</tspan><tspan class="dim">  0.7ms</tspan></text>
+
+  <!-- invert : compute (done) -->
+  <rect class="b" x="400" y="218" width="140" height="74" rx="7" stroke="#af87ff"/>
+  <text x="410" y="236"><tspan class="ok">✔ </tspan><tspan class="cmp">invert</tspan></text>
+  <text x="410" y="252"><tspan class="badge">M </tspan><tspan class="type">invert-tf</tspan></text>
+  <text x="410" y="276"><tspan class="dim">×</tspan><tspan class="wht">3</tspan><tspan class="dim"> ok</tspan><tspan class="ok">3</tspan><tspan class="dim">  0.2ms</tspan></text>
+
+  <!-- route : flow-control switch (idle) -->
+  <rect class="b" x="590" y="94" width="140" height="74" rx="7" stroke="#585858"/>
+  <text x="600" y="112"><tspan class="dim">○ </tspan><tspan class="flow">route</tspan></text>
+  <text x="600" y="128"><tspan class="flow">P </tspan><tspan class="type">switch</tspan></text>
+  <text x="600" y="144"><tspan class="dim">on=</tspan><tspan class="cfg">class</tspan></text>
+  <text x="600" y="160"><tspan class="dim">waiting</tspan></text>
+
+  <!-- count : classify (done) -->
+  <rect class="b" x="590" y="218" width="140" height="74" rx="7" stroke="#ff6ac1"/>
+  <text x="600" y="236"><tspan class="ok">✔ </tspan><tspan class="cls">count</tspan></text>
+  <text x="600" y="252"><tspan class="badge">M </tspan><tspan class="type">frame-counter</tspan></text>
+  <text x="600" y="276"><tspan class="dim">×</tspan><tspan class="wht">3</tspan><tspan class="dim"> ok</tspan><tspan class="ok">3</tspan></text>
+
+  <!-- saveOk / saveBlack / saveInverted : sink (done) -->
+  <rect class="b" x="780" y="70" width="140" height="70" rx="7" stroke="#00fa9a"/>
+  <text x="790" y="88"><tspan class="ok">✔ </tspan><tspan class="sink">saveOk</tspan></text>
+  <text x="790" y="104"><tspan class="badge">M </tspan><tspan class="type">dataset-writer</tspan></text>
+  <text x="790" y="128"><tspan class="dim">×</tspan><tspan class="wht">3</tspan><tspan class="dim"> ok</tspan><tspan class="ok">3</tspan></text>
+
+  <rect class="b" x="780" y="158" width="140" height="70" rx="7" stroke="#00fa9a"/>
+  <text x="790" y="176"><tspan class="ok">✔ </tspan><tspan class="sink">saveBlack</tspan></text>
+  <text x="790" y="192"><tspan class="badge">M </tspan><tspan class="type">dataset-writer</tspan></text>
+  <text x="790" y="216"><tspan class="dim">×</tspan><tspan class="wht">3</tspan><tspan class="dim"> ok</tspan><tspan class="ok">3</tspan></text>
+
+  <rect class="b" x="780" y="246" width="140" height="70" rx="7" stroke="#00fa9a"/>
+  <text x="790" y="264"><tspan class="ok">✔ </tspan><tspan class="sink">saveInverted</tspan></text>
+  <text x="790" y="280"><tspan class="badge">M </tspan><tspan class="type">dataset-writer</tspan></text>
+  <text x="790" y="304"><tspan class="dim">×</tspan><tspan class="wht">3</tspan><tspan class="dim"> ok</tspan><tspan class="ok">3</tspan></text>
+
+  <text x="20" y="360" class="hint">inspection-demo · 13 nodes · 6 layers · cycle 3 · 0 faults · hardware-free</text>
 </svg>
