@@ -82,13 +82,48 @@ public sealed class StdioWorkerProcess : IWorkerChannel
         var process = Process.Start(psi)
             ?? throw new InvalidOperationException($"Failed to start worker '{info.Command}'.");
 
-        // Drain stderr so a chatty child never blocks on a full pipe.
-        _ = Task.Run(async () =>
+        // Capture stderr (bounded to the tail) rather than discard it: when a worker dies before the hello
+        // handshake, its stderr is the only record of *why* — a Python traceback, a "python was not found"
+        // stub message, a missing import. Draining also keeps a chatty child from blocking on a full pipe.
+        // Bounded so a long, noisy run can't grow it without limit; the tail is where the error lands.
+        var stderr = new System.Text.StringBuilder();
+        const int stderrCap = 8192;
+        var stderrDrain = Task.Run(async () =>
         {
-            try { await process.StandardError.ReadToEndAsync(cancellationToken); } catch { /* ignore */ }
+            try
+            {
+                string? line;
+                while ((line = await process.StandardError.ReadLineAsync(cancellationToken)) is not null)
+                {
+                    lock (stderr)
+                    {
+                        stderr.Append(line).Append('\n');
+                        if (stderr.Length > stderrCap) stderr.Remove(0, stderr.Length - stderrCap);
+                    }
+                }
+            }
+            catch { /* ignore */ }
         }, cancellationToken);
 
         var worker = new StdioWorkerProcess(process);
+
+        // Builds a " (exit code N; stderr: …)" suffix for a startup-failure message. Waits briefly for the
+        // drain to flush once the child is gone, so the child's own error text makes it into the exception.
+        async Task<string> StartupDiagnosticsAsync()
+        {
+            try { await stderrDrain.WaitAsync(TimeSpan.FromSeconds(1), cancellationToken); }
+            catch { /* still running, or cancelled — report whatever was captured so far */ }
+
+            var parts = new List<string>();
+            try { if (process.HasExited) parts.Add($"exit code {process.ExitCode}"); }
+            catch { /* racing the exit — skip */ }
+
+            string tail;
+            lock (stderr) tail = stderr.ToString().Trim();
+            if (tail.Length > 0) parts.Add($"stderr: {tail}");
+
+            return parts.Count > 0 ? $" ({string.Join("; ", parts)})" : string.Empty;
+        }
 
         // Bound the whole startup handshake (hello + optional readiness) by the startup budget, so a slow
         // model load / device connect can't hang the engine — and a budget overrun is reported as a
@@ -99,11 +134,16 @@ public sealed class StdioWorkerProcess : IWorkerChannel
 
         try
         {
-            var hello = await worker.ReadMessageAsync(startupCts.Token)
-                ?? throw new WorkerStartupException("Worker exited before sending a hello handshake.");
+            var hello = await worker.ReadMessageAsync(startupCts.Token);
+            if (hello is null)
+            {
+                throw new WorkerStartupException(
+                    "Worker exited before sending a hello handshake." + await StartupDiagnosticsAsync());
+            }
             if ((string?)hello["type"] != "hello")
             {
-                throw new WorkerStartupException("Worker did not send a hello handshake.");
+                throw new WorkerStartupException(
+                    "Worker did not send a hello handshake." + await StartupDiagnosticsAsync());
             }
             worker.ModuleId = (string?)hello["moduleId"] ?? string.Empty;
 
@@ -116,10 +156,12 @@ public sealed class StdioWorkerProcess : IWorkerChannel
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            // The budget elapsed (not the caller's cancellation) → a startup timeout.
+            // The budget elapsed (not the caller's cancellation) → a startup timeout. Read diagnostics
+            // before disposing, since Dispose kills the child and rewrites its exit code.
+            var diagnostics = await StartupDiagnosticsAsync();
             await worker.DisposeAsync();
             throw new WorkerStartupException(
-                $"Worker '{info.Command}' did not become ready within the startup budget ({budget.TotalSeconds:F0}s).");
+                $"Worker '{info.Command}' did not become ready within the startup budget ({budget.TotalSeconds:F0}s).{diagnostics}");
         }
         catch
         {
