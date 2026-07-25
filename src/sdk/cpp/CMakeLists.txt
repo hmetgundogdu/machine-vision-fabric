@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 project(mvf_sdk_cpp LANGUAGES CXX VERSION 0.1.0)
 
+# Package version — defaults to the project() version, overridable from CI with the
+# release tag: cmake -DMVF_SDK_VERSION=1.2.3
+set(MVF_SDK_VERSION "${PROJECT_VERSION}" CACHE STRING "MVF C++ SDK version")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -23,6 +27,8 @@ else()
   FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
+string(REGEX REPLACE "^([0-9]+).*" "\\1" MVF_SDK_VERSION_MAJOR "${MVF_SDK_VERSION}")
+
 # The shared library: libmvf_sdk.so / libmvf_sdk.dylib / mvf_sdk.dll
 add_library(mvf_sdk SHARED src/sdk.cpp)
 add_library(mvf::sdk ALIAS mvf_sdk)
@@ -34,8 +40,8 @@ target_link_libraries(mvf_sdk PUBLIC nlohmann_json::nlohmann_json)
 
 set_target_properties(mvf_sdk PROPERTIES
   OUTPUT_NAME mvf_sdk
-  VERSION ${PROJECT_VERSION}
-  SOVERSION ${PROJECT_VERSION_MAJOR}
+  VERSION ${MVF_SDK_VERSION}
+  SOVERSION ${MVF_SDK_VERSION_MAJOR}
   # Export the mvf:: API from the shared library. On ELF/Mach-O default visibility
   # exports the symbols; WINDOWS_EXPORT_ALL_SYMBOLS does the equivalent for the DLL.
   WINDOWS_EXPORT_ALL_SYMBOLS ON)

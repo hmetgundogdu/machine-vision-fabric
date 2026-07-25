@@ -35,7 +35,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip build
-      - run: python -m build src/sdk/python --outdir dist
+      - name: Build wheel (version from tag)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" src/sdk/python/pyproject.toml
+          python -m build src/sdk/python --outdir dist
       - uses: actions/upload-artifact@v4
         with:
           name: python-wheel
@@ -53,19 +57,22 @@ jobs:
           - { os: windows-latest, label: win-x64 }
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S src/sdk/cpp -B build/cpp -DCMAKE_BUILD_TYPE=Release
+      - name: Configure (version from tag)
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart('v')
+          cmake -S src/sdk/cpp -B build/cpp -DCMAKE_BUILD_TYPE=Release "-DMVF_SDK_VERSION=$v"
       - name: Build
         run: cmake --build build/cpp --config Release
       - name: Stage (headers + shared library)
         run: cmake --install build/cpp --config Release --prefix stage
       - name: Package
         shell: pwsh
-        run: Compress-Archive -Path stage/* -DestinationPath "mvf-sdk-cpp-${{ matrix.label }}.zip"
+        run: Compress-Archive -Path stage/* -DestinationPath "mvf-sdk-cpp-${{ github.ref_name }}-${{ matrix.label }}.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: cpp-${{ matrix.label }}
-          path: mvf-sdk-cpp-${{ matrix.label }}.zip
+          path: mvf-sdk-cpp-${{ github.ref_name }}-${{ matrix.label }}.zip
 
   cli:
     name: CLI (${{ matrix.label }})
@@ -87,9 +94,10 @@ jobs:
       - name: Publish CLI (single-file, self-contained)
         shell: pwsh
         run: |
+          $v = "${{ github.ref_name }}".TrimStart('v')
           dotnet publish src/cli/Mvf.Cli/Mvf.Cli.csproj -c Release -r ${{ matrix.rid }} `
             --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
-            -o cli-out --nologo
+            -p:Version=$v -o cli-out --nologo
           $ext = if ($IsWindows) { ".exe" } else { "" }
           Copy-Item "cli-out/Mvf.Cli$ext" "mvf-cli-${{ matrix.label }}$ext"
       - uses: actions/upload-artifact@v4
