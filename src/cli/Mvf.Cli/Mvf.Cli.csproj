@@ -6,6 +6,20 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <!-- Publish size: safe knobs only (no trimming/AOT, so reflection-based config binding
+       and dynamic integration-module loading keep working). Compression shrinks the bundled
+       assemblies in single-file publish; the feature switches drop runtime features the CLI
+       never uses. StackTraceSupport is intentionally left on for diagnostics. -->
+  <PropertyGroup>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebuggerSupport>false</DebuggerSupport>
+    <EventSourceSupport>false</EventSourceSupport>
+    <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
+    <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
     <PackageReference Include="Spectre.Console" Version="0.57.2" />
@@ -19,7 +33,4 @@
     <ProjectReference Include="..\..\transports\Mvf.Transport.SharedMemory\Mvf.Transport.SharedMemory.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
 </Project>

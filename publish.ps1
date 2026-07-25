@@ -73,7 +73,7 @@ if (-not $NoClean -and (Test-Path $out)) {
         throw "Refusing to clean '$resolved': that is the repository root. Pass a dedicated -Output directory."
     }
 
-    Write-Host "[0/4] Cleaning $resolved" -ForegroundColor Yellow
+    Write-Host "[0/3] Cleaning $resolved" -ForegroundColor Yellow
     # Clear the contents rather than the directory itself: on Windows the directory cannot be
     # removed while any shell has it as its working directory, but its contents still can.
     Remove-Item -Path (Join-Path $resolved "*") -Recurse -Force
@@ -82,18 +82,19 @@ if (-not $NoClean -and (Test-Path $out)) {
 
 # ── 1. CLI ────────────────────────────────────────────────────────────────────
 # The CLI is the only component that carries the .NET runtime (self-contained / single-file).
-Write-Host "[1/4] CLI" -ForegroundColor Yellow
+Write-Host "[1/3] CLI" -ForegroundColor Yellow
 Invoke-Publish "src/cli/Mvf.Cli/Mvf.Cli.csproj" $out ($SelfContained -or $SingleFile) $SingleFile
 
 # ── 2. Integration modules ────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "[2/4] Integration modules" -ForegroundColor Yellow
+Write-Host "[2/3] Integration modules" -ForegroundColor Yellow
 
 $integrations = @(
     @{ Project = "modules/MachineVisionFabric.Integrations.CognexCamera/MachineVisionFabric.Integrations.CognexCamera.csproj";     Id = "mvf.realworld-cognex-camera" },
     @{ Project = "modules/MachineVisionFabric.Integrations.DarkFrameFilter/MachineVisionFabric.Integrations.DarkFrameFilter.csproj"; Id = "mvf.realworld-dark-frame-filter" },
     @{ Project = "modules/MachineVisionFabric.Integrations.BlackScreenCheck/MachineVisionFabric.Integrations.BlackScreenCheck.csproj"; Id = "mvf.black-screen-check" },
     @{ Project = "modules/MachineVisionFabric.Integrations.DatasetWriter/MachineVisionFabric.Integrations.DatasetWriter.csproj";       Id = "mvf.dataset-writer" },
+    @{ Project = "modules/MachineVisionFabric.Integrations.FolderSource/MachineVisionFabric.Integrations.FolderSource.csproj";         Id = "mvf.folder-source" },
     @{ Project = "modules/dotnet-brightness-gate/Mvf.Example.BrightnessGate.csproj";                                                  Id = "mvf.example-brightness-gate" }
 )
 
@@ -106,7 +107,7 @@ foreach ($m in $integrations) {
 
 # ── 3. Packages ───────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "[3/4] Packages" -ForegroundColor Yellow
+Write-Host "[3/3] Packages" -ForegroundColor Yellow
 $packagesDest = Join-Path $out "packages"
 New-Item -ItemType Directory -Force -Path $packagesDest | Out-Null
 
@@ -118,19 +119,8 @@ if (Test-Path $packagesSource) {
     Copy-Item -Path (Join-Path $packagesSource "*") -Destination $packagesDest -Recurse -Force
 }
 
-# ── 4. Patch appsettings.json for published layout ───────────────────────────
-Write-Host ""
-Write-Host "[4/4] Patching appsettings.json for published layout" -ForegroundColor Yellow
-$appSettings = Join-Path $out "appsettings.json"
-if (Test-Path $appSettings) {
-    $json = Get-Content $appSettings -Raw | ConvertFrom-Json
-    $json.MachineVisionFabric.IntegrationsRoot = "integrations"
-    $json.MachineVisionFabric.DatasetCapture.PackageRoot = "packages/inspection-demo"
-    $json.MachineVisionFabric.DatasetCapture.DatasetRoot = "datasets"
-    $json | ConvertTo-Json -Depth 10 | Set-Content $appSettings
-    Write-Host "  → IntegrationsRoot = integrations" -ForegroundColor Cyan
-    Write-Host "  → PackageRoot      = packages/inspection-demo" -ForegroundColor Cyan
-}
+# The CLI ships no config file: it carries code defaults and auto-detects the integrations/
+# folder next to the executable, so the published output is fully self-contained.
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 Write-Host ""

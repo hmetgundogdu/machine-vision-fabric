@@ -165,8 +165,9 @@ Task ListModulesAsync(CliInvocation invocation)
 {
     using var host = BuildHost();
     var options = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MachineVisionFabricRuntimeOptions>>().Value;
-    var integrationsRoot = ResolveWorkingPath(
-        invocation.Options.TryGetValue("root", out var root) ? root : options.IntegrationsRoot);
+    var integrationsRoot = ResolveIntegrationsRoot(
+        invocation.Options.TryGetValue("root", out var root) ? root : options.IntegrationsRoot,
+        wasExplicit: invocation.Options.ContainsKey("root"));
     var loader = host.Services.GetRequiredService<IIntegrationModuleLoader>();
 
     foreach (var module in loader.LoadModules(integrationsRoot).OrderBy(module => module.Describe().ModuleId, StringComparer.OrdinalIgnoreCase))
@@ -237,8 +238,9 @@ async Task ValidatePipelineAsync(CliInvocation invocation)
 
     using var host = BuildHost();
     var runtimeOptions = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MachineVisionFabricRuntimeOptions>>().Value;
-    var integrationsRoot = ResolveWorkingPath(
-        invocation.Options.TryGetValue("integrations-root", out var intRoot) ? intRoot : runtimeOptions.IntegrationsRoot);
+    var integrationsRoot = ResolveIntegrationsRoot(
+        invocation.Options.TryGetValue("integrations-root", out var intRoot) ? intRoot : runtimeOptions.IntegrationsRoot,
+        wasExplicit: invocation.Options.ContainsKey("integrations-root"));
 
     var definition = await LoadPipelineAsync(pipelinePath, integrationsRoot, host);
     if (definition is null)
@@ -269,8 +271,9 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
 {
     using var host = BuildHost();
     var runtimeOptions = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MachineVisionFabricRuntimeOptions>>().Value;
-    var integrationsRoot = ResolveWorkingPath(
-        invocation.Options.TryGetValue("integrations-root", out var intRoot) ? intRoot : runtimeOptions.IntegrationsRoot);
+    var integrationsRoot = ResolveIntegrationsRoot(
+        invocation.Options.TryGetValue("integrations-root", out var intRoot) ? intRoot : runtimeOptions.IntegrationsRoot,
+        wasExplicit: invocation.Options.ContainsKey("integrations-root"));
 
     var packageRoot = invocation.Options.TryGetValue("package", out var pkg)
         ? ResolveWorkingPath(pkg)
@@ -549,10 +552,11 @@ IHost BuildHost(IReadOnlyDictionary<string, string?>? overrides = null)
 {
     var builder = Host.CreateApplicationBuilder([]);
     builder.Configuration.Sources.Clear();
-    builder.Configuration
-        .SetBasePath(AppContext.BaseDirectory)
-        .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
-        .AddEnvironmentVariables();
+    // The CLI ships no config file: every setting has a code default
+    // (MachineVisionFabricRuntimeOptions / DatasetCaptureOptions) and the integrations root is
+    // auto-detected, so the CLI is fully self-contained. Environment variables remain as the
+    // override path (e.g. MachineVisionFabric__IntegrationsRoot=...).
+    builder.Configuration.AddEnvironmentVariables();
 
     if (overrides is not null && overrides.Count > 0)
     {
@@ -593,6 +597,23 @@ string ResolveWorkingPath(string path)
     return Path.IsPathRooted(path)
         ? Path.GetFullPath(path)
         : Path.GetFullPath(Path.Combine(repositoryRoot, path));
+}
+
+// Resolve where integration modules are discovered from. An explicit --integrations-root /
+// --root is honoured verbatim. Otherwise the configured/default value ("modules") is used
+// when it exists; if it doesn't but a published layout ships them under integrations/ next
+// to the executable, fall back to that. This lets a published CLI find its modules with no
+// config file at all.
+string ResolveIntegrationsRoot(string rawPath, bool wasExplicit)
+{
+    var resolved = ResolveWorkingPath(rawPath);
+    if (wasExplicit || Directory.Exists(resolved))
+    {
+        return resolved;
+    }
+
+    var published = Path.Combine(AppContext.BaseDirectory, "integrations");
+    return Directory.Exists(published) ? published : resolved;
 }
 
 string ResolveRepositoryRoot()
