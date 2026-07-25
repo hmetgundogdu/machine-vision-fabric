@@ -45,7 +45,7 @@ src/
   cli/         Mvf.Cli
 protocol/      language-agnostic wire contract (.proto / schema): control msgs + frame descriptor
 modules/       cognex, dark-frame-filter, black-screen-check, dataset-writer (from real-world-projects/integrations)
-packages/      cognex-dark-capture
+packages/      inspection-demo, loop-demo, value-demo, multilang-demo, py-brightness-demo, py-invert-demo
 docs/
 ```
 Most of this is a **move/regroup**, not new code. New: `protocol/`, `transports/SharedMemory`,
@@ -69,8 +69,8 @@ Authors write only what is not derivable; a `PipelineExpander` fills in the rich
 Ports + category come from the module's `kind` via a metadata-only `ModuleCatalog` (reads
 `module.json`, **no DLL load**): source→source, processor→compute, classifier→classify,
 gate→control, sink→output. Rich nodes/edges still pass through unchanged (mixed files work).
-Wired into CLI `validate-pipeline` + `execute-graph`; `packages/cognex-dark-capture/pipeline.json`
-is now lean. Tests 39/39.
+Wired into CLI `validate-pipeline` + `execute-graph`; `packages/inspection-demo/pipeline.json`
+is lean. Tests 39/39.
 
 ---
 

@@ -2,7 +2,7 @@ namespace Mvf.Graph.Dataset;
 
 public sealed class DatasetCaptureOptions
 {
-    public string PackageRoot { get; set; } = "packages/cognex-dark-capture";
+    public string PackageRoot { get; set; } = "packages/inspection-demo";
 
     public string DatasetRoot { get; set; } = "artifacts/datasets";
 

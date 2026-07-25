@@ -93,7 +93,8 @@ $integrations = @(
     @{ Project = "modules/MachineVisionFabric.Integrations.CognexCamera/MachineVisionFabric.Integrations.CognexCamera.csproj";     Id = "mvf.realworld-cognex-camera" },
     @{ Project = "modules/MachineVisionFabric.Integrations.DarkFrameFilter/MachineVisionFabric.Integrations.DarkFrameFilter.csproj"; Id = "mvf.realworld-dark-frame-filter" },
     @{ Project = "modules/MachineVisionFabric.Integrations.BlackScreenCheck/MachineVisionFabric.Integrations.BlackScreenCheck.csproj"; Id = "mvf.black-screen-check" },
-    @{ Project = "modules/MachineVisionFabric.Integrations.DatasetWriter/MachineVisionFabric.Integrations.DatasetWriter.csproj";       Id = "mvf.dataset-writer" }
+    @{ Project = "modules/MachineVisionFabric.Integrations.DatasetWriter/MachineVisionFabric.Integrations.DatasetWriter.csproj";       Id = "mvf.dataset-writer" },
+    @{ Project = "modules/dotnet-brightness-gate/Mvf.Example.BrightnessGate.csproj";                                                  Id = "mvf.example-brightness-gate" }
 )
 
 # Integration modules are always framework-dependent: the CLI host loads them into its own
@@ -124,11 +125,11 @@ $appSettings = Join-Path $out "appsettings.json"
 if (Test-Path $appSettings) {
     $json = Get-Content $appSettings -Raw | ConvertFrom-Json
     $json.MachineVisionFabric.IntegrationsRoot = "integrations"
-    $json.MachineVisionFabric.DatasetCapture.PackageRoot = "packages/cognex-dark-capture"
+    $json.MachineVisionFabric.DatasetCapture.PackageRoot = "packages/inspection-demo"
     $json.MachineVisionFabric.DatasetCapture.DatasetRoot = "datasets"
     $json | ConvertTo-Json -Depth 10 | Set-Content $appSettings
     Write-Host "  → IntegrationsRoot = integrations" -ForegroundColor Cyan
-    Write-Host "  → PackageRoot      = packages/cognex-dark-capture" -ForegroundColor Cyan
+    Write-Host "  → PackageRoot      = packages/inspection-demo" -ForegroundColor Cyan
 }
 
 # ── Done ──────────────────────────────────────────────────────────────────────
@@ -138,6 +139,6 @@ Write-Host "  Done!  $out" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Usage:" -ForegroundColor Gray
 Write-Host "  cd $out" -ForegroundColor White
-Write-Host "  ./MachineVisionFabric.Cli execute-graph --package packages/cognex-dark-capture" -ForegroundColor White
+Write-Host "  ./Mvf.Cli execute-graph --package packages/inspection-demo" -ForegroundColor White
 Write-Host "═══════════════════════════════════════════════" -ForegroundColor DarkCyan
 Write-Host ""
