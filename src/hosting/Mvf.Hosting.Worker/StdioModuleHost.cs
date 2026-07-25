@@ -72,8 +72,15 @@ public sealed class StdioModuleHost(IDataPlane dataPlane) : IOutOfProcessModuleH
                 WorkingDirectory: activation.WorkingDirectory,
                 ArenaPath: dataPlane.BackingPath),
 
+            // A compiled module (e.g. built with the C++ SDK): the entry *is* the executable.
+            "native" => new WorkerLaunchInfo(
+                Command: activation.EntryPath,
+                Args: [],
+                WorkingDirectory: activation.WorkingDirectory,
+                ArenaPath: dataPlane.BackingPath),
+
             _ => throw new NotSupportedException(
-                $"Runtime '{activation.Runtime}' is not supported by the stdio worker host. Supported: python, node.")
+                $"Runtime '{activation.Runtime}' is not supported by the stdio worker host. Supported: python, node, native.")
         };
 
     private static string PythonCommand() =>

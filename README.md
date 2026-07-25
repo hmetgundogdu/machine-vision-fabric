@@ -4,11 +4,13 @@
 [![Release](https://img.shields.io/github/v/release/hmetgundogdu/machine-vision-fabric?sort=semver)](https://github.com/hmetgundogdu/machine-vision-fabric/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**MachineVisionFabric (MVF)** is an open-source, **edge-first** vision pipeline platform.
-It runs a strict, schema-validated **typed graph** of nodes — cameras, transforms, AI
-inference, PLC/control, storage — directly on panel PCs, industrial PCs, and NUC-class edge
-devices. It keeps running without a central server; a central system is optional, and only
-for observability.
+**MachineVisionFabric (MVF)** is an open-source, high-performance **polyglot pipeline engine**.
+You compose a strict, typed graph of processing nodes — and write those nodes in **.NET, Python,
+or C++**, mixing languages freely in the same pipeline. Typed payloads — images, tensors, raw
+blobs, or any data/signal — move between nodes **zero-copy through a shared-memory arena**: no
+serialization, no base64, so a Python node and a C++ node hand off a tensor at memory speed. Data
+flow and control flow are separate, typed edges. It runs self-contained at the edge; a central
+server is optional and only ever observes.
 
 <p align="center">
   <img src="docs/assets/cli-demo.svg" alt="mvf CLI live graph dashboard running inspection-demo" width="860">
@@ -21,16 +23,19 @@ category, show their live config and per-node stats, and the executing node is h
 
 ## Why MVF
 
-- **Strict typed graph** — every edge is typed and schema-validated at runtime, not just in a UI.
+- **Polyglot, one protocol** — write a node in **.NET, Python, or C++** and mix them in one graph;
+  they all speak the same stdio control + shared-memory data contract.
+- **High performance** — typed payloads live in a shared-memory arena and are read/written **in
+  place (zero-copy, no base64)**; a pipelined, parallel executor keeps stages busy and joins
+  multiple inputs.
+- **Strict typed graph** — every edge is typed and schema-validated at runtime, not just in a UI:
   `NODE(typed output) → NODE(typed input)`.
-- **Data flow ≠ control flow** — frame/tensor transfer (**data edges**) and branch/gate
-  decisions (**control edges**) are separate first-class link types, never collapsed.
-- **Edge-first execution** — the edge runtime owns camera/stream access, PLC integration,
-  inference, execution, and local persistence. The central system only *observes*.
-- **Polyglot modules, one protocol** — modules run out-of-process over a small stdio control
-  plane + a zero-copy **shared-memory data plane** (typed payloads, no base64). Author them in
-  **.NET, Python, or C++** interchangeably.
-- **Simulator-first** — testable without vendor cameras; folder/loop/scenario simulators ship in-box.
+- **Data flow ≠ control flow** — payload transfer (**data edges**) and decisions/signals
+  (**control edges**) are separate first-class link types, never collapsed.
+- **Any payload** — images, tensors (dtype + shape), raw blobs, or JSON; the descriptor is
+  self-describing, so a node always knows the type it receives.
+- **Runs anywhere, nothing to install to try** — self-contained at the edge, no central server;
+  simulator sources ship in-box so the demos run with no hardware attached.
 
 See [`docs/architecture-foundation.md`](docs/architecture-foundation.md) and
 [`docs/roadmap.md`](docs/roadmap.md) for the full design.
@@ -110,29 +115,41 @@ dotnet run --project src/cli/Mvf.Cli -- execute-graph --package packages/inspect
 | `multilang-demo` | .NET + Python nodes in one graph |
 | `py-brightness-demo`, `py-invert-demo` | single Python classifier / transformer |
 
-## SDKs — author your own modules
+## Write a module (Python · .NET · C++)
 
-All three SDKs speak the **same** protocol (stdio control plane + shared-memory data plane,
-see [`protocol/README.md`](protocol/README.md)), so a module is interchangeable across languages.
+A node is a small program that receives a typed payload and returns a result — a **processor**
+(new payload out), a **classifier** (a label/signal for `if`/`switch` routing), a **source**, or a
+**sink**. All three SDKs speak the [same protocol](protocol/README.md), so the language is your
+choice and nodes interoperate in one graph. The steps below are the same shape in every language.
 
-**Python** — `pip install mvf-sdk`
+### 1 · Get the SDK
+
+| Language | Install | `runtime` tag |
+|---|---|---|
+| Python | `pip install mvf-sdk` | `python` |
+| .NET | NuGet `MachineVisionFabric.Sdk` | `dotnet` (in-process) |
+| C++ | link `libmvf_sdk` — [`src/sdk/cpp`](src/sdk/cpp) | `native` |
+
+### 2 · Write the node
+
+A processor gets a zero-copy `payload` (bytes, or an image/tensor) and returns a new one:
 
 ```python
+# Python — pip install mvf-sdk
 from mvf_sdk import run_processor, blob
 
 def transform(payload, meta):
-    return blob(bytes(255 - b for b in payload.memory))   # invert every byte
+    return blob(bytes(255 - b for b in payload.memory))   # any transform over the payload
 
-run_processor("py.invert-transformer", transform)
+run_processor("py.invert", transform)
 ```
 
-**C++** — link `libmvf_sdk` (see [`src/sdk/cpp/README.md`](src/sdk/cpp/README.md))
-
 ```cpp
+// C++ — link libmvf_sdk
 #include "mvf/sdk.hpp"
 using namespace mvf;
 int main() {
-    return run_processor("cpp.invert-transformer",
+    return run_processor("cpp.invert",
         [](const Payload& in, const json&) -> std::optional<Output> {
             std::string out(in.size, '\0');
             for (size_t i = 0; i < in.size; ++i) out[i] = static_cast<char>(255 - in.data[i]);
@@ -141,25 +158,57 @@ int main() {
 }
 ```
 
-**.NET** — reference `MachineVisionFabric.Sdk` and derive from a module base
-(`FrameProcessorModuleBase`, `FrameClassifierModuleBase`, `FrameSourceModuleBase`,
-`FrameSinkModuleBase`). A processor returns an accept/reject decision:
-
 ```csharp
-public sealed class BrightnessGateModule : FrameProcessorModuleBase<BrightnessGateOptions>
+// .NET — reference MachineVisionFabric.Sdk (bases: FrameSource/Processor/Classifier/SinkModuleBase)
+public sealed class BrightnessGate : FrameProcessorModuleBase<Options>
 {
     protected override IntegrationModuleDescriptor BuildDescriptor() =>
-        IntegrationModuleDescriptorBuilder.CreateProcessor<BrightnessGateOptions>(
-            "mvf.example-brightness-gate", "Brightness Gate", "1.0.0", "brightness-gate",
-            "Accepts a frame only when its mean byte value meets a threshold.");
+        IntegrationModuleDescriptorBuilder.CreateProcessor<Options>(
+            "net.brightness-gate", "Brightness Gate", "1.0.0", "brightness-gate", "…");
 
-    protected override IFrameProcessor CreateProcessor(BrightnessGateOptions o) => new Gate(o);
-    // ...IFrameProcessor.EvaluateAsync returns a FrameProcessorDecision (accept/reject)
+    protected override IFrameProcessor CreateProcessor(Options o) => new Gate(o);
 }
 ```
 
-Full runnable example: [`modules/dotnet-brightness-gate/`](modules/dotnet-brightness-gate/) ·
-authoring guide: [`docs/sdk-quickstart.md`](docs/sdk-quickstart.md).
+### 3 · Declare it — `module.json`
+
+```json
+{ "id": "cpp.invert", "kind": "processor", "runtime": "native", "entry": "mvf_invert" }
+```
+
+`runtime` picks the launcher and what `entry` points at: `python` → the `.py`, `native` → the
+compiled binary, `dotnet` → the `.dll`.
+
+### 4 · Wire it into a pipeline — `pipeline.json`
+
+Reference the module by `id` on a node and connect typed ports with edges:
+
+```json
+{
+  "name": "my-pipeline",
+  "nodes": [
+    { "id": "cam",    "module": "mvf.folder-source",  "config": { "sourceFolder": "frames" } },
+    { "id": "invert", "module": "cpp.invert" },
+    { "id": "save",   "module": "mvf.dataset-writer",  "config": { "outputRoot": "out" } }
+  ],
+  "edges": [
+    { "from": "cam.frame",    "to": "invert.frame" },
+    { "from": "invert.frame", "to": "save.frame" }
+  ]
+}
+```
+
+### 5 · Run it
+
+```bash
+mvf execute-graph --package my-package
+```
+
+The engine discovers the module, launches it (in-process for `dotnet`, as a supervised worker for
+`python`/`native`), streams frames through the shared-memory arena, and shows every node live in the
+dashboard. Full runnable examples:
+[Python](modules/py-invert-transformer) · [.NET](modules/dotnet-brightness-gate) ·
+[C++](src/sdk/cpp/examples) · deeper guide: [`docs/sdk-quickstart.md`](docs/sdk-quickstart.md).
 
 ## Releases & CI
 
