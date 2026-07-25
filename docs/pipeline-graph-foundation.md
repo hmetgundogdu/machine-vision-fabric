@@ -125,9 +125,9 @@ These should stay external because they carry:
 
 ## First Contract Layer
 
-The repository now contains the first graph contracts under:
+The repository contains the graph contracts under:
 
-- `MachineVisionFabric.Contracts.Pipelines`
+- `Mvf.Graph.Pipelines` (in `src/core/Mvf.Graph`)
 
 These contracts define:
 

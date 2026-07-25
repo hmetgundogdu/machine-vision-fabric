@@ -40,8 +40,7 @@ Doküman başlangıç noktaları:
 
 - [README.md](README.md)
 - [architecture-foundation.md](docs/architecture-foundation.md)
-- [technology-recommendation.md](docs/technology-recommendation.md)
-- [open-questions.md](docs/open-questions.md)
+- [roadmap.md](docs/roadmap.md)
 
 Kod iskeleti oluştuğunda bu dosyayı solution ve proje bazında genişlet.
 

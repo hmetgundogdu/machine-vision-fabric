@@ -1,85 +1,58 @@
-# MachineVisionFabric Integration SDK Strategy
+# Integration SDK Strategy
 
 ## Goal
 
-External developers should be able to build integrations in `.NET` against a stable public contract surface without editing platform runtime code.
+External developers build integration modules against a stable public contract surface —
+in **.NET, Python, or C++** — without editing platform runtime code.
 
-## SDK Surface
+## SDK surfaces
 
-The public SDK entry point today is:
+One language-agnostic module protocol (stdio control plane + shared-memory data plane, see
+[`protocol/README.md`](../protocol/README.md)) is exposed through three SDKs:
 
-- `MachineVisionFabric.Sdk`
+| Language | SDK | Package / entry |
+|---|---|---|
+| .NET | `Mvf.Sdk` (`src/sdk/dotnet`) | NuGet `MachineVisionFabric.Sdk` |
+| Python | `mvf_sdk` (`src/sdk/python`) | wheel `mvf-sdk` |
+| C++ | `mvf/sdk.hpp` (`src/sdk/cpp`) | `libmvf_sdk.{so,dylib}` / `mvf_sdk.dll` |
 
-That SDK wraps and exposes the lower-level platform surface from:
+The .NET SDK wraps the lower-level contracts in `Mvf.Abstractions` and `Mvf.Graph`, which
+define: integration-module contracts, frame source / processor / classifier / sink /
+gate contracts, package contracts, and dataset-capture contracts. None of the SDKs define
+engine-owned control-flow primitives (`if`, `switch`, `fork`, `loop`) — those are part of
+graph execution semantics and stay in the engine.
 
-- `MachineVisionFabric.Contracts`
-- `MachineVisionFabric.Core`
+## Runtime model
 
-That surface defines:
+The runtime:
 
-- integration module contracts
-- frame source contracts
-- product gate contracts
-- package/profile contracts
-- dataset capture contracts
+- loads .NET integration assemblies in isolation (`AssemblyLoadContext`);
+- launches Python/C++ modules as out-of-process workers over the module protocol;
+- keeps vendor dependencies out of the platform core;
+- validates configuration through platform-owned JSON schema (exported via
+  `System.Text.Json`, see `tools/Mvf.SchemaExporter`);
+- stays deployable without any specific camera-vendor dependency.
 
-It does not define engine-owned control-flow primitives.
-Those stay inside the platform because they are part of graph execution semantics.
+## Typed metadata rule
 
-It now also carries typed inspectable module metadata through capability descriptors and typed port metadata.
+Modules must be fully typed and inspectable — a hard requirement so future studio tooling
+can inspect a module catalog, show valid connections, reuse a module across pipelines, and
+validate composition before execution. Every module exposes:
 
-## Runtime Model
+- a typed config contract,
+- a typed capability kind,
+- typed input port metadata,
+- typed output port metadata.
 
-The platform runtime should:
+## Boundary rule
 
-- load integration assemblies dynamically
-- keep vendor dependencies outside the platform core
-- validate configuration through platform-owned schema
-- remain deployable without any specific camera vendor dependency
+- Platform assemblies live under `src/`.
+- Example modules live under `modules/` (`py-invert-transformer`, `dotnet-brightness-gate`)
+  and `src/sdk/cpp/examples/`.
+- A real vendor/customer adapter is a separate module that implements the contracts and is
+  loaded by the runtime — never a patch to the core or a vendor reference inside `src/`.
 
-## Repository Rule
+Practical split: **embedded primitive = engine feature**, **integration module = SDK
+extension**.
 
-- platform assemblies live under `src/`
-- sample integrations live under `examples/integrations/`
-- sample source simulators live under `examples/sources/`
-- real customer adapters should follow the same boundary under `real-world-projects/` or another separate solution
-
-## Current Technical Direction
-
-Recommended implementation style:
-
-1. contract-first extension model
-2. isolated module loading with `AssemblyLoadContext`
-3. schema export from `System.Text.Json`
-4. runtime composition at the host or CLI edge
-5. embedded primitive nodes for flow-control behavior such as `if`, `switch`, `fork`, and `loop`
-
-## Practical Consequence
-
-If someone wants to integrate a camera SDK, they should create a separate `.NET` module that implements the platform contracts and is loaded by the runtime.
-
-They should not patch `MachineVisionFabric.Runtime` or add vendor references into `src/`.
-The default repository layout for this project is to place those modules under `real-world-projects/` with their own solution file.
-
-Practical split:
-
-- `embedded primitive` = engine feature
-- `integration module` = SDK extension
-
-## Typed Metadata Rule
-
-External module authors should not publish loose or uninspectable modules.
-
-They must expose:
-
-- typed config contract
-- typed capability kind
-- typed input port metadata
-- typed output port metadata
-
-This is required so that future frontend tooling can:
-
-- inspect a module catalog
-- show valid connections
-- reuse the same module across many pipelines
-- validate graph composition before execution
+See [sdk-quickstart.md](sdk-quickstart.md) for how to author one.

@@ -1,6 +1,6 @@
 # MachineVisionFabric — Roadmap & Architecture Decisions
 
-> Canonical, living plan. Supersedes `dataset-first-mvp-roadmap.md` (legacy direction).
+> Canonical, living plan.
 > Product thesis: an open-source, .NET-native, **strictly-typed graph pipeline engine**
 > whose value is **easy, rule-governed integration of heterogeneous nodes** ("write a
 > node once, reuse it everywhere") — headless-first, with polyglot modules and a
@@ -44,7 +44,7 @@ src/
   sdk/         dotnet/Mvf.Sdk, python/mvf_sdk (M1)
   cli/         Mvf.Cli
 protocol/      language-agnostic wire contract (.proto / schema): control msgs + frame descriptor
-modules/       cognex, dark-frame-filter, black-screen-check, dataset-writer (from real-world-projects/integrations)
+modules/       cognex, dark-frame-filter, black-screen-check, dataset-writer, dotnet-brightness-gate (example)
 packages/      inspection-demo, loop-demo, value-demo, multilang-demo, py-brightness-demo, py-invert-demo
 docs/
 ```
