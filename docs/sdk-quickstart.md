@@ -1,81 +1,82 @@
-# MachineVisionFabric SDK Quickstart
+# SDK Quickstart
 
-## Purpose
+How to author an MVF integration module. All three SDKs speak the same protocol (stdio
+control plane + shared-memory data plane, see [`protocol/README.md`](../protocol/README.md)),
+so a module is interchangeable across languages. See
+[integration-sdk-strategy.md](integration-sdk-strategy.md) for the why.
 
-`MachineVisionFabric.Sdk` is the single integration entry point for external module authors.
+## Typed authoring rule
 
-If you want to add a real camera vendor such as Cognex later, start from this SDK layer instead of coding directly against the runtime.
+Modules stay **fully typed**: typed options/config, typed capability kind, typed input and
+output ports, and metadata the platform can inspect. This is a hard requirement for future
+graph-authoring UX. The SDK is for **work nodes** — not for engine-owned flow-control
+primitives (`if`, `switch`, `fork`, `loop`), which live in the engine.
 
-This SDK is for external work nodes.
-It is not the place for engine-owned control-flow primitives such as `if`, `switch`, `fork`, or `loop`.
+## Python — `pip install mvf-sdk`
 
-## Main SDK Types
+A processor returns a new typed payload (or `None` to drop):
 
-- `FrameSourceModuleBase<TOptions>`
-- `ProductPresenceGateModuleBase<TOptions>`
-- `BackgroundFrameSourceSession`
-- `FrameEnvelopeFactory`
-- `PackagePathResolver`
-- `IntegrationModuleDescriptorBuilder`
+```python
+from mvf_sdk import run_processor, blob
 
-## Typed Authoring Rule
+def transform(payload, meta):
+    return blob(bytes(255 - b for b in payload.memory))   # invert every byte
 
-SDK-based module authors are expected to stay fully typed.
+run_processor("py.invert-transformer", transform)
+```
 
-That means:
+Classifiers use `run_classifier(id, fn)` returning `(label, measurement, unit, details)`.
+Full example: [`modules/py-invert-transformer/`](../modules/py-invert-transformer).
 
-- options/config are typed
-- capability kind is typed
-- input/output ports are typed
-- module metadata remains inspectable by the platform
+## C++ — link `libmvf_sdk`
 
-This is a hard architectural requirement for future graph authoring UX.
+```cpp
+#include "mvf/sdk.hpp"
+using namespace mvf;
+int main() {
+    return run_processor("cpp.invert-transformer",
+        [](const Payload& in, const json&) -> std::optional<Output> {
+            std::string out(in.size, '\0');
+            for (size_t i = 0; i < in.size; ++i) out[i] = static_cast<char>(255 - in.data[i]);
+            return blob(std::move(out));
+        });
+}
+```
 
-## Recommended Starting Template
+Full example + build: [`src/sdk/cpp/`](../src/sdk/cpp).
 
-Use this example as the base for a real camera source module:
+## .NET — reference `MachineVisionFabric.Sdk`
 
-- [ResidentCameraStubIntegrationModule.cs](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\examples\integrations\MachineVisionFabric.Integrations.ResidentCameraStub\ResidentCameraStubIntegrationModule.cs)
-- [ResidentCameraStubSession.cs](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\examples\integrations\MachineVisionFabric.Integrations.ResidentCameraStub\ResidentCameraStubSession.cs)
-- [ResidentCameraStubOptions.cs](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\examples\integrations\MachineVisionFabric.Integrations.ResidentCameraStub\ResidentCameraStubOptions.cs)
+In-process .NET modules derive from a base class and describe their typed ports:
 
-If you want to start a project-local adapter under the same repository boundary, use:
+| Base class | Node kind |
+|---|---|
+| `FrameSourceModuleBase<TOptions>` | camera / stream / folder source |
+| `FrameProcessorModuleBase<TOptions>` | processor / filter |
+| `FrameClassifierModuleBase<TOptions>` | classifier |
+| `FrameSinkModuleBase<TOptions>` | sink (dataset writer, PLC output) |
+| `ProductPresenceGateModuleBase<TOptions>` | control-flow gate |
 
-- [New-MvfRealWorldIntegration.ps1](C:\Users\c9018243a\Desktop\Projects\machine-vision-fabric\real-world-projects\tools\New-MvfRealWorldIntegration.ps1)
+```csharp
+public sealed class BrightnessGateModule : FrameProcessorModuleBase<BrightnessGateOptions>
+{
+    protected override IntegrationModuleDescriptor BuildDescriptor() =>
+        IntegrationModuleDescriptorBuilder.CreateProcessor<BrightnessGateOptions>(
+            "mvf.example-brightness-gate", "Brightness Gate", "1.0.0", "brightness-gate",
+            "Accepts a frame only when its mean byte value meets a threshold.");
 
-## Cognex Mapping
+    protected override IFrameProcessor CreateProcessor(BrightnessGateOptions o) => new Gate(o);
+    // IFrameProcessor.EvaluateAsync returns a FrameProcessorDecision (accept/reject)
+}
+```
 
-When you bring Cognex logic from another project, the mapping should be:
+Helpers: `IntegrationModuleDescriptorBuilder`, `FrameEnvelopeFactory`, `PackagePathResolver`,
+`BackgroundFrameSourceSession`. Full example:
+[`modules/dotnet-brightness-gate/`](../modules/dotnet-brightness-gate).
 
-1. keep the new adapter in its own project, for example `MachineVisionFabric.Integrations.CognexCamera`
-2. reference `MachineVisionFabric.Sdk`
-3. derive the module entry class from `FrameSourceModuleBase<TOptions>`
-4. derive the live session class from `BackgroundFrameSourceSession`
-5. open the Cognex camera inside the session producer
-6. convert each SDK frame callback or polled image into `FrameEnvelopeFactory.FromBytes(...)`
-7. publish each frame through `PublishAsync(...)`
+## Boundary rule
 
-## What You Replace
-
-Inside the resident stub example, these are the parts you replace with vendor SDK logic:
-
-- `ResolveFiles(...)`
-- `CreateEnvelopeAsync(...)`
-- `ProduceFramesAsync(...)`
-
-The platform-facing shape stays the same.
-
-## Minimal Runtime Contract
-
-Your real adapter only needs to satisfy this flow:
-
-`Vendor SDK -> BackgroundFrameSourceSession -> IFrameEnvelope -> DatasetCollector`
-
-The runtime does not need to know anything about the vendor-specific API.
-
-## Practical Rule
-
-If a file needs a vendor DLL, customer station assumptions, or camera-specific setup, it should not go into `src/`.
-It belongs in an external integration project built on top of `MachineVisionFabric.Sdk`.
-
-If a feature changes graph execution semantics rather than talking to a device or process, it belongs in the platform engine instead of the SDK.
+If a module needs a vendor DLL or station-specific assumptions, it is a separate integration
+module built on the SDK and loaded by the runtime — it does **not** go into `src/`. If a
+feature changes graph execution semantics rather than talking to a device, it belongs in the
+engine, not the SDK.

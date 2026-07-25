@@ -1,717 +1,163 @@
-# MachineVisionFabric Mimari Temeli
-
-## 1. Problem Tanımı
-
-Hedef sistem şunları aynı çatı altında çözmeli:
-
-- Farklı kaynaklardan görüntü veya frame akışı almak
-- Bu akışlar için konfigürasyon, tetikleme ve iş kuralları tanımlamak
-- Diyagram tabanlı pipeline kurmak
-- Python, exe, AI model ve yerel işlem node'larını aynı graph içinde çalıştırmak
-- Hem ham stream'i hem de işlenmiş çıktıları başka sistemlere ağ üzerinden sunmak
-
-Bu nedenle ürün tek bir "kamera uygulaması" değil, bir `vision integration and execution platform` olarak tasarlanmalı.
-
-## 1.1 Dağıtım Varsayımı
-
-Bu proje için yeni netleşen operasyonel varsayım:
-
-- sistem şirket içi ağlarda çalışacak
-- hedef cihazlar panel PC, endüstriyel PC ve Intel NUC sınıfı edge makineler
-- ilk faz `Windows-first`
-- bazı kurulumlar internete çıkmadan veya çok sınırlı erişimle çalışabilecek
-- düşük bakım gerektiren yerel servis modeli tercih edilmeli
-
-Bu bilgi mimaride doğrudan etkili. Tasarım `cloud-first` değil, `edge-first and LAN-native` olmalı.
-
-## 2. Önerilen Üst Mimari
-
-### 2.1 Katmanlar
-
-1. `Control Plane`
-   Kullanıcıların pipeline tanımladığı, config yönettiği, node eklediği ve tetikleme kurallarını düzenlediği katman.
-2. `Execution Plane`
-   Aktif graph'ları çalıştıran runtime.
-3. `Media Plane`
-   Görüntü alma, dönüştürme, encode etme ve yayınlama katmanı.
-4. `Extension Plane`
-   Python, exe, yerel plugin ve vendor adapter eklenti modeli.
-
-## 2.2 Deployment Yaklaşımı
-
-Panel PC ve NUC hedefi nedeniyle başlangıç dağıtım modeli şu olmalı:
-
-- tek cihazda çalışan `Runtime + Api`
-- aynı cihazda veya tarayıcıdan erişilen `Studio`
-- ihtiyaç varsa aynı cihazda veya ayrı edge node'da `Media Gateway`
-
-Bu, ilk tasarımda tam mikroservis mimarisine gitmememiz gerektiği anlamına gelir. Öncelik:
-
-- tek makinede güvenilir çalışma
-- düşük RAM ve CPU baskısı
-- servis olarak otomatik ayağa kalkma
-- ağ kesintisinde kendi başına çalışmaya devam etme
-
-## 2.3 Merkezi Sistem İçin Hibrit Yaklaşım
-
-Merkezi bir yapı tamamen yanlış değil; ancak merkezi node'un pipeline çalıştıran zorunlu beyin olması saha için riskli.
-
-Daha doğru model:
-
-- `edge node` kamera, inference, trigger ve yerel pipeline yürütür
-- `central control` cihaz envanteri, log, audit, health, versiyon bilgisi ve isteğe bağlı yedekleme toplar
-- pipeline tanımı merkezden zorunlu push edilmez
-- pipeline dosyaları edge cihazlarda `import/export` ile taşınabilir
-- istenirse merkez sadece önerilen veya onaylı pipeline paketlerini yayınlar
-
-Bu modelde client tarafı sabit kalır; değişen şey yüklenen pipeline paketi ve adapter konfigürasyonudur.
-
-## 2.4 Neden Tam Merkezi Orchestrator Önermiyorum
-
-Şirket içi ağ ve panel PC/NUC dağıtımı için tam merkezi tasarımın riskleri:
-
-- ağ kesintisinde üretim hattı etkilenir
-- her kamera tetik ve inference kararı merkezden geçerse gecikme artar
-- saha devreye alma daha kırılgan olur
-- tek nokta arızası oluşur
-- vendor SDK ve donanım sürücüleri çoğu zaman zaten edge makinede olmak zorundadır
-
-Bu yüzden merkez, `runtime authority` değil `management authority` olmalı.
-
-## 2.5 Önerilen Hibrit Sınır
-
-Edge cihazda kalması gerekenler:
-
-- kamera bağlantısı
-- frame yakalama
-- trigger engine
-- graph execution
-- AI inference
-- yerel stream üretimi
-- kısa süreli buffer ve yerel persist
-- opsiyonel telemetry sinyal yayını
-
-Merkezde olması mantıklı olanlar:
-
-- cihaz kaydı ve envanter
-- sürüm ve paket kataloğu
-- log toplama
-- alarm ve olay görünürlüğü
-- health durumu
-- yedek konfigürasyon depolama
-- opsiyonel pipeline şablon kütüphanesi
-- opsiyonel canlı pipeline sinyal izleme
-
-Merkezde olmaması gerekenler, en azından MVP'de:
-
-- canlı frame path üzerinde zorunlu karar mekanizması
-- her node çalıştırmasını uzaktan yönetme
-- her tetik için merkezi onay
-
-## 2.6 Opsiyonel Pipeline Signal Streaming
-
-Merkez tarafı isterse edge node'un pipeline sinyallerini izleyebilmeli. Ancak bu izleme modeli şu kurallara bağlı olmalı:
-
-- yayın tamamen opsiyonel olmalı
-- varsayılan durumda kapalı gelmeli
-- edge runtime'ın hot path akışını bloklamamalı
-- merkez bağlı değilse veya yavaşsa edge çalışması etkilenmemeli
-
-İzlenebilecek sinyal türleri:
-
-- `pipeline.started`
-- `pipeline.stopped`
-- `node.started`
-- `node.completed`
-- `node.failed`
-- `trigger.fired`
-- `frame.received`
-- `inference.completed`
-- `stream.published`
-- `storage.saved`
-
-Bu sinyallerin amacı gözlemlemedir; çalıştırma otoritesi değildir.
-
-## 2.7 Performans Kuralı
-
-Signal streaming için temel kural:
-
-- inference veya frame işleme thread'i doğrudan ağa yazmamalı
-
-Doğru yaklaşım:
-
-- runtime olay üretir
-- olaylar lock-free veya bounded queue benzeri hafif bir telemetry buffer'a yazılır
-- ayrı bir background publisher bu olayları merkez isteyen abonelere iletir
-- buffer dolarsa sinyal düşebilir; pipeline çalışması düşmemeli
-
-Bu modelde öncelik sırası:
-
-1. pipeline execution
-2. local safety and persistence
-3. optional observability export
-
-Yani telemetry her zaman `best effort` olmalı, `mission critical` değil.
-
-## 3. Ana Bileşenler
-
-### 3.1 Source Adapters
-
-Her görüntü kaynağı ortak bir sözleşmeye uymalı:
-
-- `camera`
-- `rtsp`
-- `usb/uvc`
-- `mjpeg/http`
-- `file/replay`
-- `shared-memory`
-- `custom vendor sdk`
-
-Her adapter şu yetenekleri ilan etmeli:
-
-- discovery destekliyor mu
-- config anahtarları neler
-- trigger destekliyor mu
-- pull mü push mu çalışıyor
-- frame formatları neler
-- reconnect stratejisi nasıl
-
-Şu an için vendor entegrasyonları ürünün çekirdeğine gömülmüş sabit bileşenler olarak değil, sonradan eklenebilen örnek adapter paketleri olarak düşünülmeli. Yani ilk yapı:
-
-- çekirdek runtime vendor bağımsız
-- kamera ve PLC gibi saha entegrasyonları adapter/node örneği olarak eklenebilir
-- bu örnekler topluluk için referans teşkil eder
-
-### 3.2 Trigger Engine
-
-Trigger sistemi ayrı bir çekirdek olmalı. Sadece PLC veya kamera trigger'ı olarak düşünülmemeli.
-
-Önerilen model:
-
-- `Event`: `frame.received`, `timer.elapsed`, `plc.signal.changed`, `http.requested`, `node.completed`
-- `Condition`: config tabanlı filtre veya expression
-- `Action`: capture, node çalıştır, branch değiştir, stream başlat, alarm üret
-
-Bu sayede kullanıcı runtime sırasında yeni trigger kuralı ekleyebilir.
-
-### 3.3 Graph Runtime
-
-Pipeline lineer değil yönlü bir graph olmalı.
-
-Node tipleri:
-
-- `source`
-- `transform`
-- `ai-model`
-- `python-step`
-- `process-step`
-- `router`
-- `aggregator`
-- `stream-output`
-- `storage-output`
-- `event-output`
-
-Graph runtime ilk aşamada şu kurallarla başlamalı:
-
-- her edge veri tipi taşımalı
-- node input/output contract'ı şemalı olmalı
-- execution bounded queue mantığı ile yürümeli
-- her node için timeout, retry ve concurrency limiti olmalı
-
-### 3.4 Pipeline Soyutlaması İçin Önerilen Temel Model
-
-Pipeline yeterince esnek olmalı; ama "her şey her şeye bağlanabilir" seviyesinde gevşek olmamalı. Önerilen soyutlama:
-
-- `control-flow`
-- `data-flow`
-- `strict typed ports`
-
-Yani graph içinde iki farklı edge tipi olmalı:
-
-- `data edge`: frame, tensor, metadata, result gibi veri taşır
-- `control edge`: karar, geçiş, kapı açma, tetikleme sonucu gibi akış kontrolü taşır
-
-Ve her bağlantı tek yönlü, tip kontrollü olmalı:
-
-- `NODE(typed output) -> NODE(typed input)`
-- sadece uyumlu tipler birbirine bağlanabilmeli
-- bağlantı anında şema doğrulaması yapılmalı
-- runtime sırasında da tip doğrulaması korunmalı
-
-Bu ayrım özellikle PLC node'ları için kritik.
-
-Örnek:
-
-- `PLC Presence Node` istasyonda ürün var mı yok mu bilgisini üretir
-- bu node doğrudan görüntü işlemez
-- ama `next branch` kararını verir
-
-Bu yüzden pipeline'da sadece görüntü node'ları değil şu sınıflar olmalı:
-
-- `source node`
-- `control node`
-- `compute node`
-- `integration node`
-- `output node`
-
-### 3.4.1 Şema Disiplini
-
-Node sözleşmesi gevşek `key-value` geçişlerine dayanmamalı. Bunun yerine:
-
-- her input port'un tipi tanımlı olmalı
-- her output port'un tipi tanımlı olmalı
-- config ayrı bir şema olmalı
-- runtime parametresi ile data payload birbirine karışmamalı
-
-Örnek yaklaşım:
-
-- `Frame`
-- `DetectionList`
-- `BooleanGate`
-- `StationPresence`
-- `InferenceResult`
-- `StreamPacket`
-
-Bu yaklaşımın faydası:
-
-- diagram tarafında yanlış bağlantılar erken engellenir
-- node yazarları net contract ile çalışır
-- import/export paketleri daha güvenilir olur
-- gelecekte çoklu dil node desteği daha temiz kurulur
-
-### 3.5 PLC Node İçin Yapısal Karar
-
-S7-200 gibi PLC'ler ilk fazda "çekirdek runtime parçası" değil, örnek bir `control node adapter` olarak ele alınmalı.
-
-Bu node tipinin sorumluluğu:
-
-- PLC'ye bağlanmak
-- belirli register/bit okumak
-- ürün var/yok gibi istasyon durumunu çıkarmak
-- sonucu pipeline kontrol sinyali olarak yayınlamak
-
-Bu yapı sayesinde PLC sadece I/O sürücüsü olmaz; graph içindeki akış karar mekanizmasına dönüşür.
-
-Örnek kullanım:
-
-- `PLC Presence Node -> if product present -> Trigger Capture Node -> AI Model Node`
-- `PLC Presence Node -> if no product -> idle branch`
-
-Bu yaklaşım pipeline esnekliğini artırır ve gelecekte aynı mantığın farklı sensör node'ları ile tekrar kullanılmasını sağlar.
-
-### 3.6 Node Contract Önerisi
-
-Her node en az şu niteliklere sahip olmalı:
-
-- `nodeType`
-- `capabilities`
-- `input schema`
-- `output schema`
-- `config schema`
-- `lifecycle policy`
-- `health contract`
-
-Özellikle `lifecycle policy` artık zorunlu düşünülmeli.
-
-## 3.7 Lifecycle Policy ve Cold Start Tasarımı
-
-Yeni önemli gereksinim:
-
-- process, model ve entegrasyon bileşenleri cold start maliyetini azaltacak biçimde çalışmalı
-
-Bu yüzden node veya adapter çalıştırma modeli ikili olmalı:
-
-- `resident`
-- `on-demand`
-
-`resident`:
-
-- process veya bağlantı sürekli ayakta tutulur
-- PLC bağlantısı, model belleğe alma, uzun warmup gerektiren inference engine için uygundur
-
-`on-demand`:
-
-- ihtiyaç anında ayağa kalkar
-- kısa, seyrek, maliyeti düşük yardımcı işler için uygundur
-
-Node standardında şu alanlar olmalı:
-
-- `activationMode`: `resident` | `on-demand`
-- `warmupPolicy`
-- `idleTimeout`
-- `preloadOnPipelineStart`
-- `healthProbe`
-
-Bu sayede:
-
-- PLC node sürekli bağlı kalabilir
-- AI model node pipeline açılırken önceden belleğe alınabilir
-- kısa yaşayan yardımcı process node'ları gerektiğinde açılabilir
-
-Buradaki ana karar motor içinde sabit kod olmamalı; node descriptor ile tanımlanmalı.
-
-Varsayılan politika önerisi:
-
-- `AI model node`: `resident` + `preloadOnPipelineStart = true`
-- `PLC control node`: `resident`
-- `camera/source node`: `resident`
-- `short helper process node`: `on-demand`
-- `heavy external process node`: varsayılan `resident`, ama override edilebilir
-
-Gerekçe:
-
-- kamera, PLC ve model node'larında cold start çevrim süresini doğrudan bozar
-- kısa yardımcı işler için sürekli ayakta proses tutmak gereksiz kaynak tüketir
-
-## 4. Neden .NET Tabanlı Çekirdek
-
-İlk öneri, orchestration çekirdeğini `.NET 10` üzerinde kurmak.
-
-Gerekçeler:
-
-- mevcut referans proje zaten .NET tabanlı
-- Windows vendor SDK entegrasyonları bu tarafta daha doğal
-- yüksek eşzamanlılık ve servis mimarisi için güçlü
-- web API, worker service ve native process kontrolü tek ekosistemde çözülebilir
-
-Microsoft destek politikasına göre çift numaralı .NET sürümleri LTS, tek numaralı sürümler STS; resmi sayfa şu anda `.NET 10`'u güncel sürüm olarak gösteriyor. Kaynak:
-
-- [Microsoft .NET support policy](https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core)
-- [Microsoft .NET 7 download page](https://dotnet.microsoft.com/en-us/download/dotnet/7.0)
-
-Not: Buradaki öneri `.NET 10` üzerine gitmek; fakat donanım veya kurumsal kısıt varsa `.NET 8` LTS tabanlı kalmak da makul.
-
-Panel PC ve NUC dağıtımı açısından pratik varsayım:
-
-- ilk faz için `Windows-first`
-- ikinci faz için Linux edge desteği opsiyonel
-
-Bunun nedeni vendor camera SDK ve saha cihazı sürücü bağımlılıklarının çoğunlukla Windows tarafında daha rahat çözülmesi.
-
-## 5. Diagram Sistemi
-
-Web tabanlı bir diagram editörü öneriyorum.
-
-İlk aday:
-
-- `React Flow`
-
-Sebep:
-
-- node-based editor odaklı
-- MIT lisanslı açık kaynak
-- custom node, edge, minimap ve interaction modeli hazır
-
-Kaynak:
-
-- [React Flow](https://reactflow.dev/)
-
-UI kararında amaç görsel güzellik değil, graph tanımı için sağlam bir editör altyapısı seçmek.
-
-## 6. Streaming Stratejisi
-
-Eski projedeki özel UDP/TCP snapshot protokolü yerine standart media protokollerine geçmek daha doğru.
-
-Önerilen ayrım:
-
-- makine içi işleme: ham frame / shared buffer / raw tensor
-- ağa yayın: standart media server
-
-İlk yaklaşım:
-
-- runtime görüntüyü `Media Gateway` katmanına verir
-- gateway RTSP, WebRTC, SRT gibi protokollere çevirir
-- pipeline çıktısı da ayrı stream veya metadata kanalı olarak yayınlanır
-
-Güncel referanslar:
-
-- GStreamer `appsrc` uygulamanın dışarıdan pipeline'a veri itmesine izin verir: [appsrc docs](https://gstreamer.freedesktop.org/documentation/app/appsrc.html)
-- GStreamer `rtspsrc` RTSP akışı alma tarafını standartlaştırır: [rtspsrc docs](https://gstreamer.freedesktop.org/documentation/rtsp/rtspsrc.html)
-- `gst-rtsp-server` RTSP servis yayınlayabilir: [gst-rtsp-server docs](https://gstreamer.freedesktop.org/documentation/gst-rtsp-server/rtsp-server.html)
-- Web istemcileri için WebRTC tarayıcı desteği güçlüdür: [WebRTC overview](https://webrtc.org/) ve [MDN WebRTC API](https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API)
-- MediaMTX tek sunucuda RTSP, WebRTC, SRT, RTMP, HLS ve diğer protokoller arasında köprü kurabiliyor: [MediaMTX publish](https://mediamtx.org/docs/features/publish), [MediaMTX read](https://mediamtx.org/docs/features/read)
-
-Pratik öneri:
-
-- MVP için doğrudan GStreamer yazmak yerine önce `MediaMTX` sidecar ile yayın mimarisini kur
-- gerçekten özel encode/transform ihtiyacı doğarsa GStreamer tabanlı özel media node ekle
-
-Bu, ilk sürüm karmaşıklığını ciddi biçimde azaltır.
-
-## 7. AI Model Runtime
-
-AI modeller node olarak ele alınmalı; uygulama içine gömülü tek inference akışı gibi değil.
-
-Desteklenecek ilk model tipleri:
-
-- `onnx`
-- `python-runtime`
-- `external process`
-
-Performans için ONNX Runtime tarafında bellek bağlama ve ön tahsis stratejileri önemli. Resmi dökümantasyonda `IOBinding`, giriş ve çıkışların önceden ayrılmış belleğe bağlanmasını öneriyor:
-
-- [ONNX Runtime I/O Binding](https://onnxruntime.ai/docs/performance/tune-performance/iobinding.html)
-- [ONNX Runtime C# API](https://onnxruntime.ai/docs/api/csharp/api/Microsoft.ML.OnnxRuntime.OrtIoBinding.html)
-
-Bu yüzden AI node standardında şu alanlar olmalı:
-
-- model formatı
-- input tensor sözleşmesi
-- output schema
-- device tercihi
-- batch ve warmup ayarları
-- preload ve unload politikası
-
-## 8. Dağıtık Event Omurgası
-
-Tek makine ile başlanabilir; ancak mimari dağıtık çalışmaya açık olmalı.
-
-Öneri:
-
-- tek makine başlangıcı: in-process event bus
-- çok süreçli veya ağ dağıtımı: opsiyonel `NATS`
-
-NATS resmi dokümanında yüksek performanslı, hafif ve açık kaynak bir messaging katmanı olarak tanımlanıyor; ayrıca pub/sub, request/reply ve persistence için JetStream sunuyor:
-
-- [NATS docs](https://docs.nats.io/)
-- [NATS overview](https://docs.nats.io/nats-concepts/overview)
-- [NATS JetStream](https://docs.nats.io/nats-concepts/jetstream)
-
-Bu, pipeline event'leri, trigger sinyalleri ve metadata dağıtımı için güçlü bir aday.
-
-Ancak panel PC ve NUC yerleşiminde bunu ilk günden zorunlu yapmamalıyız.
-
-İlk tercih:
-
-- tek cihaz: in-process event bus
-- aynı ağda çoklu cihaz: opsiyonel NATS
-- merkezi zorunluluk yok
-
-Hibrit modelde NATS benzeri bir katman varsa bunun rolü:
-
-- telemetry ve event dağıtımı
-- merkezi gözlemleme
-- opsiyonel komut iletimi
-
-Ama pipeline çalıştırma mantığı yine edge node içinde kalmalı.
-
-Opsiyonel pipeline sinyal yayını için alternatifler:
-
-- ilk faz: HTTP SSE veya WebSocket ile yerel publish
-- ikinci faz: NATS veya benzeri event bus ile çoklu izleyici desteği
-
-Burada önemli olan sinyal kanalını video kanalından ayırmaktır. Video başka, telemetry başka taşınmalı.
-
-## 9. Önerilen Repo Yapısı
-
-```text
-MachineVisionFabric/
-├─ docs/
-├─ src/
-│  ├─ MachineVisionFabric.Contracts/
-│  ├─ MachineVisionFabric.Core/
-│  ├─ MachineVisionFabric.Runtime/
-│  ├─ MachineVisionFabric.Adapters/
-│  ├─ MachineVisionFabric.Streaming/
-│  ├─ MachineVisionFabric.Api/
-│  └─ MachineVisionFabric.Host/
-├─ ui/
-│  └─ machine-vision-fabric-studio/
-├─ sdk/
-│  ├─ python/
-│  └─ process/
-├─ samples/
-│  ├─ pipelines/
-│  └─ adapters/
-└─ tools/
+# Architecture Foundation
+
+The canonical, high-level architecture of **MachineVisionFabric (MVF)**. For the
+evolving plan and decision log see [roadmap.md](roadmap.md); deeper mechanics live in
+the linked design docs at the end.
+
+## 1. Purpose & deployment assumptions
+
+MVF is an open-source, **edge-first** vision pipeline platform. It executes a strict,
+schema-validated graph of nodes — cameras, transforms, AI inference, PLC/control,
+storage — on the edge device itself.
+
+Operating assumptions:
+
+- Runs inside company networks on panel PCs, industrial PCs, and NUC-class devices.
+- **Windows-first**, but the runtime and SDKs are cross-platform (Linux, macOS).
+- Must keep running **without a central server**. A central system is optional and only
+  ever *observes* (logs, health, inventory, optional telemetry) — it never owns execution.
+
+## 2. Architecture at a glance
+
+```
+        edge device                                     optional, best-effort
+┌──────────────────────────────┐                    ┌────────────────────────┐
+│  MVF edge runtime            │  telemetry (WS) ──▶ │  central observer      │
+│  ├─ sources / simulators     │  (non-blocking)     │  logs · health ·       │
+│  ├─ typed graph executor     │                     │  inventory · pipeline  │
+│  ├─ polyglot module hosts    │                     │  telemetry             │
+│  ├─ AI inference (ONNX)      │                     └────────────────────────┘
+│  ├─ PLC / control            │
+│  └─ local persistence        │
+└──────────────────────────────┘
 ```
 
-## 10. MVP Sınırı
+The edge runtime is self-sufficient. Telemetry publishing is optional, best-effort, and
+**never on the execution hot path**.
 
-İlk sürümde her şeyi çözmeye çalışma.
+## 3. The strict typed graph
 
-MVP:
+A pipeline is a directional, schema-validated graph. The mental model is:
 
-1. bir source adapter
-2. bir ai-model node
-3. bir python-step node
-4. bir stream-output node
-5. bir storage-output node
-6. basit web diagram editörü
-7. pipeline JSON export/import
-8. temel trigger engine
-
-İlk desteklenecek akış için öneri:
-
-`RTSP veya simüle kamera -> preprocess -> ONNX model -> overlay -> stream + save + event`
-
-Bu akış oturduğunda vendor kamera ve PLC entegrasyonları eklenir.
-
-MVP deployment hedefi:
-
-- tek panel PC veya tek NUC üzerinde servis olarak çalışan runtime
-- aynı cihazda yerel web paneli
-- başka istemcilerin LAN üzerinden stream veya metadata alabilmesi
-- merkezden canlı gözlemlenebilmesi, ancak çalışmak için merkeze ihtiyaç duymaması
-
-Hibrit modele göre MVP sonrası ilk büyüme adımı:
-
-- birden fazla edge node'u gören merkezi izleme paneli
-- edge cihazların export ettiği pipeline paketlerini arşivleyen bir merkez
-- log ve health görünürlüğü
-- edge node'lardan gelen opsiyonel pipeline signal stream görünürlüğü
-
-Bu aşamada bile pipeline import/export edge merkezli kalmalı.
-
-## 11. Pipeline Paketleme
-
-Import/export sadece tek JSON dosyası olmamalı. Çünkü gerçek sahada pipeline ile birlikte ek varlıklar taşınacak:
-
-- AI model dosyaları
-- label ve config dosyaları
-- Python script'leri
-- yardımcı executable'lar
-- adapter manifestleri
-
-Bu yüzden önerilen model:
-
-- `manifest JSON`
-- bunu çevreleyen `folder package`
-
-Örnek:
-
-```text
-pipeline-package/
-├─ profile.json
-├─ assets/
-│  ├─ models/
-│  ├─ scripts/
-│  ├─ processes/
-│  └─ configs/
-└─ manifest.json
+```
+NODE(typed output port) ──▶ NODE(typed input port) ──▶ NODE(typed output port)
 ```
 
-İlk aşamada klasör bazlı taşıma yeterli. Daha sonra istersek bunu tek arşiv formatına da çevirebiliriz.
+Two edge types are **first-class and never collapsed**:
 
-## 12. İlk Simulator Stratejisi
+- **data edge** — frame / tensor / payload transfer.
+- **control edge** — decisions and branch selection (e.g. a PLC presence signal, a
+  classifier's class used by `if`/`switch`).
 
-Gerçek kamera ilk MVP için zorunlu değil. Bunun yerine birden fazla simülasyon kaynağı ile çekirdek doğrulanmalı.
+Typing is enforced at authoring time *and* re-validated at runtime, not just in a UI.
+See [pipeline-graph-foundation.md](pipeline-graph-foundation.md).
 
-Önerilen ilk simulator tipleri:
+## 4. Typed payloads & the data plane
 
-- `single-image-loop`
-- `folder-sequence-camera`
-- `side-by-side-multi-frame simulator`
-- `scenario-based simulator`
+Payloads are **typed and byte-based**. They live in a shared-memory **arena** as
+`[descriptor header | payload bytes]`; the self-describing descriptor carries media type,
+element type, shape and strides. Modules read and write payloads **in place, zero-copy** —
+there is no base64 and bytes never travel inline on the control channel.
 
-Özellikle `folder-sequence-camera` şu davranışı vermeli:
+See [data-plane-design.md](data-plane-design.md).
 
-- seçilen klasördeki görüntüleri sırayla oynatır
-- istenirse döngüsel tekrar yapar
-- frame interval ayarlanabilir
-- birden fazla sanal kamera aynı anda çalışabilir
+## 5. Node contract & the polyglot module protocol
 
-`scenario-based simulator` ise ileride şu işleri destekleyebilir:
+Out-of-process modules speak one language-agnostic protocol:
 
-- ürün var / ürün yok senaryosu
-- tetik gecikmesi
-- PLC bit değişimi ile senkron akış
-- hata, timeout veya boş frame senaryosu
+- **control plane** — newline-delimited JSON over the module's stdio (handshake, execute,
+  checkpoint/restore, readiness, shutdown). See [`protocol/README.md`](../protocol/README.md).
+- **data plane** — the shared-memory arena above.
 
-## 13. Netlesen Ek Kararlar
+Because the contract is language-agnostic, modules can be authored in **.NET, Python, or
+C++** interchangeably (`src/sdk/{dotnet,python,cpp}`). In-process .NET integration modules
+are also supported via `Mvf.Sdk` base classes. See
+[integration-sdk-strategy.md](integration-sdk-strategy.md) and
+[sdk-quickstart.md](sdk-quickstart.md).
 
-Bu analiz turunda sabitlenen ek kararlar:
+## 6. Node categories & engine primitives
 
-- `control edge` ayrı görselleştirilecek
-- telemetry için ilk tercih `WebSocket`
-- raw TCP tabanlı özel telemetry protokolü ilk faz için gereksiz
-- external process node'ları cold start maliyetine göre `resident` veya `on-demand` seçebilecek
+Work nodes come from SDK modules; **flow-control primitives are owned by the engine** (they
+define execution semantics, not device behaviour):
 
-Telemetry tarafında tercih sırası:
+- Module categories: `source`, `compute` (processor), `classify`, `control`/`gate`, `sink`.
+- Engine primitives: `if`, `switch`, `fork`, `loop`, plus typed `value` / `select`.
 
-1. `WebSocket`
-2. gerekirse daha sonra event bus
+`loop` is the graph's **iteration authority** (see
+[loop-and-running-state-design.md](loop-and-running-state-design.md)); `value`/`select`
+supply typed inputs the graph cannot itself compute (see
+[value-and-select-design.md](value-and-select-design.md)).
 
-Sebep:
+## 7. Execution engine
 
-- yerel web paneli ile doğal uyum
-- şirket içi ağda yeterli performans
-- uygulama maliyetinin düşük olması
+The engine runs a `pipeline.json` end to end with a **pipelined executor**: stage
+parallelism, graph-derived arena sizing, per-node parallelism, and multi-input joins.
+Durability is provided by **epoch-barrier checkpoint/restore** (resume after crash), and
+overload is handled by explicit **backpressure** (stall or drop). Cross-process
+observability surfaces worker restart counts and RPC latency.
 
-Node lifecycle tarafında net varsayılan:
+## 8. Module lifecycle
 
-- `camera/source`: resident
-- `plc/control`: resident
-- `ai-model`: resident + preload
-- `short helper process`: on-demand
-- `heavy external process`: varsayılan resident, override edilebilir
+Lifecycle is part of the node contract, modelled against Kubernetes probes / systemd
+`sd_notify` / Triton. Defaults: `source`, `plc/control`, and `ai-model` are **resident**
+(preloaded); short helpers are on-demand; heavy external workers are resident by default.
+A module signals **readiness** after warmup so a slow start is a startup concern, not a
+liveness failure. See [module-lifecycle-design.md](module-lifecycle-design.md).
 
-## 14. Headless Dataset-First MVP Alignment
+## 9. Simulator-first
 
-The current MVP direction is intentionally narrower than the long-term platform vision.
+The platform is testable without vendor hardware. Simulator sources (folder sequence, loop
+image, multi-frame, scenario) ship in-box, and the demo packages under `packages/` run the
+full engine — including polyglot workers — with **no camera attached**.
 
-For the first working version:
+## 10. AI inference
 
-- prioritize dataset collection
-- prioritize headless execution
-- prioritize package, simulator, and storage foundations
-- defer UI and advanced inference flows
+Model execution targets **ONNX Runtime**, hosted as a resident, preloaded node so cold-start
+cost is paid once at startup rather than per frame.
 
-Recommended first working flow:
+## 11. Streaming & telemetry
 
-`simulated source -> dataset capture output`
+- Optional pipeline signal streaming for observation (first choice: **WebSocket**).
+- Media bridging via **MediaMTX** first, **GStreamer** only if later required.
+- Telemetry is optional, non-blocking, best-effort; the hot path never waits on it.
 
-Recommended second working flow:
+## 12. Packaging
 
-`PLC gate -> simulated source -> dataset capture output`
+Pipelines are distributed as a **JSON + folder package**, not a single file, so models,
+scripts, helper executables and configs travel together. Bindings live outside the package
+so the same `pipeline.json` deploys everywhere.
 
-This approach keeps the early runtime grounded in real operational value while preserving the future typed graph model.
+## 13. Repository structure
 
-## 15. Graph Representation Direction (2026-07-17)
+```
+src/core/        typed graph model + contracts (Mvf.Graph, Mvf.Abstractions)
+src/engine/      pipelined scheduler, checkpoint/restore, backpressure
+src/hosting/     out-of-process module host
+src/transports/  shared-memory data plane
+src/sdk/         dotnet / python / cpp SDKs
+src/cli/         headless host + live TUI dashboard
+modules/         integration modules (.NET + Python) + example module
+packages/        runnable pipeline packages (pipeline.json)
+protocol/        language-agnostic module wire protocol
+tools/ · tests/ · docs/
+```
 
-The current package profile model is useful, but it is not yet a full pipeline graph representation.
+The **core** knows only what a pipeline is (typed graph) and what a node contract is;
+transports, module hosts and language SDKs attach at the edges so the core stays small.
 
-Current model:
+## Technology defaults
 
-- one source binding
-- one product gate binding
-- one frame processor binding
-- one storage flow
+Engine: **C# / .NET 10 LTS** · Studio UI (future): **React + TypeScript + React Flow** ·
+optional desktop shell: **Tauri** · inference: **ONNX Runtime** · media: **MediaMTX** ·
+telemetry: **WebSocket**.
 
-Target model:
+## Related design docs
 
-- typed nodes
-- typed input ports
-- typed output ports
-- data edges
-- control edges
-- branching
-- fan-out and fan-in
-
-The ownership split is now explicit:
-
-- embedded primitives such as `if`, `switch`, `fork`, `join`, `loop`, `retry`, and `buffer` belong to the platform engine
-- camera, PLC, inference, stream, storage, and process nodes remain external SDK integrations
-
-This means "branching logic" is not treated as just another vendor plugin.
-It is part of the engine language itself.
-
-The first contract layer for this direction now exists under `MachineVisionFabric.Contracts.Pipelines`.
-The first validation layer now exists through `IPipelineDefinitionValidator`.
-
-In addition, module and pipeline inspection must remain typed end-to-end.
-
-That means the platform must expose one inspectable point that returns:
-
-- resolved pipeline graph
-- typed node contracts
-- typed module port metadata
-- config schema references
-- validation issues
-
-This is necessary for the future frontend to safely build reusable pipeline catalogs without falling back to string-based guesses.
-
-Short-term rule:
-
-- keep the current dataset-first runtime active
-- use the new graph contracts as the foundation for the next execution model
+[roadmap.md](roadmap.md) ·
+[pipeline-graph-foundation.md](pipeline-graph-foundation.md) ·
+[data-plane-design.md](data-plane-design.md) ·
+[module-lifecycle-design.md](module-lifecycle-design.md) ·
+[value-and-select-design.md](value-and-select-design.md) ·
+[loop-and-running-state-design.md](loop-and-running-state-design.md) ·
+[integration-sdk-strategy.md](integration-sdk-strategy.md) ·
+[sdk-quickstart.md](sdk-quickstart.md)
