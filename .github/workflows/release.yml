@@ -19,8 +19,12 @@ jobs:
       - name: Pack
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          dotnet pack src/sdk/dotnet/Mvf.Sdk/Mvf.Sdk.csproj -c Release \
-            -p:Version="$VERSION" -o dist
+          # The SDK depends on the two contract assemblies, so they must be published too — otherwise
+          # authors cannot restore MachineVisionFabric.Sdk and resort to hand-built fallback DLLs whose
+          # assembly identity drifts from the runtime's (the plugin-load FileNotFoundException class).
+          dotnet pack src/core/Mvf.Graph/Mvf.Graph.csproj -c Release -p:Version="$VERSION" -o dist
+          dotnet pack src/core/Mvf.Abstractions/Mvf.Abstractions.csproj -c Release -p:Version="$VERSION" -o dist
+          dotnet pack src/sdk/dotnet/Mvf.Sdk/Mvf.Sdk.csproj -c Release -p:Version="$VERSION" -o dist
       - uses: actions/upload-artifact@v4
         with:
           name: nuget

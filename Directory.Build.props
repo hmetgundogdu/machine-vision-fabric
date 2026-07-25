@@ -3,4 +3,23 @@
     <DebugSymbols>false</DebugSymbols>
     <DebugType>none</DebugType>
   </PropertyGroup>
+
+  <!--
+    Stable assembly-binding identity, decoupled from the release version.
+
+    A release publishes with `-p:Version=<tag>` (see .github/workflows/release.yml), which by
+    default also stamps AssemblyVersion (e.g. 0.3.0.0) — the identity the CLR binds against. An
+    external .NET module shares the contract assemblies (Mvf.Abstractions / Mvf.Graph) from the
+    host's Default load context (see IntegrationPluginLoadContext), so if the host ships them at
+    0.3.0.0 but the module was compiled against 1.0.0.0, the down-version bind is refused and the
+    module fails to load with a misleading `FileNotFoundException: ... Version=1.0.0.0`.
+
+    Pinning AssemblyVersion keeps the binding identity constant across releases. Release
+    traceability is preserved elsewhere: the NuGet PackageVersion and InformationalVersion still
+    track the tag (e.g. "0.4.0+<commit>"), as does the git tag itself. Bump this only on an
+    intentional breaking change to the module contract.
+  -->
+  <PropertyGroup>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+  </PropertyGroup>
 </Project>

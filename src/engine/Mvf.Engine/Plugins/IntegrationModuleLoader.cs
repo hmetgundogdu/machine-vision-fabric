@@ -25,6 +25,11 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
 
     private const string ManifestFileName = "module.json";
 
+    private const string VersionMismatchHint =
+        "This usually means the module was built against a different MachineVisionFabric version than the "
+        + "runtime — align the MachineVisionFabric.Sdk / .Abstractions / .Graph versions the module "
+        + "references with the CLI you are running.";
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         Converters = { new JsonStringEnumConverter() }
@@ -131,6 +136,13 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
                     candidate.Manifest.Id, loaderReasons);
                 continue;
             }
+            catch (Exception ex) when (ex is FileNotFoundException or FileLoadException)
+            {
+                _logger.LogWarning(
+                    "Module '{ModuleId}' skipped: {Reason} {Hint}",
+                    candidate.Manifest.Id, ex.Message, VersionMismatchHint);
+                continue;
+            }
 
             var entryTypes = exportedTypes
                 .Where(type => !type.IsAbstract && !type.IsInterface && typeof(IIntegrationModule).IsAssignableFrom(type))
@@ -152,11 +164,28 @@ public sealed class IntegrationModuleLoader(ILogger<IntegrationModuleLoader>? lo
                 continue;
             }
 
-            if (Activator.CreateInstance(entryTypes[0]) is not IIntegrationModule module)
+            IIntegrationModule module;
+            try
             {
+                if (Activator.CreateInstance(entryTypes[0]) is not IIntegrationModule created)
+                {
+                    _logger.LogWarning(
+                        "Module '{ModuleId}' skipped: entry type '{EntryType}' could not be instantiated.",
+                        candidate.Manifest.Id, entryTypes[0].FullName);
+                    continue;
+                }
+
+                module = created;
+            }
+            catch (Exception ex) when (ex is FileNotFoundException or FileLoadException
+                || ex.InnerException is FileNotFoundException or FileLoadException)
+            {
+                // A shared contract assembly (Mvf.Abstractions / Mvf.Graph) failed to bind — almost always
+                // a version-identity mismatch between the module and the runtime, not a truly missing file.
+                var reason = (ex.InnerException ?? ex).Message;
                 _logger.LogWarning(
-                    "Module '{ModuleId}' skipped: entry type '{EntryType}' could not be instantiated.",
-                    candidate.Manifest.Id, entryTypes[0].FullName);
+                    "Module '{ModuleId}' skipped: entry type '{EntryType}' could not be instantiated: {Reason} {Hint}",
+                    candidate.Manifest.Id, entryTypes[0].FullName, reason, VersionMismatchHint);
                 continue;
             }
 

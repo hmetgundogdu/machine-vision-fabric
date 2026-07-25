@@ -10,4 +10,20 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <!-- Published so external module authors compile against the same contract the runtime ships,
+       and so MachineVisionFabric.Sdk's dependency on it resolves from NuGet. -->
+  <PropertyGroup>
+    <PackageId>MachineVisionFabric.Abstractions</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>MachineVisionFabric contributors</Authors>
+    <Description>MachineVisionFabric module contract: the frame/source/processor/classifier/sink abstractions and out-of-process activation types shared by the runtime and integration modules.</Description>
+    <PackageTags>machine-vision;edge;pipeline;industrial</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/hmetgundogdu/machine-vision-fabric</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+  </PropertyGroup>
+
 </Project>
