@@ -38,8 +38,15 @@ public sealed class PipelineDashboard
     /// </summary>
     private readonly bool _hasLoop;
 
-    /// <summary>Index into the tunables list; -1 until the run registers any.</summary>
-    private int _selectedTunable = -1;
+    /// <summary>
+    /// The operator's navigation cursor: an index into <see cref="GraphLayout.TraversalOrder"/>. Until the
+    /// operator first presses an arrow key the cursor auto-follows the executing node (and the viewport with
+    /// it); after that it is theirs to move, and the viewport tracks it so a selected node is never off-page.
+    /// </summary>
+    private int _selectedIndex;
+
+    /// <summary>True once the operator has taken manual control of the cursor with an arrow key.</summary>
+    private bool _userNavigated;
 
     /// <summary>Last edit outcome, shown under the panel until the next one.</summary>
     private string? _editNotice;
@@ -116,7 +123,7 @@ public sealed class PipelineDashboard
 
         // Print final summary (cursor is at bottom after RenderFrame)
         Console.Clear();
-        AnsiConsole.Write(BuildLayout(ComputeActiveLayer()));
+        AnsiConsole.Write(BuildLayout());
         return report;
     }
 
@@ -133,38 +140,73 @@ public sealed class PipelineDashboard
         while (available)
         {
             var key = Console.ReadKey(intercept: true);
-            var tunables = Tunables;
 
-            // Space pauses/resumes the whole run. It is handled ahead of — and independently of — the
-            // tunables, because a loop-carrying graph may have no value nodes at all yet still be pausable.
-            // Pause is not cancel: the loop stops advancing, the run keeps its state and its warm workers.
-            if (key.Key == ConsoleKey.Spacebar && _hasLoop && _liveValues is not null)
+            // Space pauses/resumes the whole run, independently of the cursor: a loop-carrying graph may
+            // have no value nodes at all yet still be pausable. Pause is not cancel — the loop stops
+            // advancing, the run keeps its state and its warm workers.
+            switch (key.Key)
             {
-                _liveValues.RunControl.Toggle();
-            }
-            else if (tunables.Count > 0)
-            {
-                switch (key.Key)
-                {
-                    case ConsoleKey.UpArrow:
-                        _selectedTunable = (_selectedTunable <= 0 ? tunables.Count : _selectedTunable) - 1;
-                        break;
+                case ConsoleKey.Spacebar when _hasLoop && _liveValues is not null:
+                    _liveValues.RunControl.Toggle();
+                    break;
 
-                    case ConsoleKey.DownArrow:
-                    case ConsoleKey.Tab:
-                        _selectedTunable = (_selectedTunable + 1) % tunables.Count;
-                        break;
+                case ConsoleKey.LeftArrow:  MoveCursor(-1); break;
+                case ConsoleKey.RightArrow: MoveCursor(+1); break;
+                case ConsoleKey.Tab:        MoveCursor(+1); break;
+                case ConsoleKey.UpArrow:    MoveCursorWithinLayer(-1); break;
+                case ConsoleKey.DownArrow:  MoveCursorWithinLayer(+1); break;
 
-                    case ConsoleKey.Enter:
-                        if (_selectedTunable < 0) _selectedTunable = 0;
-                        EditSelected(tunables[_selectedTunable]);
-                        break;
-                }
+                case ConsoleKey.Enter:
+                    if (SelectedNodeId is { } nodeId) OpenNodeDetail(nodeId);
+                    break;
             }
 
             try { available = Console.KeyAvailable; }
             catch { return; }
         }
+    }
+
+    // ── Cursor / navigation ───────────────────────────────────────────────────
+
+    private IReadOnlyList<string> Order => _layout.TraversalOrder;
+
+    /// <summary>The node under the cursor right now, or null for an empty graph.</summary>
+    private string? SelectedNodeId =>
+        Order.Count == 0 ? null : Order[Math.Clamp(_selectedIndex, 0, Order.Count - 1)];
+
+    /// <summary>Steps the cursor through the flat left-to-right order. Wraps at both ends.</summary>
+    private void MoveCursor(int delta)
+    {
+        if (Order.Count == 0) return;
+        _userNavigated = true;
+        _selectedIndex = (_selectedIndex + delta % Order.Count + Order.Count) % Order.Count;
+    }
+
+    /// <summary>Moves the cursor to the previous/next slot within its current layer, if one exists.</summary>
+    private void MoveCursorWithinLayer(int delta)
+    {
+        if (SelectedNodeId is not { } current) return;
+        if (!_layout.NodePositions.TryGetValue(current, out var pos)) return;
+
+        var layer = _layout.Layers[pos.Layer];
+        var target = pos.Slot + delta;
+        if (target < 0 || target >= layer.Count) return;
+
+        _userNavigated = true;
+        _selectedIndex = Order.ToList().IndexOf(layer[target]);
+    }
+
+    /// <summary>
+    /// Before the operator takes over, the cursor rides the executing node so both the highlight and the
+    /// viewport follow the work. Called once per frame.
+    /// </summary>
+    private void SyncCursorToActive()
+    {
+        if (_userNavigated) return;
+        if (_state.LastActiveNodeId is not { } active) return;
+
+        var idx = Order.ToList().IndexOf(active);
+        if (idx >= 0) _selectedIndex = idx;
     }
 
     /// <summary>
@@ -282,52 +324,109 @@ public sealed class PipelineDashboard
         _ => choice.ToJsonString()
     };
 
-    private IRenderable? BuildTunablePanel()
+    /// <summary>
+    /// The live tunables that belong to one node: a <c>value</c>/<c>select</c> node registers under its own
+    /// id, a module binding registers under <c>{nodeId}.{field}</c>. Both are folded in here so the node's
+    /// config box and detail view show — and edit — everything editable about it.
+    /// </summary>
+    private IReadOnlyList<LiveValue> NodeTunables(string nodeId) =>
+        Tunables
+            .Where(t => string.Equals(t.NodeId, nodeId, StringComparison.OrdinalIgnoreCase)
+                        || t.NodeId.StartsWith(nodeId + ".", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+    /// <summary>The label to show for a tunable inside its node: the binding field, or "val" for a value node.</summary>
+    private static string TunableKey(string ownerNodeId, LiveValue t) =>
+        t.NodeId.Length > ownerNodeId.Length && t.NodeId.StartsWith(ownerNodeId + ".", StringComparison.OrdinalIgnoreCase)
+            ? t.NodeId[(ownerNodeId.Length + 1)..]
+            : "val";
+
+    /// <summary>Compact display of a JSON value: bare text for strings, JSON for everything else.</summary>
+    private static string ValueText(JsonNode? node) => node switch
     {
-        var tunables = Tunables;
-        if (tunables.Count == 0)
+        null => "—",
+        JsonValue v when v.TryGetValue(out string? s) => s,
+        _ => node.ToJsonString()
+    };
+
+    /// <summary>
+    /// One config line per node for drawing inside its box. Live tunables win — their current values are the
+    /// interesting, changing part; a node with none falls back to a couple of its static scalar settings.
+    /// </summary>
+    private IReadOnlyDictionary<string, GraphRenderer.NodeConfigLine> BuildConfigLines()
+    {
+        var lines = new Dictionary<string, GraphRenderer.NodeConfigLine>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var node in _definition.Nodes)
         {
-            return null;
+            var tunables = NodeTunables(node.Id);
+            if (tunables.Count > 0)
+            {
+                var text = string.Join(" ", tunables.Select(t => $"{TunableKey(node.Id, t)}={ValueText(t.Current)}"));
+                lines[node.Id] = new GraphRenderer.NodeConfigLine(text, Tunable: true);
+                continue;
+            }
+
+            // Static fallback: the first couple of scalar config entries, so even a plain node shows what it
+            // was set up with. Objects/arrays are skipped — they never fit one line and read as noise.
+            var scalars = node.Config
+                .Where(p => p.Value is JsonValue)
+                .Take(2)
+                .Select(p => $"{p.Key}={ValueText(p.Value)}")
+                .ToList();
+
+            if (scalars.Count > 0)
+                lines[node.Id] = new GraphRenderer.NodeConfigLine(string.Join(" ", scalars), Tunable: false);
         }
 
-        if (_selectedTunable >= tunables.Count)
-        {
-            _selectedTunable = tunables.Count - 1;
-        }
+        return lines;
+    }
 
-        // Node id rather than the label: the graph above is drawn with node ids, so the eye can match the
-        // two, and three of them still fit on one line where three prompts would not.
-        var cells = tunables.Select((t, i) =>
-        {
-            var value = t.Current?.ToJsonString() ?? "null";
-            var pinned = t.Binding is { Length: > 0 } ? string.Empty : "[grey42]*[/]";
-            return i == _selectedTunable
-                ? $"[black on deepskyblue1] {Markup.Escape(t.NodeId)}={Markup.Escape(value)} [/]{pinned}"
-                : $"[grey]{Markup.Escape(t.NodeId)}=[/][white]{Markup.Escape(value)}[/]{pinned}";
-        });
+    /// <summary>The bottom control bar: colour legend, the selected node, and the key hints.</summary>
+    private IRenderable BuildControlsBar()
+    {
+        var selected = SelectedNodeId is { } id && _state.Nodes.TryGetValue(id, out var s)
+            ? $"[grey]sel:[/][deepskyblue1]{Markup.Escape(s.DisplayName)}[/]"
+            : "[grey]sel:—[/]";
 
-        var picking = _selectedTunable >= 0 && tunables[_selectedTunable].Choices is { Count: > 0 };
-        var hint = _selectedTunable < 0
-            ? "[grey42]tab/↑↓ pick · enter edit[/]"
-            : picking ? "[grey42]enter choose[/]" : "[grey42]enter edit[/]";
+        var legend =
+            "[deepskyblue1]●[/][grey46]src[/] " +
+            "[mediumpurple2]●[/][grey46]compute[/] " +
+            "[hotpink]●[/][grey46]classify[/] " +
+            "[gold1]●[/][grey46]flow[/] " +
+            "[mediumspringgreen]●[/][grey46]sink[/] " +
+            "[aquamarine1]●[/][grey46]value[/]";
 
-        var line = $"[grey]tune[/]  {string.Join("   ", cells)}   {hint}";
+        var pause = _hasLoop ? " [grey42]· space:pause[/]" : string.Empty;
+        var controls = $"[grey42]←→ move · enter details[/]{pause}";
+
+        var line = $"{selected}    {legend}    {controls}";
 
         return _editNotice is null
             ? new Markup(line)
-            : new Rows(new Markup(line), new Markup($"      {_editNotice}"));
+            : new Rows(new Markup(line), new Markup($"  {_editNotice}"));
     }
 
     // ── Rendering ───────────────────────────────────────────────────────────
 
     private void RenderFrame()
     {
-        // Jump to top-left without clearing (avoids flash)
+        // Keep the cursor riding the executing node until the operator takes over — the viewport follows it.
+        SyncCursorToActive();
+        PaintInPlace(BuildLayout());
+    }
+
+    /// <summary>
+    /// Draws a renderable at the top-left without a full clear (which flashes), then blanks the rest of the
+    /// window so the previous, possibly taller, frame does not bleed through. Shared by the dashboard and the
+    /// node detail view.
+    /// </summary>
+    private static void PaintInPlace(IRenderable renderable)
+    {
         try { Console.SetCursorPosition(0, 0); } catch { }
 
-        AnsiConsole.Write(BuildLayout(ComputeActiveLayer()));
+        AnsiConsole.Write(renderable);
 
-        // Blank lines from current cursor position to bottom so old content doesn't bleed
         try
         {
             var cur  = Console.CursorTop;
@@ -345,7 +444,10 @@ public sealed class PipelineDashboard
 
     // ── Layout ───────────────────────────────────────────────────────────────
 
-    private IRenderable BuildLayout(int activeLayer)
+    /// <summary>The layer the viewport centres on — the selected node's, which auto-follows execution.</summary>
+    private int AnchorLayer() => SelectedNodeId is { } id ? _layout.LayerOf(id) : 0;
+
+    private IRenderable BuildLayout()
     {
         var width    = Console.WindowWidth > 0 ? Console.WindowWidth : 120;
         var snapshot = _host.GetSnapshot();
@@ -354,14 +456,18 @@ public sealed class PipelineDashboard
         {
             BuildHeader(snapshot),
             new Rule { Style = Style.Parse("grey23") },
-            GraphRenderer.Render(_layout, _state.Nodes, width, activeLayer)
+            GraphRenderer.Render(
+                _layout,
+                _state.Nodes,
+                BuildConfigLines(),
+                SelectedNodeId,
+                _state.LastActiveNodeId,
+                width,
+                AnchorLayer())
         };
 
-        if (BuildTunablePanel() is { } tunables)
-        {
-            rows.Add(new Rule { Style = Style.Parse("grey23") });
-            rows.Add(tunables);
-        }
+        rows.Add(new Rule { Style = Style.Parse("grey23") });
+        rows.Add(BuildControlsBar());
 
         rows.Add(new Rule { Style = Style.Parse("grey23") });
         rows.Add(BuildLogPanel());
@@ -394,6 +500,15 @@ public sealed class PipelineDashboard
             ? $"{snapshot.Elapsed.TotalSeconds:F1}s"
             : "-";
 
+        // Per-cycle timing: total wall clock alone hides whether the graph is keeping up. avg is elapsed
+        // over completed cycles; last is the most recent cycle's wall clock. Both blank until a cycle lands.
+        var avgCycle  = _state.AverageCycleDuration;
+        var lastCycle = _state.LastCycleDuration;
+        var cycleCell = snapshot.TotalCycles > 0
+            ? $"  [grey]cyc̄:[/][grey58]{avgCycle.TotalMilliseconds:F0}ms[/]" +
+              (lastCycle > TimeSpan.Zero ? $" [grey42](last {lastCycle.TotalMilliseconds:F0}ms)[/]" : string.Empty)
+            : string.Empty;
+
         // Truncate run ID to 8 chars
         var runId = snapshot.RunId is { Length: > 8 } r ? r[..8] : snapshot.RunId ?? "-";
 
@@ -412,6 +527,7 @@ public sealed class PipelineDashboard
             $"[grey]cyc:[/][white]{snapshot.TotalCycles}[/]  " +
             $"[grey]ok:[/][green]{snapshot.AcceptedCycles}[/]  " +
             $"[grey]t:[/][grey58]{elapsed}[/]" +
+            cycleCell +
             restartCell +
             pauseHint);
     }
@@ -438,15 +554,239 @@ public sealed class PipelineDashboard
         return new Markup(string.Join("\n", lines));
     }
 
-    private int ComputeActiveLayer()
-    {
-        var active = _state.Nodes.Values
-            .Where(n => n.TotalCycles > 0)
-            .OrderByDescending(n => n.TotalCycles)
-            .FirstOrDefault();
+    // ── Node detail view ───────────────────────────────────────────────────────
 
-        if (active is null) return 0;
-        return _layout.NodePositions.TryGetValue(active.NodeId, out var pos) ? pos.Layer : 0;
+    /// <summary>
+    /// Takes over the screen with a single node's page — its config, live stats and recent log — and lets
+    /// the operator edit its tunable fields in place. The run keeps going the whole time (the executor is a
+    /// separate task); the page repaints every refresh so the stats and log stay live while it is open.
+    /// </summary>
+    private void OpenNodeDetail(string nodeId)
+    {
+        if (!_state.Nodes.ContainsKey(nodeId)) return;
+
+        var fieldIndex = 0;
+        try { Console.CursorVisible = false; } catch { }
+        Console.Clear();
+
+        while (true)
+        {
+            var tunables = NodeTunables(nodeId);
+            fieldIndex = tunables.Count == 0 ? 0 : Math.Clamp(fieldIndex, 0, tunables.Count - 1);
+
+            PaintInPlace(BuildNodeDetail(nodeId, tunables, fieldIndex));
+
+            // No key within the window → fall through and repaint, so live stats/logs keep updating.
+            if (!WaitForKey(RefreshMs, out var key)) continue;
+
+            switch (key.Key)
+            {
+                case ConsoleKey.Escape:
+                case ConsoleKey.Q:
+                case ConsoleKey.LeftArrow:
+                case ConsoleKey.Backspace:
+                    Console.Clear();
+                    return;
+
+                case ConsoleKey.Spacebar when _hasLoop && _liveValues is not null:
+                    _liveValues.RunControl.Toggle();
+                    break;
+
+                case ConsoleKey.UpArrow:
+                    if (tunables.Count > 0) fieldIndex = (fieldIndex - 1 + tunables.Count) % tunables.Count;
+                    break;
+
+                case ConsoleKey.DownArrow:
+                case ConsoleKey.Tab:
+                    if (tunables.Count > 0) fieldIndex = (fieldIndex + 1) % tunables.Count;
+                    break;
+
+                case ConsoleKey.Enter:
+                    if (tunables.Count > 0) EditSelected(tunables[fieldIndex]);
+                    break;
+            }
+        }
+    }
+
+    /// <summary>Blocks up to <paramref name="withinMs"/> for a keypress. False means the window elapsed.</summary>
+    private static bool WaitForKey(int withinMs, out ConsoleKeyInfo key)
+    {
+        key = default;
+        var deadline = Environment.TickCount64 + withinMs;
+        while (Environment.TickCount64 < deadline)
+        {
+            try
+            {
+                if (Console.KeyAvailable)
+                {
+                    key = Console.ReadKey(intercept: true);
+                    return true;
+                }
+            }
+            catch { return false; }   // redirected input — no keyboard
+            Thread.Sleep(15);
+        }
+        return false;
+    }
+
+    private IRenderable BuildNodeDetail(string nodeId, IReadOnlyList<LiveValue> tunables, int fieldIndex)
+    {
+        var def = _definition.Nodes.FirstOrDefault(n => string.Equals(n.Id, nodeId, StringComparison.OrdinalIgnoreCase));
+        _state.Nodes.TryGetValue(nodeId, out var st);
+
+        var title = new Markup(
+            $"[bold deepskyblue1]◈ NODE[/]  [bold]{Markup.Escape(st?.DisplayName ?? nodeId)}[/]   " +
+            $"[grey]id:[/][grey58]{Markup.Escape(nodeId)}[/]   " +
+            $"[grey]kind:[/][grey58]{Markup.Escape(st?.Kind ?? "-")}[/]   " +
+            $"[grey]type:[/][grey58]{Markup.Escape(st?.TypeLabel ?? "-")}[/]   " +
+            $"[grey]cat:[/][grey58]{Markup.Escape(def?.Category ?? st?.Category ?? "-")}[/]");
+
+        var top = new Grid();
+        top.AddColumn(new GridColumn());
+        top.AddColumn(new GridColumn());
+        top.AddRow(BuildEditablePanel(nodeId, tunables, fieldIndex), BuildStatsPanel(st));
+
+        var controls = tunables.Count > 0
+            ? "[grey42]↑↓ field · enter edit · esc/← back[/]"
+            : "[grey42]esc/← back[/]";
+        if (_editNotice is not null) controls += $"    {_editNotice}";
+
+        return new Rows(
+            title,
+            new Rule { Style = Style.Parse("grey23") },
+            top,
+            BuildConfigPanel(def),
+            BuildNodeLogPanel(nodeId),
+            new Markup(controls));
+    }
+
+    private IRenderable BuildEditablePanel(string nodeId, IReadOnlyList<LiveValue> tunables, int fieldIndex)
+    {
+        IRenderable body;
+        if (tunables.Count == 0)
+        {
+            body = new Markup("[grey42]no editable fields[/]");
+        }
+        else
+        {
+            var lines = tunables.Select((t, i) =>
+            {
+                var key    = TunableKey(nodeId, t);
+                var val    = ValueText(t.Current);
+                var type   = ControlValueTypes.ToToken(t.Type);
+                var origin = t.Binding is { Length: > 0 } b
+                    ? $"[grey42]→ {Markup.Escape(b)}[/]"
+                    : "[grey42](run-only)[/]";
+                var cursor = i == fieldIndex ? "[deepskyblue1]▶[/] " : "  ";
+                var cell   = i == fieldIndex
+                    ? $"[black on deepskyblue1] {Markup.Escape(key)}={Markup.Escape(val)} [/]"
+                    : $"[grey]{Markup.Escape(key)}=[/][white]{Markup.Escape(val)}[/]";
+                return $"{cursor}{cell} [grey42]{Markup.Escape(type)}[/]  {origin}";
+            });
+            body = new Markup(string.Join("\n", lines));
+        }
+
+        return new Panel(body)
+        {
+            Header = new PanelHeader("[gold1] editable [/]"),
+            Border = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("gold1"),
+            Expand = true
+        };
+    }
+
+    private static IRenderable BuildStatsPanel(PipelineNodeState? st)
+    {
+        IRenderable body;
+        if (st is null)
+        {
+            body = new Markup("[grey42]no stats yet[/]");
+        }
+        else
+        {
+            var statusText = st.Status switch
+            {
+                NodeLifecycleStatus.Faulted => "[red]faulted[/]",
+                NodeLifecycleStatus.Done    => "[green]done[/]",
+                NodeLifecycleStatus.Active  => "[yellow]active[/]",
+                _                           => "[grey]idle[/]"
+            };
+            var lastMs = st.LastDurationMicros / 1000.0;
+            var avgMs  = st.AverageDurationMicros / 1000.0;
+            var minMs  = st.MinDurationMicros == long.MaxValue ? 0 : st.MinDurationMicros / 1000.0;
+            var maxMs  = st.MaxDurationMicros / 1000.0;
+            var inP    = st.LastInputPorts.Count  > 0 ? string.Join(",", st.LastInputPorts)  : "—";
+            var outP   = st.LastOutputPorts.Count > 0 ? string.Join(",", st.LastOutputPorts) : "—";
+
+            body = new Markup(string.Join("\n",
+            [
+                $"[grey]status  [/] {statusText}",
+                $"[grey]cycles  [/] [white]{st.TotalCycles}[/]  [grey]ok[/] [green]{st.AcceptedCycles}[/]  [grey]fault[/] [red]{st.FaultedCycles}[/]",
+                $"[grey]last    [/] {lastMs:F2}ms",
+                $"[grey]avg/min/max[/] {avgMs:F2} / {minMs:F2} / {maxMs:F2} ms",
+                $"[grey]restarts[/] [red]{st.WorkerRestarts}[/]",
+                $"[grey]in  →   [/] [steelblue1]{Markup.Escape(inP)}[/]",
+                $"[grey]out →   [/] [mediumspringgreen]{Markup.Escape(outP)}[/]"
+            ]));
+        }
+
+        return new Panel(body)
+        {
+            Header = new PanelHeader("[steelblue1] stats [/]"),
+            Border = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("steelblue1"),
+            Expand = true
+        };
+    }
+
+    private static IRenderable BuildConfigPanel(PipelineNodeDefinition? def)
+    {
+        IRenderable body;
+        if (def is null || def.Config.Count == 0)
+        {
+            body = new Markup("[grey42](no config)[/]");
+        }
+        else
+        {
+            var lines = def.Config.Select(p =>
+                $"[grey66]{Markup.Escape(p.Key)}[/][grey42] = [/][white]{Markup.Escape(p.Value?.ToJsonString() ?? "null")}[/]");
+            body = new Markup(string.Join("\n", lines));
+        }
+
+        return new Panel(body)
+        {
+            Header = new PanelHeader("[grey70] config [/]"),
+            Border = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("grey35"),
+            Expand = true
+        };
+    }
+
+    private IRenderable BuildNodeLogPanel(string nodeId)
+    {
+        var logs = _state.GetNodeLogs(nodeId, 8);
+        IRenderable body = logs.Count == 0
+            ? new Markup("[grey42](no events yet…)[/]")
+            : new Markup(string.Join("\n", logs.Select(l =>
+            {
+                var color = l.Level switch
+                {
+                    LogLevel.Success => "green",
+                    LogLevel.Warning => "yellow",
+                    LogLevel.Error   => "red",
+                    _                => "grey54"
+                };
+                var ts = l.Timestamp.ToString("HH:mm:ss.ff");
+                return $"[grey42]{ts}[/]  [{color}]{Markup.Escape(l.Message)}[/]";
+            })));
+
+        return new Panel(body)
+        {
+            Header = new PanelHeader("[grey70] logs [/]"),
+            Border = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("grey35"),
+            Expand = true
+        };
     }
 }
 

@@ -8,9 +8,11 @@ namespace Mvf.Cli.Tui;
 /// </summary>
 public sealed class GraphLayout
 {
-    public const int NodeBoxWidth    = 26;
+    // Deliberately compact: the smaller a node box is, the more of the graph fits at once and the less
+    // often the viewport has to scroll. Detail lives in the node detail view, not in the box.
+    public const int NodeBoxWidth    = 22;
     public const int NodeBoxHeight   = 5;
-    public const int EdgeColumnWidth = 18;
+    public const int EdgeColumnWidth = 13;
     public const int NodeRowPad      = 1;
 
     /// <summary>Node ID → (layer index, slot index within layer).</summary>
@@ -25,6 +27,12 @@ public sealed class GraphLayout
     /// <summary>Edges with computed source and target positions.</summary>
     public IReadOnlyList<LayoutEdge> Edges { get; }
 
+    /// <summary>
+    /// Every node id in a single left-to-right, top-to-bottom order (layer then slot). This is the order
+    /// the operator's ←/→ keys walk, so stepping right always lands on the visually next node.
+    /// </summary>
+    public IReadOnlyList<string> TraversalOrder { get; }
+
     private GraphLayout(
         IReadOnlyDictionary<string, (int, int)> positions,
         IReadOnlyList<IReadOnlyList<string>> layers,
@@ -34,7 +42,12 @@ public sealed class GraphLayout
         LayerCount = layers.Count;
         Layers = layers;
         Edges = edges;
+        TraversalOrder = layers.SelectMany(l => l).ToList();
     }
+
+    /// <summary>The layer a node sits in, or 0 when it is unknown to the layout.</summary>
+    public int LayerOf(string nodeId) =>
+        NodePositions.TryGetValue(nodeId, out var pos) ? pos.Layer : 0;
 
     public static GraphLayout Build(PipelineDefinition definition)
     {

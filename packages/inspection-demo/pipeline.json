@@ -1,0 +1,61 @@
+{
+  "name": "inspection-demo",
+  "version": "1.0.0",
+  "description": "A longer, hardware-free line-inspection pipeline built to exercise the CLI graph view (6 layers, 13 nodes, every category and both edge kinds). `cycle` is the iteration owner (mode forever): when the folder source runs out of frames the loop rewinds and replays. Each frame fans out five ways from `fork`: it is inverted and archived (Python transformer → saveInverted); classified black/ok by mean brightness (Python classifier → `route` switch → saveBlack / saveOk); and periodically sampled by a stateful frame counter (Python → `sample` switch keeps only even-numbered frames → saveSample). Two live-editable settings show config-in-node: `thr` is a `value` node (lands next cycle, no restart) and `cam.frameIntervalMs` is a MODULE binding (re-activates the source). Press SPACE to pause/resume; ←/→ to walk nodes; ENTER to open a node's detail page (config, stats, logs). Serial mode only (a loop is serial-only). Run it with: execute-graph --package packages/inspection-demo --max-cycles 200",
+  "nodes": [
+    { "id": "cycle", "primitive": "loop", "displayName": "Loop",
+      "config": { "mode": "forever" } },
+
+    { "id": "thr", "primitive": "value", "displayName": "Brightness threshold (live)",
+      "config": { "type": "int", "binding": "brightness.threshold", "literal": 40,
+                  "schema": { "type": "integer", "minimum": 0, "maximum": 255 } } },
+
+    { "id": "cam", "module": "mvf.folder-source", "displayName": "Folder Source",
+      "config": { "sourceFolder": "../multilang-demo/assets/frames", "frameIntervalMs": 250 },
+      "bindings": {
+        "frameIntervalMs": { "type": "int", "binding": "cam.interval",
+                             "schema": { "type": "integer", "minimum": 0, "maximum": 5000 } }
+      } },
+
+    { "id": "fork", "primitive": "fork", "displayName": "Fan-out" },
+
+    { "id": "invert", "module": "py.invert-transformer",    "displayName": "Invert (Python)" },
+    { "id": "bright", "module": "py.brightness-classifier", "displayName": "Brightness (Python)" },
+    { "id": "count",  "module": "py.frame-counter",         "displayName": "Frame Counter (Python)" },
+
+    { "id": "route",  "primitive": "switch", "displayName": "Route by brightness" },
+    { "id": "sample", "primitive": "switch", "displayName": "Sample even frames" },
+
+    { "id": "saveInverted", "module": "mvf.dataset-writer", "displayName": "Save Inverted",
+      "config": { "outputRoot": "out/inverted", "sessionPrefix": "inverted" } },
+    { "id": "saveBlack",    "module": "mvf.dataset-writer", "displayName": "Save Black (defect)",
+      "config": { "outputRoot": "out/black", "sessionPrefix": "black" } },
+    { "id": "saveOk",       "module": "mvf.dataset-writer", "displayName": "Save Ok",
+      "config": { "outputRoot": "out/ok", "sessionPrefix": "ok" } },
+    { "id": "saveSample",   "module": "mvf.dataset-writer", "displayName": "Save Sample",
+      "config": { "outputRoot": "out/sample", "sessionPrefix": "sample" } }
+  ],
+  "edges": [
+    { "from": "cam.frame", "to": "fork.frame" },
+
+    { "from": "fork.toInvert", "to": "invert.frame" },
+    { "from": "fork.toBright", "to": "bright.frame" },
+    { "from": "fork.toCount",  "to": "count.frame" },
+    { "from": "fork.toRoute",  "to": "route.frame" },
+    { "from": "fork.toSample", "to": "sample.frame" },
+
+    { "from": "invert.frame", "to": "saveInverted.frame" },
+
+    { "from": "bright.class", "to": "route.class" },
+    { "from": "route.black",  "to": "saveBlack.frame" },
+    { "from": "route.ok",     "to": "saveOk.frame" },
+
+    { "from": "count.class",  "to": "sample.class" },
+    { "from": "sample.even",  "to": "saveSample.frame" },
+
+    { "from": "saveInverted", "to": "cycle" },
+    { "from": "saveBlack",    "to": "cycle" },
+    { "from": "saveOk",       "to": "cycle" },
+    { "from": "saveSample",   "to": "cycle" }
+  ]
+}

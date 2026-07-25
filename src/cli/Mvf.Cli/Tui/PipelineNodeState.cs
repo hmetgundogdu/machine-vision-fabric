@@ -23,6 +23,15 @@ public sealed class PipelineNodeState
     public int FaultedCycles { get; set; }
     public long LastDurationMicros { get; set; }
 
+    // Rolling timing: kept alongside LastDurationMicros so the detail view can show min/avg/max without a
+    // second pass over the log. Accumulated in PipelineRenderState.OnNodeExecuted.
+    public long TotalDurationMicros { get; set; }
+    public long MinDurationMicros { get; set; } = long.MaxValue;
+    public long MaxDurationMicros { get; set; }
+
+    /// <summary>Mean per-cycle duration in microseconds, or 0 before the first cycle.</summary>
+    public double AverageDurationMicros => TotalCycles > 0 ? (double)TotalDurationMicros / TotalCycles : 0;
+
     /// <summary>Out-of-process worker restarts observed so far for this node (0 when it runs in-process).</summary>
     public int WorkerRestarts { get; set; }
 

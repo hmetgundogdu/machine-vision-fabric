@@ -11,8 +11,12 @@ public sealed class PipelineRenderState
     private readonly object _lock = new();
     private readonly CircularBuffer<PipelineLogEntry> _logs;
     private readonly Dictionary<string, PipelineNodeState> _nodes;
+    // Per-node log rings, so the node detail view can show just that node's activity without re-scanning
+    // the shared buffer (which also carries cycle-boundary and run-level lines that belong to no node).
+    private readonly Dictionary<string, CircularBuffer<PipelineLogEntry>> _nodeLogs;
 
-    public const int DefaultLogCapacity = 20;
+    public const int DefaultLogCapacity  = 20;
+    public const int NodeLogCapacity      = 24;
 
     public PipelineRenderState(PipelineDefinition definition, int logCapacity = DefaultLogCapacity)
     {
@@ -29,6 +33,10 @@ public sealed class PipelineRenderState
                     TypeLabel = ResolveTypeLabel(n)
                 },
                 StringComparer.OrdinalIgnoreCase);
+        _nodeLogs = definition.Nodes.ToDictionary(
+            n => n.Id,
+            _ => new CircularBuffer<PipelineLogEntry>(NodeLogCapacity),
+            StringComparer.OrdinalIgnoreCase);
     }
 
     // ── Public state (immutable snapshots) ────────────────────────────────
@@ -39,6 +47,19 @@ public sealed class PipelineRenderState
     public int AcceptedCycles { get; private set; }
     public TimeSpan Elapsed { get; private set; }
     public bool IsFinished { get; private set; }
+
+    /// <summary>Wall-clock of the most recently completed cycle, for the header's per-cycle readout.</summary>
+    public TimeSpan LastCycleDuration { get; private set; }
+
+    /// <summary>
+    /// The node that executed most recently — drawn as the "live" node so the highlight flows through the
+    /// graph as execution advances. Distinct from the operator's navigation cursor.
+    /// </summary>
+    public string? LastActiveNodeId { get; private set; }
+
+    /// <summary>Mean wall-clock per completed cycle, or <see cref="TimeSpan.Zero"/> before the first.</summary>
+    public TimeSpan AverageCycleDuration =>
+        TotalCycles > 0 ? TimeSpan.FromTicks(Elapsed.Ticks / TotalCycles) : TimeSpan.Zero;
 
     public IReadOnlyDictionary<string, PipelineNodeState> Nodes => _nodes;
 
@@ -63,8 +84,15 @@ public sealed class PipelineRenderState
             node.Status = e.Faulted ? NodeLifecycleStatus.Faulted : NodeLifecycleStatus.Done;
             node.TotalCycles++;
             node.LastDurationMicros = e.DurationMicros;
+            node.TotalDurationMicros += e.DurationMicros;
+            node.MinDurationMicros = Math.Min(node.MinDurationMicros, e.DurationMicros);
+            node.MaxDurationMicros = Math.Max(node.MaxDurationMicros, e.DurationMicros);
             node.LastInputPorts = e.InputPortNames;
             node.LastOutputPorts = e.OutputPortNames;
+
+            // The node that just ran is the one the graph highlights as "live"; the highlight moves as the
+            // next node reports.
+            LastActiveNodeId = e.NodeId;
 
             if (e.HasOutput && !e.Faulted)
                 node.AcceptedCycles++;
@@ -80,6 +108,8 @@ public sealed class PipelineRenderState
                 node.WorkerRestarts = e.WorkerRestarts;
                 AddLog(LogLevel.Warning,
                     $"[cyc:{e.CycleIndex}] {e.NodeId}  worker restarted x{recovered} (recovered, total {e.WorkerRestarts})");
+                AddNodeLog(e.NodeId, LogLevel.Warning,
+                    $"[cyc:{e.CycleIndex}] worker restarted x{recovered} (recovered)");
             }
 
             var ports = e.HasOutput
@@ -87,6 +117,7 @@ public sealed class PipelineRenderState
                 : "→ (no output)";
             var lvl = e.Faulted ? LogLevel.Error : LogLevel.Info;
             AddLog(lvl, $"[cyc:{e.CycleIndex}] {e.NodeId}  {ports}  ({DurationText.Format(e.DurationMicros)})");
+            AddNodeLog(e.NodeId, lvl, $"[cyc:{e.CycleIndex}] {ports}  ({DurationText.Format(e.DurationMicros)})");
         }
     }
 
@@ -94,6 +125,8 @@ public sealed class PipelineRenderState
     {
         lock (_lock)
         {
+            // Per-cycle wall clock is the delta in cumulative elapsed since the previous cycle boundary.
+            LastCycleDuration = p.Elapsed > Elapsed ? p.Elapsed - Elapsed : TimeSpan.Zero;
             TotalCycles = p.TotalCycles;
             AcceptedCycles = p.AcceptedCycles;
             Elapsed = p.Elapsed;
@@ -132,6 +165,17 @@ public sealed class PipelineRenderState
         }
     }
 
+    /// <summary>Returns a snapshot of one node's recent log entries (newest last).</summary>
+    public IReadOnlyList<PipelineLogEntry> GetNodeLogs(string nodeId, int maxCount)
+    {
+        lock (_lock)
+        {
+            return _nodeLogs.TryGetValue(nodeId, out var buf)
+                ? buf.TakeLast(maxCount)
+                : [];
+        }
+    }
+
     /// <summary>Returns a shallow copy of node states for safe rendering.</summary>
     public IReadOnlyList<PipelineNodeState> GetNodeSnapshot()
     {
@@ -143,6 +187,12 @@ public sealed class PipelineRenderState
 
     private void AddLog(LogLevel level, string message) =>
         _logs.Add(new PipelineLogEntry { Timestamp = DateTime.Now, Level = level, Message = message });
+
+    private void AddNodeLog(string nodeId, LogLevel level, string message)
+    {
+        if (_nodeLogs.TryGetValue(nodeId, out var buf))
+            buf.Add(new PipelineLogEntry { Timestamp = DateTime.Now, Level = level, Message = message });
+    }
 
     private static string ResolveTypeLabel(PipelineNodeDefinition n) =>
         n.Kind switch
