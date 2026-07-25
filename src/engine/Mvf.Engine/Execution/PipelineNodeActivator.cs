@@ -104,7 +104,7 @@ public sealed class PipelineNodeActivator(
         if (catalog.TryGetValue(node.ModuleId, out var entry)
             && !string.Equals(entry.Manifest.Runtime, "dotnet", StringComparison.OrdinalIgnoreCase))
         {
-            return await CreateOutOfProcessRunnerAsync(node, entry, cancellationToken);
+            return await CreateOutOfProcessRunnerAsync(node, entry, options, cancellationToken);
         }
 
         var modules = integrationModuleLoader.LoadModules(options.IntegrationsRoot);
@@ -144,6 +144,7 @@ public sealed class PipelineNodeActivator(
     private async Task<INodeRunner> CreateOutOfProcessRunnerAsync(
         PipelineNodeDefinition node,
         ModuleCatalogEntry entry,
+        PipelineExecutionOptions options,
         CancellationToken cancellationToken)
     {
         if (outOfProcessModuleHost is null)
@@ -153,11 +154,26 @@ public sealed class PipelineNodeActivator(
                 "which needs an out-of-process module host, but none is registered.");
         }
 
+        // Bind the run-level log sink to this node: the worker only knows its own module id, so the
+        // engine attaches the node id here on the way up. Null when no one is listening (headless with
+        // no callback) keeps the worker's stdout/stderr draining but forwards nothing.
+        var onNodeLog = options.OnNodeLog;
+        Action<WorkerLogLine>? onLog = onNodeLog is null
+            ? null
+            : line => onNodeLog(new NodeLogEvent
+            {
+                NodeId = node.Id,
+                ModuleId = entry.Manifest.Id,
+                Level = line.Level,
+                Message = line.Message
+            });
+
         var activation = new OutOfProcessModuleActivation(
             ModuleId: entry.Manifest.Id,
             Runtime: entry.Manifest.Runtime,
             EntryPath: Path.Combine(entry.Directory, entry.Manifest.Entry),
-            WorkingDirectory: entry.Directory);
+            WorkingDirectory: entry.Directory,
+            OnLog: onLog);
 
         return node.Category switch
         {

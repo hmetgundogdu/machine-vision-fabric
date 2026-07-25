@@ -132,6 +132,27 @@ mvf execute-graph --package my-pipeline --no-tui --max-cycles 3   # headless
 In the dashboard: `←/→` move between nodes, `Enter` opens node detail, `Space` pauses/resumes,
 and typing edits a `value` node or a module binding live. See [`cli-guide.md`](cli-guide.md).
 
+## 6.5 · Logging & diagnostics
+
+A module reports what it is doing with one call, and the engine carries it to the operator — the
+node's log panel in the live dashboard, or the engine's stderr under `--no-tui`:
+
+- **Python** — `from mvf_sdk import log` → `log("inverted 64 bytes")` (optional `level=`).
+- **C++** — `mvf::log("connected to camera")` (optional level).
+- **.NET (in-process module)** — `using Mvf.Sdk;` → `ModuleLog.Info("...")` / `Warn` / `Error`.
+
+For an out-of-process module (Python/C++/native) the engine also forwards anything the child writes
+to **stderr** (a traceback, a `print`) as a `stderr`-level line, so an unhandled error is never
+silent.
+
+When a node fails to start or throws, the run's error names the **node and module** and includes the
+inner cause — for a worker that is its stderr. So instead of a bare `Node activation failed:` you get:
+
+```text
+Error: Node 'invert' (module 'py.invert-transformer') activation failed: Worker exited before
+sending a hello handshake. (exit code 1; stderr: Traceback (most recent call last): ...)
+```
+
 ## 7 · Read back the run
 
 ```bash

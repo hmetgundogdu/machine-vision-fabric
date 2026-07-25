@@ -100,13 +100,13 @@ public sealed class PipelinedGraphExecutor(
         var runners = new List<INodeRunner>(executionOrder.Count);
         var runnerById = new Dictionary<string, INodeRunner>(StringComparer.OrdinalIgnoreCase);
         var instancesByNode = new Dictionary<string, List<INodeRunner>>(StringComparer.OrdinalIgnoreCase);
-        try
+        foreach (var node in executionOrder)
         {
-            foreach (var node in executionOrder)
-            {
-                var instanceCount = ResolveParallelism(node, loadedCatalog);
-                var activateStart = Stopwatch.GetTimestamp();
+            var instanceCount = ResolveParallelism(node, loadedCatalog);
+            var activateStart = Stopwatch.GetTimestamp();
 
+            try
+            {
                 // One activation per instance: the activator spawns a worker per call, so N instances are
                 // N independent processes — a crash still costs exactly one frame and SupervisedWorker
                 // recovers it unchanged.
@@ -125,11 +125,13 @@ public sealed class PipelinedGraphExecutor(
                 // nothing to restore into the others.
                 await CheckpointCoordinator.RestoreAsync(instances[0], restoredStates, Warn, cancellationToken);
             }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            await DisposeAllAsync(runners);
-            return Failure($"Node activation failed: {ex.Message}", startedAt);
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Name the node and module and flatten the inner cause (worker startup carries the
+                // child's stderr) so the failure is actionable, not a bare "Node activation failed:".
+                await DisposeAllAsync(runners);
+                return Failure(ExecutionDiagnostics.ActivationFailure(node, ex), startedAt);
+            }
         }
 
         var workerNodeIds = DataPlaneRouter.BuildWorkerNodeIds(definition, loadedCatalog);
@@ -159,6 +161,23 @@ public sealed class PipelinedGraphExecutor(
         var droppedFrames = 0;
         var sourceCompleted = false;
         string? runFailure = null;
+
+        // In-process module logging: each node's (level, message) sink, built once. A stage points the
+        // ambient holder at its node's sink once at stage start (see RunSourceStageAsync /
+        // RunConsumerStageAsync) — since a stage is its own async flow, that is one async-local write per
+        // stage and zero per-cycle allocation. Null when nothing observes logs.
+        var moduleLogSinks = options.OnNodeLog is { } onNodeLog
+            ? executionOrder.ToDictionary(
+                n => n.Id, n => ExecutionDiagnostics.NodeLogSink(n, onNodeLog), StringComparer.OrdinalIgnoreCase)
+            : null;
+
+        void EnterModuleLog(PipelineNodeDefinition node)
+        {
+            if (moduleLogSinks is not null)
+            {
+                ModuleLogContext.Enter().Sink = moduleLogSinks.GetValueOrDefault(node.Id);
+            }
+        }
 
         // A stage failure has to unblock every other stage, otherwise a producer stays parked on a queue
         // nobody will drain again.
@@ -325,10 +344,10 @@ public sealed class PipelinedGraphExecutor(
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                Warn($"Node '{node.Id}' threw during execution: {ex.Message}");
+                Warn(ExecutionDiagnostics.ExecutionFailure(node, ex));
                 result = NodeExecutionResult.NoOutput;
                 faulted = true;
-                message = ex.Message;
+                message = ExecutionDiagnostics.Flatten(ex);
             }
 
             // A replicated node has N executors sharing this accumulator.
@@ -362,6 +381,8 @@ public sealed class PipelinedGraphExecutor(
         // The source stage drives the run: it produces until exhausted, cancelled, or capped by MaxCycles.
         async Task RunSourceStageAsync(PipelineNodeDefinition node, INodeRunner runner)
         {
+            // One async-local write for this stage's whole life; every RunOnceAsync below inherits it.
+            EnterModuleLog(node);
             long cycle = 0;
             try
             {
@@ -435,6 +456,9 @@ public sealed class PipelinedGraphExecutor(
             IReadOnlyList<INodeRunner> instances,
             IReadOnlyList<PipelineEdgeDefinition> inboundEdges)
         {
+            // One async-local write for this stage's whole life; every RunOnceAsync below — including the
+            // per-instance Task.Run executors — inherits it by capturing this flow's ExecutionContext.
+            EnterModuleLog(node);
             var isSink = NodeRoles.IsSink(node);
             var acc = statsByNode[node.Id];
             var readers = inboundEdges.Select(edge => channelByEdge[edge.Id].Reader).ToArray();

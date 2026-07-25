@@ -115,6 +115,13 @@ struct ModuleHooks {
     std::function<void(const Payload&)> on_restore;
 };
 
+// Emit a diagnostic log line to the engine (protocol {"type":"log"}). Appears in the CLI dashboard
+// (the node's log panel) and, headless, on the engine's stderr — the way a module reports what it is
+// doing without polluting the typed data plane. Safe to call from classify/transform/on_start: the
+// stdio loop is single-threaded, so the line is ordered and never collides with a result.
+// level is "debug"/"info"/"warn"/"error".
+void log(const std::string& message, const std::string& level = "info");
+
 // Run the stdio loop for a classifier module. Blocks until the engine shuts the module down.
 int run_classifier(const std::string& module_id, ClassifyFn classify, ModuleHooks hooks = {});
 

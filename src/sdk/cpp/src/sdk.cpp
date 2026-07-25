@@ -256,6 +256,10 @@ int serve(const std::string& module_id, const char* capability, bool writable,
 
 } // namespace
 
+void log(const std::string& message, const std::string& level) {
+    send({{"type", "log"}, {"level", level}, {"message", message}});
+}
+
 int run_classifier(const std::string& module_id, ClassifyFn classify, ModuleHooks hooks) {
     const bool writable = static_cast<bool>(hooks.on_checkpoint) || static_cast<bool>(hooks.on_restore);
     ExecuteFn on_execute = [classify = std::move(classify)](const json& msg, const json& id,

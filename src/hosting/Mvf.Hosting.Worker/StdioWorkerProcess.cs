@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json.Nodes;
+using Mvf.Abstractions;
 
 namespace Mvf.Hosting.Worker;
 
@@ -17,12 +18,28 @@ public sealed class StdioWorkerProcess : IWorkerChannel
     private readonly StreamWriter _stdin;
     private readonly StreamReader _stdout;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly Action<WorkerLogLine>? _onLog;
 
-    private StdioWorkerProcess(Process process)
+    private StdioWorkerProcess(Process process, Action<WorkerLogLine>? onLog)
     {
         _process = process;
         _stdin = process.StandardInput;
         _stdout = process.StandardOutput;
+        _onLog = onLog;
+    }
+
+    /// <summary>Reads a <c>log</c> protocol message's level/message and forwards it to the sink.</summary>
+    private void ForwardLog(JsonObject message)
+    {
+        if (_onLog is null)
+        {
+            return;
+        }
+
+        var level = (string?)message["level"] ?? "info";
+        var text = (string?)message["message"] ?? string.Empty;
+        try { _onLog(new WorkerLogLine(level, text)); }
+        catch { /* a logging sink must never break the run */ }
     }
 
     public string ModuleId { get; private set; } = string.Empty;
@@ -48,7 +65,14 @@ public sealed class StdioWorkerProcess : IWorkerChannel
         catch { /* already gone */ }
     }
 
-    public static async Task<StdioWorkerProcess> StartAsync(WorkerLaunchInfo info, CancellationToken cancellationToken)
+    /// <summary>Convenience overload for callers that do not consume worker logs (tests, warm spares).</summary>
+    public static Task<StdioWorkerProcess> StartAsync(WorkerLaunchInfo info, CancellationToken cancellationToken) =>
+        StartAsync(info, onLog: null, cancellationToken);
+
+    public static async Task<StdioWorkerProcess> StartAsync(
+        WorkerLaunchInfo info,
+        Action<WorkerLogLine>? onLog,
+        CancellationToken cancellationToken)
     {
         var psi = new ProcessStartInfo
         {
@@ -100,12 +124,20 @@ public sealed class StdioWorkerProcess : IWorkerChannel
                         stderr.Append(line).Append('\n');
                         if (stderr.Length > stderrCap) stderr.Remove(0, stderr.Length - stderrCap);
                     }
+
+                    // Also forward each stderr line upstream so a module's own logging/traceback reaches
+                    // the operator live — not just the bounded tail kept for a startup-failure message.
+                    if (onLog is not null && line.Length > 0)
+                    {
+                        try { onLog(new WorkerLogLine("stderr", line)); }
+                        catch { /* a logging sink must never break the drain */ }
+                    }
                 }
             }
             catch { /* ignore */ }
         }, cancellationToken);
 
-        var worker = new StdioWorkerProcess(process);
+        var worker = new StdioWorkerProcess(process, onLog);
 
         // Builds a " (exit code N; stderr: …)" suffix for a startup-failure message. Waits briefly for the
         // drain to flush once the child is gone, so the child's own error text makes it into the exception.
@@ -182,6 +214,7 @@ public sealed class StdioWorkerProcess : IWorkerChannel
             var type = (string?)message["type"];
             if (type == "log")
             {
+                ForwardLog(message);
                 continue;
             }
             if (type == "ready")
@@ -208,6 +241,7 @@ public sealed class StdioWorkerProcess : IWorkerChannel
                     ?? throw new InvalidOperationException("Worker closed the connection before responding.");
                 if ((string?)message["type"] == "log")
                 {
+                    ForwardLog(message);
                     continue;
                 }
                 return message;

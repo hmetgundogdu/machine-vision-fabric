@@ -78,4 +78,12 @@ public sealed record PipelineExecutionOptions
     /// Fired before cycle-level routing — allows per-node observability.
     /// </summary>
     public Action<NodeExecutionEvent>? OnNodeExecuted { get; init; }
+
+    /// <summary>
+    /// Optional sink for log lines a node emits — a co-located worker's <c>log</c> protocol message or
+    /// stderr line, and an in-process module's <c>ModuleLog</c> calls. Best-effort and off the hot path:
+    /// null discards, which is the original behavior. Lets a module's own logging reach the operator
+    /// (dashboard / stderr) instead of being swallowed.
+    /// </summary>
+    public Action<NodeLogEvent>? OnNodeLog { get; init; }
 }

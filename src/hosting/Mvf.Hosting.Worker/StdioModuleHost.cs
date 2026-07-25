@@ -49,11 +49,13 @@ public sealed class StdioModuleHost(IDataPlane dataPlane) : IOutOfProcessModuleH
     private static int ReadWarmSpares() =>
         int.TryParse(Environment.GetEnvironmentVariable("MVF_WARM_SPARES"), out var n) && n > 0 ? n : 0;
 
-    // A restartable spawn: the supervisor calls this to (re)launch the same module.
+    // A restartable spawn: the supervisor calls this to (re)launch the same module. The log sink is
+    // captured here, so every restarted child forwards its logs/stderr the same way.
     private Func<CancellationToken, Task<StdioWorkerProcess>> Spawn(OutOfProcessModuleActivation activation)
     {
         var launch = BuildLaunchInfo(activation);
-        return token => StdioWorkerProcess.StartAsync(launch, token);
+        var onLog = activation.OnLog;
+        return token => StdioWorkerProcess.StartAsync(launch, onLog, token);
     }
 
     private WorkerLaunchInfo BuildLaunchInfo(OutOfProcessModuleActivation activation) =>

@@ -16,7 +16,7 @@ import json
 import mmap
 import struct
 
-__all__ = ["run_classifier", "run_processor", "Payload", "Output", "blob", "tensor", "MediaType", "ElementType"]
+__all__ = ["run_classifier", "run_processor", "log", "Payload", "Output", "blob", "tensor", "MediaType", "ElementType"]
 
 # ---- typed-payload descriptor (must match Mvf.Abstractions.PayloadDescriptor) ----
 
@@ -173,6 +173,17 @@ def tensor(data, element_type, shape, media_type=MediaType.TENSOR):
 def _send(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
+
+
+def log(message, level="info"):
+    """Emit a diagnostic log line to the engine (protocol ``{"type":"log"}``).
+
+    Appears in the CLI dashboard (the node's log panel) and, headless, on the engine's stderr — the
+    way a module reports what it is doing without polluting the typed data plane. Safe to call from
+    ``transform``/``classify``/``on_start``: the stdio loop is single-threaded, so the line is written
+    in order and never collides with a result. ``level`` is ``debug``/``info``/``warn``/``error``.
+    """
+    _send({"type": "log", "level": str(level), "message": str(message)})
 
 
 def _open_arena(writable=False):

@@ -416,7 +416,13 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         var executionHost = host.Services.GetRequiredService<IPipelineExecutionHost>();
         await using var _ = executionHost;
         Console.WriteLine($"Pipeline: {definition.Name}  nodes:{definition.Nodes.Count}  edges:{definition.Edges.Count}");
-        await executionHost.StartAsync(definition, options);
+        // Headless: a module's logs and any worker stderr go to our stderr so they stay out of the
+        // machine-readable stdout report but are still visible for debugging.
+        var headlessOptions = options with
+        {
+            OnNodeLog = e => Console.Error.WriteLine($"[{e.NodeId}] {e.Level}: {e.Message}")
+        };
+        await executionHost.StartAsync(definition, headlessOptions);
         var report = await executionHost.WaitForCompletionAsync();
         PrintExecutionReport(report);
         if (report is null || !report.Succeeded)

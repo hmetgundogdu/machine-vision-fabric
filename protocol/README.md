@@ -68,10 +68,12 @@ Child → engine, failure for a request:
 {"type":"error","id":1,"message":"..."}
 ```
 
-Child → engine, optional diagnostics (engine may ignore/forward):
+Child → engine, diagnostics (the engine forwards these upstream — CLI dashboard / stderr):
 ```json
 {"type":"log","level":"info","message":"..."}
 ```
+The engine also forwards the child's stderr lines (level `stderr`), so a traceback the module never
+wrapped in a `log` still reaches the operator. `level` is `debug`/`info`/`warn`/`error`.
 
 Engine → child, shutdown (engine then closes stdin):
 ```json

@@ -159,20 +159,24 @@ public sealed class PipelineGraphExecutor(
         }
 
         // Preload resident nodes before the first cycle (models, cameras, PLCs stay warm).
-        try
+        foreach (var node in executionOrder)
         {
-            foreach (var node in executionOrder)
+            if (activationModeByNode[node.Id] == NodeActivationMode.OnDemand)
             {
-                if (activationModeByNode[node.Id] != NodeActivationMode.OnDemand)
-                {
-                    await ActivateNodeAsync(node);
-                }
+                continue;
             }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            await DisposeAllAsync(runners);
-            return Failure($"Node activation failed: {ex.Message}", startedAt);
+
+            try
+            {
+                await ActivateNodeAsync(node);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Name the node and module and flatten the inner cause (worker startup carries the
+                // child's stderr) so the failure is actionable, not a bare "Node activation failed:".
+                await DisposeAllAsync(runners);
+                return Failure(ExecutionDiagnostics.ActivationFailure(node, ex), startedAt);
+            }
         }
 
         var statelessRunners = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -292,6 +296,16 @@ public sealed class PipelineGraphExecutor(
             }
         }
 
+        // In-process module logging: build each node's (level, message) sink once and swap it into the
+        // ambient holder per node. One async-local write for the whole run (Enter), then plain field
+        // writes per node — zero per-cycle allocation. Null when nothing observes logs, where ModuleLog.*
+        // is a no-op. An out-of-process node logs over the protocol instead and ignores this.
+        var moduleLogSinks = options.OnNodeLog is { } onNodeLog
+            ? executionOrder.ToDictionary(
+                n => n.Id, n => ExecutionDiagnostics.NodeLogSink(n, onNodeLog), StringComparer.OrdinalIgnoreCase)
+            : null;
+        var moduleLogHolder = moduleLogSinks is not null ? ModuleLogContext.Enter() : null;
+
         try
         {
             // Resume happens as each node activates (see ActivateNodeAsync): a resident node is restored
@@ -363,7 +377,7 @@ public sealed class PipelineGraphExecutor(
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
-                            warnings.Add($"On-demand activation failed for node '{node.Id}': {ex.Message}");
+                            warnings.Add($"On-demand {ExecutionDiagnostics.ActivationFailure(node, ex)}");
                             failedOnDemand.Add(node.Id);
                             continue;
                         }
@@ -374,16 +388,23 @@ public sealed class PipelineGraphExecutor(
                     var faulted = false;
                     string? faultMessage = null;
 
+                    // Point the ambient holder at this node's sink (a plain field write) so an in-process
+                    // module's ModuleLog lines are attributed to it. No-op when nothing observes logs.
+                    if (moduleLogHolder is not null)
+                    {
+                        moduleLogHolder.Sink = moduleLogSinks!.GetValueOrDefault(node.Id);
+                    }
+
                     try
                     {
                         result = await runner!.ExecuteAsync(inputs, cancellationToken);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        warnings.Add($"Node '{node.Id}' threw during execution: {ex.Message}");
+                        warnings.Add(ExecutionDiagnostics.ExecutionFailure(node, ex));
                         result = NodeExecutionResult.NoOutput;
                         faulted = true;
-                        faultMessage = ex.Message;
+                        faultMessage = ExecutionDiagnostics.Flatten(ex);
                     }
 
                     // Raw ticks, converted once at report time: a local pipeline stage is routinely
@@ -533,6 +554,12 @@ public sealed class PipelineGraphExecutor(
         }
         finally
         {
+            // Clear the ambient log holder so it cannot leak into a later run on this host-lived flow.
+            if (moduleLogHolder is not null)
+            {
+                ModuleLogContext.Exit();
+            }
+
             // Stop watching the registry: it is a host-lived singleton, so a dangling handler would leak
             // this run into the next.
             if (watchesBindings)

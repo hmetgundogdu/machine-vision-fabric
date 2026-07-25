@@ -80,7 +80,8 @@ public sealed class PipelineDashboard
         var enriched = options with
         {
             OnNodeExecuted   = e => _state.OnNodeExecuted(e),
-            OnCycleCompleted = p => _state.OnCycleCompleted(p)
+            OnCycleCompleted = p => _state.OnCycleCompleted(p),
+            OnNodeLog        = e => _state.OnNodeLog(e)
         };
 
         _state.OnRunStarted(Guid.NewGuid().ToString("N")[..8], _definition.Name);

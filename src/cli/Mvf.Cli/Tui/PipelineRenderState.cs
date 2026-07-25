@@ -121,6 +121,30 @@ public sealed class PipelineRenderState
         }
     }
 
+    /// <summary>
+    /// A log line a node emitted (a co-located worker's <c>log</c>/stderr, or an in-process module's
+    /// <c>ModuleLog</c>). Lands in the node's own log panel and the global log so a module's own logging
+    /// is visible live — the whole point of the upstream log channel.
+    /// </summary>
+    public void OnNodeLog(NodeLogEvent e)
+    {
+        lock (_lock)
+        {
+            var level = e.Level.ToLowerInvariant() switch
+            {
+                "error" => LogLevel.Error,
+                "warn" or "warning" or "stderr" => LogLevel.Warning,
+                _ => LogLevel.Info
+            };
+
+            AddLog(level, $"{e.NodeId}  {e.Level}: {e.Message}");
+            if (_nodeLogs.ContainsKey(e.NodeId))
+            {
+                AddNodeLog(e.NodeId, level, $"{e.Level}: {e.Message}");
+            }
+        }
+    }
+
     public void OnCycleCompleted(PipelineExecutionProgress p)
     {
         lock (_lock)
