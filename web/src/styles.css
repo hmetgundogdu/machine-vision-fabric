@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+/* ── Terminal palette — the same colours the CLI dashboard uses ───────────── */
+@theme {
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  --color-terminal: #0d1117;
+  --color-panel: #161b22;
+  --color-panel2: #0b0e14;
+  --color-line: #30363d;
+  --color-line2: #21262d;
+  --color-fg: #c9d1d9;
+  --color-dim: #6e7681;
+
+  /* node categories */
+  --color-src: #00afff;
+  --color-compute: #af87ff;
+  --color-classify: #ff6ac1;
+  --color-flow: #ffd700;
+  --color-sink: #00fa9a;
+  --color-value: #7fffd4;
+
+  /* status */
+  --color-ok: #3fb950;
+  --color-warn: #e3b341;
+  --color-gated: #ff9f43;
+  --color-err: #f85149;
+}
+
+html {
+  background-color: var(--color-terminal);
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  color: var(--color-fg);
+  font-family: var(--font-mono);
+  font-feature-settings: "liga" 0;
+  -webkit-font-smoothing: antialiased;
+  background-color: var(--color-terminal);
+  /* faint node-grid backdrop */
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.035) 1px, transparent 0);
+  background-size: 32px 32px;
+}
+
+::selection {
+  background: #1f6feb55;
+}
+
+/* blinking block cursor */
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+.cursor {
+  animation: blink 1.05s step-end infinite;
+}
+
+/* subtle rise-in for sections */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rise {
+  animation: rise 0.5s ease both;
+}

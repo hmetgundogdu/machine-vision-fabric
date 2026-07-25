@@ -1,0 +1,22 @@
+{
+  "name": "mvf-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Terminal-themed roadmap site for MachineVisionFabric",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "solid-js": "^1.9.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.11",
+    "tailwindcss": "^4.1.11",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vite-plugin-solid": "^2.11.0"
+  }
+}
