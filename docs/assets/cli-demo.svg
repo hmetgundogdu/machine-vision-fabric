@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="432" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13.5">
+  <style>
+    .d{fill:#c9d1d9}.dim{fill:#8b949e}.g{fill:#3fb950}.grn{fill:#7ee787}.b{fill:#79c0ff}.p{fill:#d2a8ff}
+  </style>
+  <!-- window -->
+  <rect x="0.5" y="0.5" width="899" height="431" rx="10" fill="#0d1117" stroke="#30363d"/>
+  <rect x="0.5" y="0.5" width="899" height="36" rx="10" fill="#161b22" stroke="#30363d"/>
+  <rect x="0.5" y="26" width="899" height="11" fill="#161b22"/>
+  <line x1="0.5" y1="36.5" x2="899.5" y2="36.5" stroke="#30363d"/>
+  <circle cx="22" cy="18" r="6" fill="#ff5f56"/>
+  <circle cx="42" cy="18" r="6" fill="#ffbd2e"/>
+  <circle cx="62" cy="18" r="6" fill="#27c93f"/>
+  <text x="450" y="23" text-anchor="middle" class="dim">mvf — machine-vision-fabric</text>
+
+  <!-- terminal body -->
+  <text x="24" y="70" xml:space="preserve"><tspan class="grn">$ </tspan><tspan class="b">mvf </tspan><tspan class="d">execute-graph --package packages/inspection-demo</tspan></text>
+  <text x="24" y="92" xml:space="preserve"><tspan class="dim">Pipeline: </tspan><tspan class="b">inspection-demo</tspan><tspan class="dim">   nodes:</tspan><tspan class="d">13</tspan><tspan class="dim">   edges:</tspan><tspan class="d">16</tspan></text>
+  <text x="24" y="114" xml:space="preserve"><tspan class="dim">Succeeded:</tspan><tspan class="g">True</tspan><tspan class="dim">   cycles:</tspan><tspan class="d">3</tspan><tspan class="dim">   accepted:</tspan><tspan class="d">3</tspan><tspan class="dim">   dropped:</tspan><tspan class="d">0</tspan><tspan class="dim">   restarts:</tspan><tspan class="d">0</tspan><tspan class="dim">   duration:</tspan><tspan class="d">0.76s</tspan></text>
+
+  <text x="24" y="136" xml:space="preserve"><tspan class="b">  cam         </tspan><tspan class="p">Resident  </tspan><tspan class="d">warmup=21ms  cycles=3  avg=167.85ms</tspan></text>
+  <text x="24" y="158" xml:space="preserve"><tspan class="b">  thr         </tspan><tspan class="p">Resident  </tspan><tspan class="d">cycles=3  avg=0.01ms</tspan></text>
+  <text x="24" y="180" xml:space="preserve"><tspan class="b">  fork        </tspan><tspan class="p">Resident  </tspan><tspan class="d">cycles=3  avg=0.04ms</tspan></text>
+  <text x="24" y="202" xml:space="preserve"><tspan class="b">  bright      </tspan><tspan class="p">Resident  </tspan><tspan class="d">warmup=74ms  cycles=3  avg=1.21ms</tspan></text>
+  <text x="24" y="224" xml:space="preserve"><tspan class="dim">      └ worker </tspan><tspan class="p">py.brightness-classifier</tspan><tspan class="d">  rpc=3  avg=0.66ms</tspan></text>
+  <text x="24" y="246" xml:space="preserve"><tspan class="b">  count       </tspan><tspan class="p">Resident  </tspan><tspan class="d">cycles=3  avg=0.19ms</tspan></text>
+  <text x="24" y="268" xml:space="preserve"><tspan class="dim">      └ worker </tspan><tspan class="p">py.frame-counter</tspan><tspan class="d">  rpc=3  avg=0.18ms</tspan></text>
+  <text x="24" y="290" xml:space="preserve"><tspan class="b">  invert      </tspan><tspan class="p">Resident  </tspan><tspan class="d">cycles=3  avg=0.65ms</tspan></text>
+  <text x="24" y="312" xml:space="preserve"><tspan class="dim">      └ worker </tspan><tspan class="p">py.invert-transformer</tspan><tspan class="d">  rpc=3  avg=0.22ms</tspan></text>
+  <text x="24" y="334" xml:space="preserve"><tspan class="dim">  sinks       </tspan><tspan class="b">route  sample  saveInverted  saveBlack  saveOk  saveSample  cycle</tspan></text>
+
+  <text x="24" y="378" xml:space="preserve"><tspan class="g">✓ </tspan><tspan class="d">inspection-demo — 13 nodes · 3 cycles · 0 faults · </tspan><tspan class="grn">hardware-free</tspan></text>
+</svg>

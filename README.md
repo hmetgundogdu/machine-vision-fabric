@@ -1,153 +1,171 @@
 # MachineVisionFabric
 
-MachineVisionFabric is an open-source edge vision platform for headless dataset collection, device integration, PLC-gated capture, and future machine-vision execution on edge devices.
+[![CI](https://github.com/hmetgundogdu/machine-vision-fabric/actions/workflows/ci.yml/badge.svg)](https://github.com/hmetgundogdu/machine-vision-fabric/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/hmetgundogdu/machine-vision-fabric?sort=semver)](https://github.com/hmetgundogdu/machine-vision-fabric/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-The repository now distinguishes between:
+**MachineVisionFabric (MVF)** is an open-source, **edge-first** vision pipeline platform.
+It runs a strict, schema-validated **typed graph** of nodes — cameras, transforms, AI
+inference, PLC/control, storage — directly on panel PCs, industrial PCs, and NUC-class edge
+devices. It keeps running without a central server; a central system is optional, and only
+for observability.
 
-- the current package-driven composition runtime
-- the future typed pipeline graph runtime
+<p align="center">
+  <img src="docs/assets/cli-demo.svg" alt="mvf CLI running the inspection-demo pipeline" width="820">
+</p>
 
-## Product Boundary
+The screenshot above is a real headless run of `packages/inspection-demo` — a 13-node graph
+(camera simulator → threshold → fork → Python brightness/counter/invert workers → routed
+dataset sinks) executing end-to-end with **no hardware**.
 
-- `MachineVisionFabric` is the platform product.
-- camera SDK adapters, PLC adapters, and customer-specific logic are not platform code
-- graph or pipeline authoring UI is a future product layer, not the current MVP
+## Why MVF
 
-The repository now reflects that split explicitly:
+- **Strict typed graph** — every edge is typed and schema-validated at runtime, not just in a UI.
+  `NODE(typed output) → NODE(typed input)`.
+- **Data flow ≠ control flow** — frame/tensor transfer (**data edges**) and branch/gate
+  decisions (**control edges**) are separate first-class link types, never collapsed.
+- **Edge-first execution** — the edge runtime owns camera/stream access, PLC integration,
+  inference, execution, and local persistence. The central system only *observes*.
+- **Polyglot modules, one protocol** — modules run out-of-process over a small stdio control
+  plane + a zero-copy **shared-memory data plane** (typed payloads, no base64). Author them in
+  **.NET, Python, or C++** interchangeably.
+- **Simulator-first** — testable without vendor cameras; folder/loop/scenario simulators ship in-box.
+
+See [`docs/architecture-foundation.md`](docs/architecture-foundation.md) and
+[`docs/roadmap.md`](docs/roadmap.md) for the full design.
+
+## Repository layout
 
 ```text
-MachineVisionFabric/
-|-- src/                  platform core, layered so the engine stays minimal
-|   |-- core/             Mvf.Graph (typed graph model + validation), Mvf.Abstractions (contracts)
-|   |-- engine/           Mvf.Engine (scheduler + node runners)
-|   |-- sdk/dotnet/       Mvf.Sdk (.NET module authoring)
-|   `-- cli/              Mvf.Cli (headless host + ASCII TUI)
-|-- modules/              .NET integration modules (Cognex camera, filters, dataset writer)
-|-- packages/             runnable pipeline packages (pipeline.json)
-|-- tools/                Mvf.SchemaExporter
-|-- tests/
-`-- docs/                 architecture + roadmap (see docs/roadmap.md)
+machine-vision-fabric/
+├── src/
+│   ├── core/            Mvf.Graph (typed graph + validation), Mvf.Abstractions (contracts)
+│   ├── engine/          Mvf.Engine (pipelined scheduler, checkpoint/restore, backpressure)
+│   ├── hosting/         Mvf.Hosting.Worker (out-of-process module host)
+│   ├── transports/      Mvf.Transport.SharedMemory (zero-copy data plane)
+│   ├── sdk/
+│   │   ├── dotnet/      Mvf.Sdk         → NuGet:  MachineVisionFabric.Sdk
+│   │   ├── python/      mvf_sdk         → wheel:  mvf-sdk
+│   │   └── cpp/         mvf/sdk.hpp     → lib:    libmvf_sdk.{so,dylib} / mvf_sdk.dll
+│   └── cli/             Mvf.Cli (headless host + live TUI dashboard)
+├── modules/             integration modules (.NET + Python) discovered at runtime
+├── packages/            runnable pipeline packages (pipeline.json)
+├── tools/               Mvf.SchemaExporter
+├── tests/               engine test suite
+└── protocol/            the language-agnostic module wire protocol
 ```
 
-The **core** (`src/core`) knows only what a pipeline is (typed graph) and what a node
-contract is; transports, module hosts and language SDKs attach at the edges so the core
-stays small. `modules/` holds pluggable integration modules; `packages/` holds the
-pipelines that compose them. See `docs/roadmap.md` for the architecture and roadmap.
+## Install
 
-## Current Direction
+### Download the CLI (no .NET required)
 
-The project is intentionally `headless-first` and `dataset-first`.
+Grab a single self-contained executable for your OS from the
+[latest release](https://github.com/hmetgundogdu/machine-vision-fabric/releases/latest):
 
-The first MVP goal is:
+| OS | Asset |
+|---|---|
+| Linux | `mvf-cli-linux-x64` |
+| macOS (Apple Silicon) | `mvf-cli-osx-arm64` |
+| Windows | `mvf-cli-win-x64.exe` |
 
-- reliable runtime bootstrap
-- package and profile loading
-- dataset session creation
-- source and gate resolution through `.NET` modules
-- simulator-driven capture without hardware
-
-At the same time, the next architectural layer is now defined as a typed graph model with:
-
-- embedded engine-owned primitive nodes such as `if`, `switch`, `fork`, and `loop`
-- external SDK-based work nodes such as camera, PLC, inference, stream, and storage integrations
-
-UI comes later.
-
-## Verified Status
-
-As of `2026-07-16`, the current MVP is verified to:
-
-- collect dataset frames into session folders
-- write per-frame metadata plus `session.json`
-- resolve a frame source from an external `.NET` integration module
-- resolve a product presence gate from an external `.NET` integration module
-- stream frames through the new `IFrameSourceSession` contract
-- capture from both file-backed and in-memory frame envelopes
-- capture `pre/post trigger` frame windows around the first positive gate event
-- skip capture when the gate says the product is not present
-
-As of `2026-07-17`, the typed pipeline graph is the primary execution model, driven by
-`execute-graph`. The repository ships one end-to-end graph package:
-
-- `packages/cognex-dark-capture` — Cognex auto-trigger capture that
-  saves every frame and branches very dark frames into a separate dataset.
-
-The runtime discovers integration modules under `modules`
-(Cognex camera source, dark-frame filter, black-screen check, dataset writer) and exposes
-a typed inspection surface for resolved pipelines and SDK module metadata.
-
-## Run
-
-Build the platform and the integration modules:
-
-```powershell
-dotnet build Mvf.slnx -v minimal
+```bash
+chmod +x mvf-cli-linux-x64
+./mvf-cli-linux-x64 packages
 ```
 
-`Mvf.slnx` includes the platform, the modules and the tools. The CLI resolves its default
-paths relative to the repository root, so the commands below work with no flags when run
-from a clone. `CLI` is `src\cli\Mvf.Cli\bin\Debug\net10.0\Mvf.Cli.dll`.
+### Build from source
 
-List the discovered integration modules:
+Requires the .NET SDK pinned in `global.json` (.NET 10).
 
-```powershell
-dotnet $CLI modules
+```bash
+dotnet build Mvf.slnx -c Release
+dotnet run --project src/cli/Mvf.Cli -- packages
 ```
 
-List the runnable packages (`graph` = pipeline.json package):
+## Quickstart
 
-```powershell
-dotnet $CLI packages
+```bash
+# List runnable pipeline packages and discovered modules
+dotnet run --project src/cli/Mvf.Cli -- packages
+dotnet run --project src/cli/Mvf.Cli -- modules
+
+# Validate a pipeline graph
+dotnet run --project src/cli/Mvf.Cli -- validate-pipeline --path packages/inspection-demo/pipeline.json
+
+# Run the inspection demo — live TUI dashboard
+dotnet run --project src/cli/Mvf.Cli -- execute-graph --package packages/inspection-demo
+
+# ...or headless (as in the screenshot): plain output, stop after N cycles
+dotnet run --project src/cli/Mvf.Cli -- execute-graph --package packages/inspection-demo --no-tui --max-cycles 3
 ```
 
-Validate the shipped pipeline graph:
+### Demo packages (hardware-free)
 
-```powershell
-dotnet $CLI validate-pipeline --path packages\cognex-dark-capture\pipeline.json
+| Package | Shows |
+|---|---|
+| `inspection-demo` | 13-node inspection graph, polyglot workers, routed dataset sinks |
+| `loop-demo` | graph iteration authority (`loop` primitive, whole-graph pause) |
+| `value-demo` | typed value / select primitives |
+| `multilang-demo` | .NET + Python nodes in one graph |
+| `py-brightness-demo`, `py-invert-demo` | single Python classifier / transformer |
+| `cognex-dark-capture` | real Cognex auto-trigger capture + dark-frame branch |
+
+## SDKs — author your own modules
+
+All three SDKs speak the **same** protocol (stdio control plane + shared-memory data plane,
+see [`protocol/README.md`](protocol/README.md)), so a module is interchangeable across languages.
+
+**Python** — `pip install mvf-sdk`
+
+```python
+from mvf_sdk import run_processor, blob
+
+def transform(payload, meta):
+    return blob(bytes(255 - b for b in payload.memory))   # invert every byte
+
+run_processor("py.invert-transformer", transform)
 ```
 
-Run the default pipeline (`packages\cognex-dark-capture`). Add
-`--no-tui` for plain output and `--max-cycles <n>` to stop after n cycles:
+**C++** — link `libmvf_sdk` (see [`src/sdk/cpp/README.md`](src/sdk/cpp/README.md))
 
-```powershell
-dotnet $CLI execute-graph
-dotnet $CLI execute-graph --no-tui --max-cycles 1
+```cpp
+#include "mvf/sdk.hpp"
+using namespace mvf;
+int main() {
+    return run_processor("cpp.invert-transformer",
+        [](const Payload& in, const json&) -> std::optional<Output> {
+            std::string out(in.size, '\0');
+            for (size_t i = 0; i < in.size; ++i) out[i] = static_cast<char>(255 - in.data[i]);
+            return blob(std::move(out));
+        });
+}
 ```
 
-Run a different package or module/integration root explicitly:
+**.NET** — reference `MachineVisionFabric.Sdk` and derive from `FrameProcessorModuleBase`,
+`FrameClassifierModuleBase`, `FrameSourceModuleBase`, or `FrameSinkModuleBase`.
+See [`docs/sdk-quickstart.md`](docs/sdk-quickstart.md).
 
-```powershell
-dotnet $CLI execute-graph --package <package-dir> --integrations-root <integrations-dir>
-```
+## Releases & CI
 
-### Self-contained deploy
+- **CI** (`.github/workflows/ci.yml`) runs on every push/PR: builds + tests the .NET solution
+  (with Python for the module-spawning tests), builds the Python wheel, and compiles the C++
+  SDK on Linux/macOS/Windows.
+- **Release** (`.github/workflows/release.yml`) runs on a `v*` tag and publishes, all versioned
+  from the tag:
+  - `.nupkg` — `MachineVisionFabric.Sdk`
+  - `.whl` + sdist — `mvf-sdk`
+  - `mvf-sdk-cpp-<ver>-{linux-x64,osx-arm64,win-x64}.zip` — C++ shared library + header
+  - `mvf-cli-{linux-x64,osx-arm64,win-x64}` — self-contained single-file CLI
 
-`publish.ps1` assembles the CLI, the integration modules, and the packages into a single
-folder with `appsettings.json` patched for that layout:
+Cut a release by tagging: `git tag v0.1.2 && git push origin v0.1.2`.
 
-```powershell
-./publish.ps1                     # -> publish/mvf
-cd publish/mvf
-./Mvf.Cli execute-graph --package packages/cognex-dark-capture
-```
-
-## Integrator Direction
-
-External developers should:
-
-- build `.NET` integration modules against `Mvf.Sdk`
-- load them through the platform runtime
-- validate config with exported JSON schema
-- keep vendor SDK code outside `src/`
-
-That means a real camera adapter belongs in its own project under `modules/` or another external solution, not inside the platform core.
-
-## Documents
+## Documentation
 
 - [Architecture Foundation](docs/architecture-foundation.md)
-- [Platform Product Boundary](docs/platform-product-boundary.md)
 - [Pipeline Graph Foundation](docs/pipeline-graph-foundation.md)
-- [Integration SDK Strategy](docs/integration-sdk-strategy.md)
-- [SDK Quickstart](docs/sdk-quickstart.md)
-- [Dataset-First MVP Roadmap](docs/dataset-first-mvp-roadmap.md)
-- [Session Handoff](docs/session-handoff-2026-07-16.md)
+- [Integration SDK Strategy](docs/integration-sdk-strategy.md) · [SDK Quickstart](docs/sdk-quickstart.md)
+- [Roadmap](docs/roadmap.md)
+
+## License
+
+[Apache-2.0](LICENSE)
