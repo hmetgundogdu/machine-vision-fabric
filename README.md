@@ -19,7 +19,9 @@ server is optional and only ever observes.
 Above is the CLI's **live graph dashboard** running `packages/inspection-demo` — a 13-node graph
 (folder-source simulator → fork → Python brightness/counter + invert workers → switch → routed
 dataset sinks) executing end-to-end with **no hardware**. Node boxes are colour-coded by
-category, show their live config and per-node stats, and the executing node is highlighted.
+category, show their live config and per-node stats, and the executing node is highlighted; the
+**log panel** underneath streams every node execution, timing, and recovery event as it happens.
+Full walkthrough: [**CLI guide**](docs/cli-guide.md).
 
 ## Why MVF
 
@@ -104,6 +106,9 @@ dotnet run --project src/cli/Mvf.Cli -- execute-graph --package packages/inspect
 # ...or headless (as in the screenshot): plain output, stop after N cycles
 dotnet run --project src/cli/Mvf.Cli -- execute-graph --package packages/inspection-demo --no-tui --max-cycles 3
 ```
+
+The A→Z walkthrough — every command, the **`loop`** primitive that makes a pipeline iterate, and
+driving a run live (pause, node navigation, live edits) — is in the [**CLI guide**](docs/cli-guide.md).
 
 ### Demo packages (hardware-free)
 
@@ -198,6 +203,11 @@ Reference the module by `id` on a node and connect typed ports with edges:
 }
 ```
 
+The data graph is a strict DAG, so this runs **one pass**. To replay the folder or run continuously,
+add a `loop` node and close the tail back to it (`{ "from": "save", "to": "cycle" }`) — the loop owns
+iteration and whole-graph pause. See the [**CLI guide**](docs/cli-guide.md) for the loop model and
+driving a run live.
+
 ### 5 · Run it
 
 ```bash
@@ -226,6 +236,7 @@ Cut a release by tagging: `git tag v0.1.2 && git push origin v0.1.2`.
 
 ## Documentation
 
+- [CLI Guide](docs/cli-guide.md) — run pipelines A→Z, the `loop` primitive, live control
 - [Architecture Foundation](docs/architecture-foundation.md)
 - [Pipeline Graph Foundation](docs/pipeline-graph-foundation.md)
 - [Integration SDK Strategy](docs/integration-sdk-strategy.md) · [SDK Quickstart](docs/sdk-quickstart.md)
