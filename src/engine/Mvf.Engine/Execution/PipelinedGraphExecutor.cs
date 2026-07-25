@@ -785,6 +785,26 @@ public sealed class PipelinedGraphExecutor(
                 return $"Node '{node.Id}' is on-demand. Lazy activation is serial-only for now; in pipelined "
                      + "mode every stage is warmed before the run. Run this pipeline in serial mode.";
             }
+
+            // A value node has no inputs, so it has no queue to read and nothing to pace it — as a stage it
+            // would emit for a cycle that may never come. Feeding constants into a pipelined graph needs a
+            // decision (emit once and hold, or once per source cycle) that is not worth guessing at.
+            if (string.Equals(node.Kind, "embedded-primitive", StringComparison.OrdinalIgnoreCase)
+                && node.PrimitiveType is "value" or "select")
+            {
+                return $"Node '{node.Id}' is a '{node.PrimitiveType}' primitive. Value resolution is "
+                     + "serial-only for now. Run this pipeline in serial mode.";
+            }
+
+            // A `loop` is a whole-graph marker that carries the run's pause state — a property of the serial
+            // cycle. The pipelined executor runs every stage continuously and has no pause gate yet, so it
+            // refuses a loop rather than running it with pause silently doing nothing.
+            if (string.Equals(node.Kind, "embedded-primitive", StringComparison.OrdinalIgnoreCase)
+                && node.PrimitiveType is "loop")
+            {
+                return $"Node '{node.Id}' is a 'loop' primitive. Pause is serial-only for now. "
+                     + "Run this pipeline in serial mode.";
+            }
         }
 
         return null;

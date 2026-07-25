@@ -47,6 +47,15 @@ public sealed class PipelineNodeDefinition
 
     public JsonObject Config { get; set; } = [];
 
+    /// <summary>
+    /// Config fields the operator may edit live from the CLI, each declaring its type (and optionally a
+    /// schema + a persistence binding). The field's current value lives in <see cref="Config"/>; this map
+    /// only says "this field is tunable, and here is how to type-check it". A change re-activates the node
+    /// with the new value — modules read config at activation, so re-opening is how the new value takes
+    /// effect. Empty for a node with no live-editable config.
+    /// </summary>
+    public JsonObject Bindings { get; set; } = [];
+
     public IReadOnlyList<PipelinePortDefinition> Inputs { get; set; } = [];
 
     public IReadOnlyList<PipelinePortDefinition> Outputs { get; set; } = [];

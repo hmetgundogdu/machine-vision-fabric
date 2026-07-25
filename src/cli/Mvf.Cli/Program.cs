@@ -4,12 +4,15 @@ using System.Text.Json.Schema;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using Mvf.Cli.Tui;
+using Mvf.Cli.Values;
+using Mvf.Engine.Values;
 using Mvf.Graph.Control;
 using Mvf.Graph.Dataset;
 using Mvf.Graph.Execution;
 using Mvf.Graph.Integrations;
 using Mvf.Graph.Pipelines;
 using Mvf.Graph.Simulation;
+using Mvf.Graph.Values;
 using Mvf.Abstractions;
 using Mvf.Engine;
 using Mvf.Engine.Execution;
@@ -372,6 +375,36 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         return;
     }
 
+    // Binding pre-pass — resolve every value/select node before execution starts, so the engine only
+    // ever sees constants. It sits here for two reasons: the cycle loop runs per frame and must never
+    // block on a human, and the dashboard below repaints the whole screen every 120 ms, so a prompt
+    // cannot share it. Bindings live outside the package: the same pipeline.json deploys everywhere and
+    // each machine binds to its own hardware.
+    var bindingsPath = Path.Combine(packageRoot, ".mvf", "bindings.json");
+    var bindingStore = new FileValueBindingStore(bindingsPath);
+    var prePass = new BindingPrePass(
+        bindingStore,
+        new ChainedValueResolver(
+            new EnvironmentValueResolver(),
+            new TerminalValueResolver(enabled: !invocation.Options.ContainsKey("no-prompt"))));
+
+    var bindingResult = await prePass.RunAsync(definition, CancellationToken.None);
+    if (!bindingResult.Succeeded)
+    {
+        AnsiConsole.MarkupLine($"[bold]{Markup.Escape(definition.Name)}[/]  [red]✖ Unresolved values[/]");
+        foreach (var error in bindingResult.Errors)
+        {
+            AnsiConsole.MarkupLine($"  [red]ERROR[/] {Markup.Escape(error)}");
+        }
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    if (bindingResult.BindingsChanged)
+    {
+        Console.WriteLine($"Saved {bindingResult.PromptedCount} binding(s) to {bindingsPath}");
+    }
+
     var noTui = invocation.Options.ContainsKey("no-tui") || !AnsiConsole.Profile.Capabilities.Ansi;
 
     if (noTui)
@@ -391,10 +424,15 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         return;
     }
 
-    // TUI dashboard
+    // TUI dashboard. Value nodes register as live tunables while they activate, so the dashboard can
+    // offer them for editing mid-run; a change is written straight back to the binding store, which is
+    // why the same value comes up tuned on the next run.
+    var liveValues = host.Services.GetRequiredService<LiveValueRegistry>();
+    liveValues.Changed += live => PersistTunable(bindingStore, live);
+
     var tuiHost = host.Services.GetRequiredService<IPipelineExecutionHost>();
     await using var _2 = tuiHost;
-    var dashboard = new PipelineDashboard(tuiHost, definition);
+    var dashboard = new PipelineDashboard(tuiHost, definition, liveValues);
     var dashReport = await dashboard.RunAsync(options);
 
     // The dashboard is transient (it repaints in place); print the summary so the run leaves a record
@@ -405,6 +443,38 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
     if (dashReport is null || !dashReport.Succeeded)
     {
         Environment.ExitCode = 1;
+    }
+}
+
+// Writes a tuned value back to the binding store, so tomorrow's run starts where the operator left it.
+//
+// A value with no binding is skipped rather than persisted: its only home would be a literal in
+// pipeline.json, and that file is the portable, versioned artifact that deploys byte-identically to every
+// machine — a per-machine tuning session must not rewrite it. Such a value is still tunable; the change
+// just lasts for the run.
+//
+// Blocking here is deliberate. This only ever runs from the dashboard's edit prompt, where the operator is
+// already waiting, and never from the cycle loop.
+void PersistTunable(IValueBindingStore store, LiveValue live)
+{
+    if (live.Binding is not { Length: > 0 } binding)
+    {
+        return;
+    }
+
+    try
+    {
+        var current = store.LoadAsync(CancellationToken.None).GetAwaiter().GetResult();
+        var updated = new Dictionary<string, JsonNode?>(current, StringComparer.Ordinal)
+        {
+            [binding] = live.Current?.DeepClone()
+        };
+
+        store.SaveAsync(updated, CancellationToken.None).GetAwaiter().GetResult();
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+    {
+        // Best effort: a run must not die because a tuning note could not be filed.
     }
 }
 
@@ -496,6 +566,8 @@ IHost BuildHost(IReadOnlyDictionary<string, string?>? overrides = null)
     builder.Services.AddSingleton<IPipelineDefinitionValidator, PipelineDefinitionValidator>();
     builder.Services.AddSingleton<ModuleCatalog>();
     builder.Services.AddSingleton<PipelineExpander>();
+    // Live tunables: value nodes register here as they activate, and the dashboard edits them mid-run.
+    builder.Services.AddSingleton<LiveValueRegistry>();
     // One engine-owned data plane per run, behind the IDataPlane seam. The backing file is created
     // lazily, so commands with no out-of-process modules pay nothing. Slot count comes from the budget,
     // which execute-graph fills in from the graph once the pipeline is expanded — nothing resolves
@@ -575,7 +647,8 @@ void PrintHelp()
 {
     Console.WriteLine("Mvf.Cli");
     Console.WriteLine("Commands:");
-    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--arena-slots <n>] [--no-tui]");
+    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--arena-slots <n>] [--no-tui] [--no-prompt]");
+    Console.WriteLine("      --no-prompt never asks an operator for a value/select binding; an unresolved one fails the run.");
     Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");
     Console.WriteLine("  modules [--root <path>]");
     Console.WriteLine("  packages [--root <path>]");

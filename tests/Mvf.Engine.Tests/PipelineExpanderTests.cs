@@ -199,6 +199,187 @@ public sealed class PipelineExpanderTests
     }
 
     [Fact]
+    public void Expand_ValuePrimitive_HasNoInputsAndOneTypedOutput()
+    {
+        const string json = """
+        { "nodes": [ { "id": "threshold", "primitive": "value",
+                       "config": { "type": "int", "literal": 40 } } ], "edges": [] }
+        """;
+
+        var node = Assert.Single(Expander.Expand(json, Catalog).Nodes);
+
+        Assert.Equal("embedded-primitive", node.Kind);
+        Assert.Equal("value", node.Category);
+        Assert.Empty(node.Inputs);
+        var output = Assert.Single(node.Outputs);
+        Assert.Equal("value", output.Name);
+        Assert.Equal("control", output.Channel);
+        Assert.Equal("control/value:int", output.DataType);
+    }
+
+    [Fact]
+    public void Expand_ValuePrimitive_DefaultsToString()
+    {
+        const string json = """
+        { "nodes": [ { "id": "folder", "primitive": "value", "config": { "literal": "out" } } ], "edges": [] }
+        """;
+
+        var node = Assert.Single(Expander.Expand(json, Catalog).Nodes);
+
+        Assert.Equal("control/value:string", node.Outputs[0].DataType);
+    }
+
+    [Fact]
+    public void Expand_ValuePrimitive_ListShape_ProducesACollectionPort()
+    {
+        const string json = """
+        { "nodes": [ { "id": "cameras", "primitive": "value",
+                       "config": { "type": "json", "shape": "list", "literal": [] } } ], "edges": [] }
+        """;
+
+        var node = Assert.Single(Expander.Expand(json, Catalog).Nodes);
+
+        Assert.Equal("control/list:json", Assert.Single(node.Outputs).DataType);
+    }
+
+    [Fact]
+    public void Expand_ListValueIntoSelectItems_TypesLineUp()
+    {
+        const string json = """
+        {
+          "nodes": [
+            { "id": "cameras", "primitive": "value", "config": { "type": "json", "shape": "list", "literal": [] } },
+            { "id": "pick", "primitive": "select", "config": { "mode": "one", "by": "serial" } }
+          ],
+          "edges": [ { "from": "cameras.value", "to": "pick.items" } ]
+        }
+        """;
+
+        var definition = Expander.Expand(json, Catalog);
+        var cameras = definition.Nodes.Single(n => n.Id == "cameras");
+        var pick = definition.Nodes.Single(n => n.Id == "pick");
+
+        Assert.Equal(cameras.Outputs[0].DataType, pick.Inputs.Single(p => p.Name == "items").DataType);
+        Assert.Equal("control", Assert.Single(definition.Edges).Kind);
+    }
+
+    [Fact]
+    public void Expand_SelectPrimitive_ModeOne_NarrowsAListToAValue()
+    {
+        const string json = """
+        { "nodes": [ { "id": "pickCam", "primitive": "select",
+                       "config": { "mode": "one", "by": "serial" } } ], "edges": [] }
+        """;
+
+        var node = Assert.Single(Expander.Expand(json, Catalog).Nodes);
+
+        var items = node.Inputs.Single(p => p.Name == "items");
+        var criterion = node.Inputs.Single(p => p.Name == "criterion");
+        var selected = Assert.Single(node.Outputs);
+
+        Assert.Equal("control/list:json", items.DataType);
+        Assert.True(items.Required);
+        Assert.Equal("control/value:json", criterion.DataType);
+        Assert.False(criterion.Required);
+        Assert.Equal("control/value:json", selected.DataType);
+    }
+
+    [Fact]
+    public void Expand_SelectPrimitive_ModeMany_NarrowsAListToAList()
+    {
+        const string json = """
+        { "nodes": [ { "id": "bigOnes", "primitive": "select",
+                       "config": { "mode": "many", "type": "int" } } ], "edges": [] }
+        """;
+
+        var node = Assert.Single(Expander.Expand(json, Catalog).Nodes);
+
+        Assert.Equal("control/list:int", node.Inputs.Single(p => p.Name == "items").DataType);
+        Assert.Equal("control/list:int", Assert.Single(node.Outputs).DataType);
+    }
+
+    [Fact]
+    public void Expand_ValueIntoSelect_ProducesAControlEdge()
+    {
+        const string json = """
+        {
+          "nodes": [
+            { "id": "serial", "primitive": "value", "config": { "type": "string", "literal": "ABC123" } },
+            { "id": "pickCam", "primitive": "select", "config": { "mode": "one", "type": "string" } }
+          ],
+          "edges": [ { "from": "serial.value", "to": "pickCam.criterion" } ]
+        }
+        """;
+
+        var edge = Assert.Single(Expander.Expand(json, Catalog).Edges);
+
+        Assert.Equal("control", edge.Kind);
+    }
+
+    [Fact]
+    public void Expand_UnknownValueType_IsCarriedThroughForTheValidatorToReport()
+    {
+        const string json = """
+        { "nodes": [ { "id": "odd", "primitive": "value",
+                       "config": { "type": "decimal", "literal": 1 } } ], "edges": [] }
+        """;
+
+        var node = Assert.Single(Expander.Expand(json, Catalog).Nodes);
+
+        Assert.Equal("control/value:decimal", Assert.Single(node.Outputs).DataType);
+    }
+
+    [Fact]
+    public void Expand_LoopPrimitive_IsPortless()
+    {
+        const string json = """
+        { "nodes": [ { "id": "cycle", "primitive": "loop",
+                       "config": { "mode": "until-exhausted" } } ], "edges": [] }
+        """;
+
+        var node = Assert.Single(Expander.Expand(json, Catalog).Nodes);
+
+        Assert.Equal("embedded-primitive", node.Kind);
+        Assert.Equal("flow-control", node.Category);
+        Assert.Equal("loop", node.PrimitiveType);
+
+        // The loop moves no value — it owns iteration and pause, so it carries no ports.
+        Assert.Empty(node.Inputs);
+        Assert.Empty(node.Outputs);
+    }
+
+    [Fact]
+    public void Expand_LoopBackEdge_ClosesByNodeId_NoPorts()
+    {
+        // The tail closes the loop with a plain id-level edge (`save -> cycle`) — no port, because it moves
+        // no value. The data plane (cam -> save) stays a strict DAG.
+        const string json = """
+        {
+          "nodes": [
+            { "id": "cam",   "module": "mvf.cam" },
+            { "id": "save",  "module": "mvf.sink" },
+            { "id": "cycle", "primitive": "loop", "config": { "mode": "forever" } }
+          ],
+          "edges": [
+            { "from": "cam.frame", "to": "save.frame" },
+            { "from": "save",      "to": "cycle" }
+          ]
+        }
+        """;
+
+        var definition = Expander.Expand(json, Catalog);
+        var result = new Mvf.Engine.Pipelines.PipelineDefinitionValidator().Validate(definition);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Issues.Select(i => $"{i.Code}:{i.Message}")));
+
+        var closing = definition.Edges.Single(e => e.To.NodeId == "cycle");
+        Assert.Equal("loop", closing.Kind);
+        Assert.Equal("save", closing.From.NodeId);
+        Assert.Equal(string.Empty, closing.From.Port);
+        Assert.Equal(string.Empty, closing.To.Port);
+    }
+
+    [Fact]
     public void Load_ModuleCatalog_ReadsManifestsWithoutLoadingAssemblies()
     {
         // The real modules/ tree resolves through the metadata-only catalog.

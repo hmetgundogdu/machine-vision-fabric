@@ -1,11 +1,15 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using Mvf.Graph.Execution;
 using Mvf.Graph.Pipelines;
 using Mvf.Abstractions;
 using Mvf.Abstractions.Frames;
+using Mvf.Engine.Execution.NodeRunners;
 using Mvf.Engine.Modules;
 using Mvf.Engine.Recovery;
+using Mvf.Engine.Values;
 using Mvf.Graph.Runtime;
+using Mvf.Graph.Values;
 
 namespace Mvf.Engine.Execution;
 
@@ -30,8 +34,14 @@ namespace Mvf.Engine.Execution;
 public sealed class PipelineGraphExecutor(
     IPipelineNodeActivator nodeActivator,
     IDataPlane? dataPlane = null,
-    ModuleCatalog? moduleCatalog = null) : IPipelineGraphExecutor
+    ModuleCatalog? moduleCatalog = null,
+    LiveValueRegistry? liveValues = null) : IPipelineGraphExecutor
 {
+    /// <summary>How long the loop idles between checks while paused — short enough to feel instant on
+    /// resume, long enough not to spin. Pause keeps the process alive and the workers warm; only the
+    /// cycle stops advancing.</summary>
+    private static readonly TimeSpan PausePollInterval = TimeSpan.FromMilliseconds(40);
+
     public async Task<PipelineExecutionReport> ExecuteAsync(
         PipelineDefinition definition,
         PipelineExecutionOptions options,
@@ -52,6 +62,36 @@ public sealed class PipelineGraphExecutor(
         catch (InvalidOperationException ex)
         {
             return Failure(ex.Message, startedAt);
+        }
+
+        // The `loop` primitive is the graph's iteration authority: it owns the termination policy and
+        // carries the run's pause state. Every node still runs every cycle, in topological order — the loop
+        // is not a region, it is the cycle's owner. A graph with no loop runs until its source exhausts and
+        // has no pause control (today's default).
+        var loopNode = executionOrder.FirstOrDefault(IsLoopNode);
+        var hasLoop = loopNode is not null;
+        var loopConfig = loopNode is not null ? LoopPrimitiveConfig.Read(loopNode.Config) : null;
+        var loopMode = loopConfig?.Mode ?? LoopMode.UntilExhausted;
+        var loopCount = loopConfig?.Count ?? 0;
+
+        // A run always starts running; the registry (and its RunControl) is reused across runs in a host,
+        // so a previous run left paused must not freeze this one before it begins.
+        if (hasLoop)
+        {
+            liveValues?.RunControl.Resume();
+        }
+
+        var nodeById = definition.Nodes.ToDictionary(n => n.Id, n => n, StringComparer.OrdinalIgnoreCase);
+
+        // Live-editable module config: a change to any of these tunables re-activates its owning node (a
+        // module reads config only at activation). Maps each tunable's registry key back to its node.
+        var reactivateKeyToNode = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var node in definition.Nodes)
+        {
+            foreach (var binding in ModuleBindings.Read(node.Bindings))
+            {
+                reactivateKeyToNode[binding.LiveKey(node.Id)] = node.Id;
+            }
         }
 
         // Module catalog (metadata only, no DLL load) resolves each node's declared lifecycle + which
@@ -164,6 +204,94 @@ public sealed class PipelineGraphExecutor(
         string? backpressureFailure = null;
         string? sourceFailure = null;
 
+        // `forever` replays a finite source: on exhaustion the loop rewinds every rewindable source and goes
+        // again. Tracked so a source that produced nothing this pass is not rewound into an endless empty
+        // spin (an empty folder would otherwise loop forever making no progress).
+        var producedSinceRewind = false;
+
+        // Rewinds every source that can be replayed, best-effort. A source that is not rewindable is left
+        // exhausted, so `forever` degrades to `until-exhausted` for it rather than spinning.
+        async Task<bool> RewindSourcesAsync()
+        {
+            var rewound = false;
+            foreach (var node in executionOrder)
+            {
+                if (IsSourceNode(node)
+                    && runnerById.TryGetValue(node.Id, out var runner)
+                    && runner is IRewindableSource rewindable)
+                {
+                    try { await rewindable.RewindAsync(cancellationToken); rewound = true; }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        warnings.Add($"Rewind failed for source '{node.Id}': {ex.Message}");
+                    }
+                }
+            }
+
+            return rewound;
+        }
+
+        // Nodes whose live config changed and must be re-activated at the next cycle boundary (a quiesced
+        // point — no node is mid-execute). Filled from the registry's Changed event, drained in the loop.
+        var pendingReactivation = new ConcurrentQueue<string>();
+        void OnLiveValueChanged(LiveValue live)
+        {
+            if (reactivateKeyToNode.TryGetValue(live.NodeId, out var nodeId))
+            {
+                pendingReactivation.Enqueue(nodeId);
+            }
+        }
+
+        var watchesBindings = liveValues is not null && reactivateKeyToNode.Count > 0;
+        if (watchesBindings)
+        {
+            liveValues!.Changed += OnLiveValueChanged;
+        }
+
+        // Re-opens every node with a queued live-config edit: merge the current tunable values into its
+        // config, dispose the old runner, activate a fresh one. Deduped, so several edits to one node cost
+        // one re-activation.
+        async Task ApplyReactivationsAsync()
+        {
+            var toReactivate = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (pendingReactivation.TryDequeue(out var nid))
+            {
+                toReactivate.Add(nid);
+            }
+
+            foreach (var nid in toReactivate)
+            {
+                if (!nodeById.TryGetValue(nid, out var node))
+                {
+                    continue;
+                }
+
+                foreach (var binding in ModuleBindings.Read(node.Bindings))
+                {
+                    if (liveValues?.Find(binding.LiveKey(nid)) is { } live)
+                    {
+                        node.Config[binding.Field] = live.Current?.DeepClone();
+                    }
+                }
+
+                if (runnerById.TryGetValue(nid, out var old))
+                {
+                    runners.Remove(old);
+                    try { await old.DisposeAsync(); } catch { /* best effort — do not mask the edit */ }
+                }
+
+                try
+                {
+                    await ActivateNodeAsync(node);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    warnings.Add($"Re-activation of node '{nid}' failed: {ex.Message}");
+                    runnerById.Remove(nid);
+                }
+            }
+        }
+
         try
         {
             // Resume happens as each node activates (see ActivateNodeAsync): a resident node is restored
@@ -171,6 +299,23 @@ public sealed class PipelineGraphExecutor(
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                // Pause gate (whole-graph): while paused the loop stops advancing — no body node runs and no
+                // cycle is counted — but the process stays alive and the workers stay warm, so resume picks
+                // up exactly where it left off. This is pause, not cancel: nothing in flight is torn down.
+                if (hasLoop && liveValues?.RunControl.IsPaused == true)
+                {
+                    await Task.Delay(PausePollInterval, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                // Apply queued live-config edits by re-activating their nodes — here, at the quiesced top of
+                // the cycle. A module reads config only at activation, so re-opening is how the new value
+                // lands. The node restarts (a source rewinds to its first frame); that is the accepted cost.
+                if (!pendingReactivation.IsEmpty)
+                {
+                    await ApplyReactivationsAsync();
+                }
 
                 if (options.MaxCycles > 0 && totalCycles >= options.MaxCycles)
                 {
@@ -275,19 +420,25 @@ public sealed class PipelineGraphExecutor(
                         InputPortNames = inputs.All.Select(kvp => kvp.Key).ToList()
                     });
 
-                    if (IsSourceNode(node) && !result.HasOutput)
+                    if (IsSourceNode(node))
                     {
-                        // A source that threw is not an exhausted stream. Both look like "no frame" here,
-                        // and conflating them made a camera that never connected report a clean, successful
-                        // run of zero cycles. Record the failure; the run below ends unsuccessfully and,
-                        // crucially, keeps its checkpoint (there is nothing "completed" to resume past).
-                        if (faulted)
+                        if (!result.HasOutput)
                         {
-                            sourceFailure = $"Source node '{node.Id}' failed: {faultMessage}";
+                            // A source that threw is not an exhausted stream. Both look like "no frame" here,
+                            // and conflating them made a camera that never connected report a clean,
+                            // successful run of zero cycles. Record the failure; the run below ends
+                            // unsuccessfully and, crucially, keeps its checkpoint (nothing "completed" to
+                            // resume past).
+                            if (faulted)
+                            {
+                                sourceFailure = $"Source node '{node.Id}' failed: {faultMessage}";
+                            }
+
+                            sourcesExhausted = true;
+                            break;
                         }
 
-                        sourcesExhausted = true;
-                        break;
+                        producedSinceRewind = true;
                     }
 
                     if (IsSinkNode(node) && inputs.Has("frame"))
@@ -320,6 +471,17 @@ public sealed class PipelineGraphExecutor(
 
                 if (sourcesExhausted)
                 {
+                    // `forever` (the loop owns iteration): a finite source that ran dry is rewound and the
+                    // run continues — this is what a source-level replay flag used to do. Only when the pass
+                    // actually produced frames, so an empty source can't spin. A failed source is never
+                    // replayed; that is a real stop, not a completed stream.
+                    if (loopMode == LoopMode.Forever && sourceFailure is null && producedSinceRewind
+                        && await RewindSourcesAsync())
+                    {
+                        producedSinceRewind = false;
+                        continue;   // the empty exhaustion cycle is not counted; next cycle pulls frame 0
+                    }
+
                     sourceCompleted = sourceFailure is null;   // a failed source has not consumed its stream
                     break;
                 }
@@ -328,6 +490,14 @@ public sealed class PipelineGraphExecutor(
                 if (cycleHadSinkOutput)
                 {
                     acceptedCycles++;
+                }
+
+                // `count`: the loop stops after a fixed number of cycles. A cleanly reached count is a
+                // completed run (drops its checkpoint), the same as a source running to exhaustion.
+                if (loopMode == LoopMode.Count && totalCycles >= loopCount)
+                {
+                    sourceCompleted = true;
+                    break;
                 }
 
                 options.OnCycleCompleted?.Invoke(new PipelineExecutionProgress
@@ -363,6 +533,13 @@ public sealed class PipelineGraphExecutor(
         }
         finally
         {
+            // Stop watching the registry: it is a host-lived singleton, so a dangling handler would leak
+            // this run into the next.
+            if (watchesBindings)
+            {
+                liveValues!.Changed -= OnLiveValueChanged;
+            }
+
             // Final harvest before the children are shut down — disposal ends the worker processes and
             // takes their counters with them (this also catches a restart during an end-of-run checkpoint).
             foreach (var (nodeId, runner) in runnerById)
@@ -507,6 +684,10 @@ public sealed class PipelineGraphExecutor(
     private static bool IsSourceNode(PipelineNodeDefinition node) => NodeRoles.IsSource(node);
 
     private static bool IsSinkNode(PipelineNodeDefinition node) => NodeRoles.IsSink(node);
+
+    private static bool IsLoopNode(PipelineNodeDefinition node) =>
+        string.Equals(node.Kind, "embedded-primitive", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(node.PrimitiveType, "loop", StringComparison.OrdinalIgnoreCase);
 
     private static PipelineExecutionReport Failure(string message, DateTime startedAt) =>
         new()

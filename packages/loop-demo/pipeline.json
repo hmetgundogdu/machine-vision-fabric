@@ -1,0 +1,27 @@
+{
+  "name": "loop-demo",
+  "version": "3.0.0",
+  "description": "Hardware-free demo of the `loop` primitive (iteration-owner model). `cycle` owns the loop: its mode is `forever`, so when the folder source runs out of frames the loop rewinds it and plays again — there is no `loop:true` flag on the source anymore, iteration lives in one place. The pipeline's tail closes the cycle back to the loop with a plain node-level edge: `save -> cycle` (by id, no port — it moves no value). Data flows forward as a strict DAG (cam -> save). Two kinds of live editing from the CLI (tab/enter/type): `threshold` is a `value` node that lands next cycle with no restart, and `cam.frameIntervalMs` is a MODULE binding — editing it re-activates the source with the new interval (it restarts at frame 0). Press SPACE to pause/resume (state kept, workers warm — pause is not cancel). Run it with: execute-graph --package packages/loop-demo --max-cycles 200",
+  "nodes": [
+    { "id": "cycle", "primitive": "loop", "displayName": "Loop",
+      "config": { "mode": "forever" } },
+
+    { "id": "cam", "module": "mvf.folder-source", "displayName": "Folder Source",
+      "config": { "sourceFolder": "../multilang-demo/assets/frames", "frameIntervalMs": 300 },
+      "bindings": {
+        "frameIntervalMs": { "type": "int", "binding": "cam.interval",
+                             "schema": { "type": "integer", "minimum": 0, "maximum": 5000 } }
+      } },
+
+    { "id": "save", "module": "mvf.dataset-writer", "displayName": "Save",
+      "config": { "outputRoot": "out", "sessionPrefix": "demo" } },
+
+    { "id": "threshold", "primitive": "value", "displayName": "Brightness threshold (live)",
+      "config": { "type": "int", "binding": "brightness.threshold", "literal": 40,
+                  "schema": { "type": "integer", "minimum": 0, "maximum": 255 } } }
+  ],
+  "edges": [
+    { "from": "cam.frame", "to": "save.frame" },
+    { "from": "save",      "to": "cycle" }
+  ]
+}

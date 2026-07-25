@@ -226,6 +226,37 @@ public sealed class PipelinedGraphExecutorTests
     }
 
     [Fact]
+    public async Task Pipelined_RefusesALoopPrimitive()
+    {
+        // Setup/body regions and pause are properties of the serial cycle; the pipelined executor runs
+        // every stage continuously, so it refuses a `loop` up front rather than running it on a guess.
+        var definition = new Mvf.Engine.Pipelines.PipelineExpander().Expand(
+            """
+            {
+              "nodes": [
+                { "id": "src", "kind": "integration-module", "category": "source", "moduleId": "test.src",
+                  "outputs": [ { "name": "frame", "channel": "data", "dataType": "data/frame" } ] },
+                { "id": "cycle", "primitive": "loop", "config": { "mode": "until-exhausted" } }
+              ],
+              "edges": []
+            }
+            """,
+            new Dictionary<string, ModuleCatalogEntry>(StringComparer.OrdinalIgnoreCase));
+
+        var report = await new PipelinedGraphExecutor(new FakeActivator()).ExecuteAsync(
+            definition,
+            new PipelineExecutionOptions
+            {
+                PackageRoot = ".", IntegrationsRoot = ".", ExecutionMode = PipelineExecutionMode.Pipelined
+            },
+            CancellationToken.None);
+
+        Assert.False(report.Succeeded);
+        Assert.Contains("loop", report.ErrorMessage);
+        Assert.Contains("serial mode", report.ErrorMessage);
+    }
+
+    [Fact]
     public async Task Pipelined_EpochBarrier_CapturesWithNothingInFlight()
     {
         var sink = new StatefulCountingRunner("sink1");
