@@ -52,6 +52,15 @@ public sealed record PipelineExecutionOptions
     public BackpressurePolicy BackpressurePolicy { get; init; } = BackpressurePolicy.Stall;
 
     /// <summary>
+    /// What a run does when a <b>source</b> node throws mid-stream (a camera timing out, a connection
+    /// dropping). The default is <see cref="SourceFailurePolicy.Fail"/> — a faulted source ends the run and
+    /// is not reported as a clean, empty success. A source's own <c>onError</c> config overrides this per
+    /// node; see <see cref="SourceFailurePolicy"/>. Applied by a decorator around the source runner, so the
+    /// executors are unaware of it.
+    /// </summary>
+    public SourceFailurePolicy SourceFailurePolicy { get; init; } = SourceFailurePolicy.Fail;
+
+    /// <summary>
     /// How the graph is driven. <see cref="PipelineExecutionMode.Serial"/> (default) runs one node at a
     /// time with a single frame in flight, so throughput is the sum of the stage latencies — deterministic
     /// and the mode every existing test assumes. <see cref="PipelineExecutionMode.Pipelined"/> runs each

@@ -339,6 +339,19 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         ? qInt
         : 2;
 
+    // What happens when a source (a camera, a stream) throws mid-run. The CLI defaults to 'retry' so a
+    // transient blip — a camera request timing out — reconnects instead of killing the run; 'fail' is the
+    // strict fast-fail, 'reconnect' rides out an outage forever. A source's own onError config overrides it.
+    var sourceFailureMode = invocation.Options.TryGetValue("on-source-error", out var ose)
+        && SourceFailurePolicy.TryParseMode(ose, out var parsedSourceMode)
+        ? parsedSourceMode
+        : SourceFailureMode.Retry;
+    var sourcePolicy = new SourceFailurePolicy { Mode = sourceFailureMode };
+    if (invocation.Options.TryGetValue("source-retries", out var sr) && int.TryParse(sr, out var srInt) && srInt >= 0)
+        sourcePolicy = sourcePolicy with { MaxRetries = srInt };
+    if (invocation.Options.TryGetValue("source-backoff-ms", out var sb) && int.TryParse(sb, out var sbInt) && sbInt >= 0)
+        sourcePolicy = sourcePolicy with { BaseBackoffMs = sbInt };
+
     var options = new PipelineExecutionOptions
     {
         PackageRoot = packageRoot,
@@ -348,7 +361,8 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         CheckpointDirectory = checkpointDirectory,
         BackpressurePolicy = backpressure,
         ExecutionMode = executionMode,
-        EdgeQueueCapacity = edgeQueueCapacity
+        EdgeQueueCapacity = edgeQueueCapacity,
+        SourceFailurePolicy = sourcePolicy
     };
 
     // Size the arena from the graph before anything resolves it. Pipelining keeps a queue's worth of
@@ -674,7 +688,8 @@ void PrintHelp()
 {
     Console.WriteLine("Mvf.Cli");
     Console.WriteLine("Commands:");
-    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--arena-slots <n>] [--no-tui] [--no-prompt]");
+    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--arena-slots <n>] [--on-source-error fail|retry|reconnect] [--source-retries <n>] [--source-backoff-ms <n>] [--no-tui] [--no-prompt]");
+    Console.WriteLine("      --on-source-error: on a source (camera/stream) failure — fail (end the run), retry (reconnect a few times, default), or reconnect (retry forever, for 24/7 edge).");
     Console.WriteLine("      --no-prompt never asks an operator for a value/select binding; an unresolved one fails the run.");
     Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");
     Console.WriteLine("  modules [--root <path>]");

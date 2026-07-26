@@ -48,9 +48,47 @@ public sealed class PipelineNodeActivator(
                 $"Expected one of: integration-module, embedded-primitive, runtime-builtin.")
         };
 
+        runner = WrapSourceResilience(node, options, runner);
+
         RegisterModuleBindings(node);
         await runner.ActivateAsync(cancellationToken);
         return runner;
+    }
+
+    /// <summary>
+    /// Wraps a source runner so a mid-stream read failure is retried per the effective
+    /// <see cref="SourceFailurePolicy"/> instead of ending the run. The policy is the node's own
+    /// <c>onError</c> config, falling back to the run-level default; <see cref="SourceFailureMode.Fail"/>
+    /// (the default) leaves the runner untouched, so nothing changes unless a deployment opts in. Retry
+    /// notices are forwarded through <see cref="PipelineExecutionOptions.OnNodeLog"/> so the operator sees
+    /// them live in the node's log.
+    /// </summary>
+    private static INodeRunner WrapSourceResilience(
+        PipelineNodeDefinition node, PipelineExecutionOptions options, INodeRunner runner)
+    {
+        if (!NodeRoles.IsSource(node))
+        {
+            return runner;
+        }
+
+        var policy = SourceFailurePolicy.FromConfig(node.Config, options.SourceFailurePolicy);
+        if (!policy.WillRetry)
+        {
+            return runner;
+        }
+
+        var onNodeLog = options.OnNodeLog;
+        Action<string, string>? log = onNodeLog is null
+            ? null
+            : (level, message) => onNodeLog(new NodeLogEvent
+            {
+                NodeId = node.Id,
+                ModuleId = node.ModuleId ?? string.Empty,
+                Level = level,
+                Message = message
+            });
+
+        return ResilientSourceRunnerFactory.Wrap(runner, policy, log);
     }
 
     /// <summary>
