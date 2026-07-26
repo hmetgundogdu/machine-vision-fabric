@@ -35,6 +35,13 @@ public sealed class PipelineNodeState
     /// <summary>Out-of-process worker restarts observed so far for this node (0 when it runs in-process).</summary>
     public int WorkerRestarts { get; set; }
 
+    /// <summary>
+    /// <see cref="System.Environment.TickCount64"/> at the node's most recent execution. Drives the
+    /// graph's afterglow: a node that ran a moment ago fades from bright back to its category colour, so
+    /// the execution wave is visible sweeping through the graph. 0 until the node first runs.
+    /// </summary>
+    public long LastActiveTicks { get; set; }
+
     public IReadOnlyList<string> LastInputPorts { get; set; } = [];
     public IReadOnlyList<string> LastOutputPorts { get; set; } = [];
 }

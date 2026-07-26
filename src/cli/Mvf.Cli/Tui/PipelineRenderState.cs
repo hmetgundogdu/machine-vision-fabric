@@ -71,7 +71,7 @@ public sealed class PipelineRenderState
         {
             RunId = runId;
             PipelineName = pipelineName;
-            AddLog(LogLevel.Info, $"Run started — id:{runId}");
+            AddLog(LogLevel.Info, $"Run started - id:{runId}");
         }
     }
 
@@ -91,8 +91,9 @@ public sealed class PipelineRenderState
             node.LastOutputPorts = e.OutputPortNames;
 
             // The node that just ran is the one the graph highlights as "live"; the highlight moves as the
-            // next node reports.
+            // next node reports. The tick stamp lets the renderer fade its afterglow once the wave moves on.
             LastActiveNodeId = e.NodeId;
+            node.LastActiveTicks = Environment.TickCount64;
 
             if (e.HasOutput && !e.Faulted)
                 node.AcceptedCycles++;
@@ -113,8 +114,8 @@ public sealed class PipelineRenderState
             }
 
             var ports = e.HasOutput
-                ? $"→ [{string.Join(", ", e.OutputPortNames)}]"
-                : "→ (no output)";
+                ? $"{Glyphs.FlowRight} [{string.Join(", ", e.OutputPortNames)}]"
+                : $"{Glyphs.FlowRight} (no output)";
             var lvl = e.Faulted ? LogLevel.Error : LogLevel.Info;
             AddLog(lvl, $"[cyc:{e.CycleIndex}] {e.NodeId}  {ports}  ({DurationText.Format(e.DurationMicros)})");
             AddNodeLog(e.NodeId, lvl, $"[cyc:{e.CycleIndex}] {ports}  ({DurationText.Format(e.DurationMicros)})");
@@ -176,7 +177,7 @@ public sealed class PipelineRenderState
             if (error is not null)
                 AddLog(LogLevel.Error, $"Run ended with error: {error}");
             else
-                AddLog(LogLevel.Success, $"Run complete — {TotalCycles} cycles, {AcceptedCycles} accepted, {Elapsed.TotalSeconds:F2}s");
+                AddLog(LogLevel.Success, $"Run complete - {TotalCycles} cycles, {AcceptedCycles} accepted, {Elapsed.TotalSeconds:F2}s");
         }
     }
 

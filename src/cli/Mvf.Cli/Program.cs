@@ -369,7 +369,7 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
 
     if (!validation.IsValid)
     {
-        AnsiConsole.MarkupLine($"[bold]{Markup.Escape(definition.Name)}[/]  [red]✖ Invalid pipeline[/]");
+        AnsiConsole.MarkupLine($"[bold]{Markup.Escape(definition.Name)}[/]  [red]{Mvf.Cli.Tui.Glyphs.Invalid} Invalid pipeline[/]");
         foreach (var issue in validation.Issues)
         {
             AnsiConsole.MarkupLine($"  [red]{Markup.Escape(issue.Severity.ToUpperInvariant())}[/] {issue.Code} | {Markup.Escape(issue.Message)}");
@@ -394,7 +394,7 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
     var bindingResult = await prePass.RunAsync(definition, CancellationToken.None);
     if (!bindingResult.Succeeded)
     {
-        AnsiConsole.MarkupLine($"[bold]{Markup.Escape(definition.Name)}[/]  [red]✖ Unresolved values[/]");
+        AnsiConsole.MarkupLine($"[bold]{Markup.Escape(definition.Name)}[/]  [red]{Mvf.Cli.Tui.Glyphs.Invalid} Unresolved values[/]");
         foreach (var error in bindingResult.Errors)
         {
             AnsiConsole.MarkupLine($"  [red]ERROR[/] {Markup.Escape(error)}");
@@ -529,7 +529,7 @@ void PrintExecutionReport(PipelineExecutionReport? report)
 
         if (w.LastRestartUtc is { } at)
         {
-            Console.WriteLine($"      last restart {at:HH:mm:ss} UTC — {w.LastRestartReason}");
+            Console.WriteLine($"      last restart {at:HH:mm:ss} UTC - {w.LastRestartReason}");
         }
     }
 }

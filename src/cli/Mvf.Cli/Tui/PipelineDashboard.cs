@@ -23,8 +23,12 @@ namespace Mvf.Cli.Tui;
 /// </summary>
 public sealed class PipelineDashboard
 {
-    private const int LogLines  = 10;
-    private const int RefreshMs = 120;
+    // The log buffer keeps a generous history; the panel only ever shows the most recent entries that fit
+    // the space left under the diagram, so this just needs to comfortably exceed any terminal's line count.
+    private const int LogHistory = 256;
+    // ~11 fps: the whole frame already repaints every tick, so this is also the animation clock. Fast enough
+    // for the border pulse / edge flow to read smoothly, slow enough to stay cheap on large graphs.
+    private const int RefreshMs  = 90;
 
     private readonly IPipelineExecutionHost _host;
     private readonly PipelineDefinition     _definition;
@@ -59,7 +63,7 @@ public sealed class PipelineDashboard
         _host       = host;
         _definition = definition;
         _layout     = GraphLayout.Build(definition);
-        _state      = new PipelineRenderState(definition);
+        _state      = new PipelineRenderState(definition, LogHistory);
         _liveValues = liveValues;
         _hasLoop    = definition.Nodes.Any(n =>
             string.Equals(n.Kind, "embedded-primitive", StringComparison.OrdinalIgnoreCase)
@@ -229,7 +233,7 @@ public sealed class PipelineDashboard
             }
 
             var typeHint = tunable.Shape == ControlValueShape.List
-                ? $"list of {ControlValueTypes.ToToken(tunable.Type)} — write it as JSON"
+                ? $"list of {ControlValueTypes.ToToken(tunable.Type)} - write it as JSON"
                 : ControlValueTypes.ToToken(tunable.Type);
             var currentText = tunable.Current?.ToJsonString() ?? string.Empty;
 
@@ -237,7 +241,7 @@ public sealed class PipelineDashboard
             AnsiConsole.MarkupLine($"[grey]current:[/] {Markup.Escape(currentText)}");
             AnsiConsole.MarkupLine(tunable.Binding is { Length: > 0 } binding
                 ? $"[grey]Saved to binding[/] [grey58]{Markup.Escape(binding)}[/]"
-                : "[grey]No binding — this change lasts for the run only.[/]");
+                : "[grey]No binding - this change lasts for the run only.[/]");
             AnsiConsole.WriteLine();
 
             // The current value is printed above rather than handed to DefaultValue: Spectre renders a
@@ -285,7 +289,7 @@ public sealed class PipelineDashboard
         AnsiConsole.MarkupLine($"[grey]current:[/] {Markup.Escape(tunable.Current?.ToJsonString() ?? "none")}");
         AnsiConsole.MarkupLine(tunable.Binding is { Length: > 0 } binding
             ? $"[grey]Saved to binding[/] [grey58]{Markup.Escape(binding)}[/]"
-            : "[grey]No binding — this change lasts for the run only.[/]");
+            : "[grey]No binding - this change lasts for the run only.[/]");
         AnsiConsole.WriteLine();
 
         const string cancel = "(leave it alone)";
@@ -345,7 +349,7 @@ public sealed class PipelineDashboard
     /// <summary>Compact display of a JSON value: bare text for strings, JSON for everything else.</summary>
     private static string ValueText(JsonNode? node) => node switch
     {
-        null => "—",
+        null => Glyphs.None,
         JsonValue v when v.TryGetValue(out string? s) => s,
         _ => node.ToJsonString()
     };
@@ -388,18 +392,19 @@ public sealed class PipelineDashboard
     {
         var selected = SelectedNodeId is { } id && _state.Nodes.TryGetValue(id, out var s)
             ? $"[grey]sel:[/][deepskyblue1]{Markup.Escape(s.DisplayName)}[/]"
-            : "[grey]sel:—[/]";
+            : $"[grey]sel:{Glyphs.None}[/]";
 
+        var b = Glyphs.Bullet;
         var legend =
-            "[deepskyblue1]●[/][grey46]src[/] " +
-            "[mediumpurple2]●[/][grey46]compute[/] " +
-            "[hotpink]●[/][grey46]classify[/] " +
-            "[gold1]●[/][grey46]flow[/] " +
-            "[mediumspringgreen]●[/][grey46]sink[/] " +
-            "[aquamarine1]●[/][grey46]value[/]";
+            $"[deepskyblue1]{b}[/][grey46]src[/] " +
+            $"[mediumpurple2]{b}[/][grey46]compute[/] " +
+            $"[hotpink]{b}[/][grey46]classify[/] " +
+            $"[gold1]{b}[/][grey46]flow[/] " +
+            $"[mediumspringgreen]{b}[/][grey46]sink[/] " +
+            $"[aquamarine1]{b}[/][grey46]value[/]";
 
-        var pause = _hasLoop ? " [grey42]· space:pause[/]" : string.Empty;
-        var controls = $"[grey42]←→ move · enter details[/]{pause}";
+        var pause = _hasLoop ? $" [grey42]{Glyphs.Separator} space:pause[/]" : string.Empty;
+        var controls = $"[grey42]{Glyphs.MoveHint} move {Glyphs.Separator} enter details[/]{pause}";
 
         var line = $"{selected}    {legend}    {controls}";
 
@@ -450,11 +455,18 @@ public sealed class PipelineDashboard
 
     private IRenderable BuildLayout()
     {
-        var width    = Console.WindowWidth > 0 ? Console.WindowWidth : 120;
+        var width    = Console.WindowWidth  > 0 ? Console.WindowWidth  : 120;
+        var height   = Console.WindowHeight > 0 ? Console.WindowHeight : 40;
         var snapshot = _host.GetSnapshot();
 
-        var rows = new List<IRenderable>
-        {
+        // Motion runs only while the run is actually advancing: a paused or finished run settles to a static
+        // frame. nowMs is the shared wall clock the afterglow timestamps are taken from.
+        var nowMs   = Environment.TickCount64;
+        var animate = snapshot.Status == PipelineExecutionStatus.Running && !IsPaused;
+
+        // Everything above the log panel keeps its natural height. The header, the diagram and the controls
+        // bar are as tall as they need to be; whatever vertical space is left over is the log panel's.
+        var top = new Rows(
             BuildHeader(snapshot),
             new Rule { Style = Style.Parse("grey23") },
             GraphRenderer.Render(
@@ -464,16 +476,49 @@ public sealed class PipelineDashboard
                 SelectedNodeId,
                 _state.LastActiveNodeId,
                 width,
-                AnchorLayer())
-        };
+                AnchorLayer(),
+                nowMs,
+                animate),
+            new Rule { Style = Style.Parse("grey23") },
+            BuildControlsBar(),
+            new Rule { Style = Style.Parse("grey23") });
 
-        rows.Add(new Rule { Style = Style.Parse("grey23") });
-        rows.Add(BuildControlsBar());
+        // Hand the log panel exactly the rows left under the diagram, so it grows to fill the window and
+        // shows as many of the most recent entries as fit. One row is held back at the very bottom so
+        // PaintInPlace always has a clean line to settle the cursor on.
+        var logCapacity = Math.Max(1, height - MeasureHeight(top, width) - 1);
 
-        rows.Add(new Rule { Style = Style.Parse("grey23") });
-        rows.Add(BuildLogPanel());
+        return new Rows(top, BuildLogPanel(logCapacity, width));
+    }
 
-        return new Rows(rows);
+    /// <summary>
+    /// How many terminal rows <paramref name="renderable"/> occupies at <paramref name="width"/>, found by
+    /// rendering it to an off-screen, colourless console and counting the lines. Spectre exposes width
+    /// measurement but not height, and the top section's height varies (viewport slots, an edit notice, a
+    /// wrapped header), so measuring the real thing is more reliable than adding the pieces up by hand.
+    /// </summary>
+    private static int MeasureHeight(IRenderable renderable, int width)
+    {
+        var buffer  = new StringWriter();
+        var console = AnsiConsole.Create(new AnsiConsoleSettings
+        {
+            Ansi        = AnsiSupport.No,
+            ColorSystem = ColorSystemSupport.NoColors,
+            Interactive = InteractionSupport.No,
+            Out         = new AnsiConsoleOutput(buffer)
+        });
+        console.Profile.Width  = width;
+        console.Profile.Height = 10_000;   // large, so nothing is clipped while measuring
+        console.Write(renderable);
+
+        var text  = buffer.ToString();
+        var lines = 0;
+        foreach (var ch in text)
+            if (ch == '\n') lines++;
+        // A final row that isn't newline-terminated still occupies a line — count it, so we never
+        // under-measure and hand the log panel one row too many (which would scroll the bottom).
+        if (text.Length > 0 && text[^1] != '\n') lines++;
+        return lines;
     }
 
     private IRenderable BuildHeader(PipelineExecutionSnapshot snapshot)
@@ -506,7 +551,7 @@ public sealed class PipelineDashboard
         var avgCycle  = _state.AverageCycleDuration;
         var lastCycle = _state.LastCycleDuration;
         var cycleCell = snapshot.TotalCycles > 0
-            ? $"  [grey]cyc̄:[/][grey58]{avgCycle.TotalMilliseconds:F0}ms[/]" +
+            ? $"  [grey]avg:[/][grey58]{avgCycle.TotalMilliseconds:F0}ms[/]" +
               (lastCycle > TimeSpan.Zero ? $" [grey42](last {lastCycle.TotalMilliseconds:F0}ms)[/]" : string.Empty)
             : string.Empty;
 
@@ -533,13 +578,18 @@ public sealed class PipelineDashboard
             pauseHint);
     }
 
-    private IRenderable BuildLogPanel()
+    private IRenderable BuildLogPanel(int capacity, int width)
     {
-        var logs = _state.GetLogs(LogLines);
+        var logs = _state.GetLogs(capacity);
         if (logs.Count == 0)
-            return new Markup("[grey]  (no events yet…)[/]");
+            return new Markup("[grey]  (no events yet...)[/]");
 
-        var lines = logs.Select(l =>
+        // Each entry must occupy exactly one screen row so the panel's height equals the entry count and it
+        // never overflows the space it was handed. Spectre's NoWrap does not crop, so the message is
+        // truncated to the window width itself: 11 cols for the timestamp + 2 spaces, with the last column
+        // left clear so an exactly-full line can't hard-wrap on some terminals. Oldest first, newest last.
+        var maxMsg = Math.Max(0, width - 14);
+        var lines  = logs.Select(l =>
         {
             var color = l.Level switch
             {
@@ -548,10 +598,12 @@ public sealed class PipelineDashboard
                 LogLevel.Error   => "red",
                 _                => "grey54"
             };
-            var ts = l.Timestamp.ToString("HH:mm:ss.ff");
-            return $"[grey42]{ts}[/]  [{color}]{Markup.Escape(l.Message)}[/]";
+            var ts  = l.Timestamp.ToString("HH:mm:ss.ff");
+            var msg = l.Message.Length <= maxMsg
+                ? l.Message
+                : l.Message[..Math.Max(0, maxMsg - 1)] + Glyphs.Ellipsis;
+            return $"[grey42]{ts}[/]  [{color}]{Markup.Escape(msg)}[/]";
         });
-
         return new Markup(string.Join("\n", lines));
     }
 
@@ -636,7 +688,7 @@ public sealed class PipelineDashboard
         _state.Nodes.TryGetValue(nodeId, out var st);
 
         var title = new Markup(
-            $"[bold deepskyblue1]◈ NODE[/]  [bold]{Markup.Escape(st?.DisplayName ?? nodeId)}[/]   " +
+            $"[bold deepskyblue1]{Glyphs.NodeMark} NODE[/]  [bold]{Markup.Escape(st?.DisplayName ?? nodeId)}[/]   " +
             $"[grey]id:[/][grey58]{Markup.Escape(nodeId)}[/]   " +
             $"[grey]kind:[/][grey58]{Markup.Escape(st?.Kind ?? "-")}[/]   " +
             $"[grey]type:[/][grey58]{Markup.Escape(st?.TypeLabel ?? "-")}[/]   " +
@@ -648,8 +700,8 @@ public sealed class PipelineDashboard
         top.AddRow(BuildEditablePanel(nodeId, tunables, fieldIndex), BuildStatsPanel(st));
 
         var controls = tunables.Count > 0
-            ? "[grey42]↑↓ field · enter edit · esc/← back[/]"
-            : "[grey42]esc/← back[/]";
+            ? $"[grey42]{Glyphs.FieldUpDown} field {Glyphs.Separator} enter edit {Glyphs.Separator} esc back[/]"
+            : "[grey42]esc back[/]";
         if (_editNotice is not null) controls += $"    {_editNotice}";
 
         return new Rows(
@@ -676,9 +728,9 @@ public sealed class PipelineDashboard
                 var val    = ValueText(t.Current);
                 var type   = ControlValueTypes.ToToken(t.Type);
                 var origin = t.Binding is { Length: > 0 } b
-                    ? $"[grey42]→ {Markup.Escape(b)}[/]"
+                    ? $"[grey42]{Glyphs.FlowRight} {Markup.Escape(b)}[/]"
                     : "[grey42](run-only)[/]";
-                var cursor = i == fieldIndex ? "[deepskyblue1]▶[/] " : "  ";
+                var cursor = i == fieldIndex ? $"[deepskyblue1]{Glyphs.Cursor}[/] " : "  ";
                 var cell   = i == fieldIndex
                     ? $"[black on deepskyblue1] {Markup.Escape(key)}={Markup.Escape(val)} [/]"
                     : $"[grey]{Markup.Escape(key)}=[/][white]{Markup.Escape(val)}[/]";
@@ -716,8 +768,8 @@ public sealed class PipelineDashboard
             var avgMs  = st.AverageDurationMicros / 1000.0;
             var minMs  = st.MinDurationMicros == long.MaxValue ? 0 : st.MinDurationMicros / 1000.0;
             var maxMs  = st.MaxDurationMicros / 1000.0;
-            var inP    = st.LastInputPorts.Count  > 0 ? string.Join(",", st.LastInputPorts)  : "—";
-            var outP   = st.LastOutputPorts.Count > 0 ? string.Join(",", st.LastOutputPorts) : "—";
+            var inP    = st.LastInputPorts.Count  > 0 ? string.Join(",", st.LastInputPorts)  : Glyphs.None;
+            var outP   = st.LastOutputPorts.Count > 0 ? string.Join(",", st.LastOutputPorts) : Glyphs.None;
 
             body = new Markup(string.Join("\n",
             [
@@ -726,8 +778,8 @@ public sealed class PipelineDashboard
                 $"[grey]last    [/] {lastMs:F2}ms",
                 $"[grey]avg/min/max[/] {avgMs:F2} / {minMs:F2} / {maxMs:F2} ms",
                 $"[grey]restarts[/] [red]{st.WorkerRestarts}[/]",
-                $"[grey]in  →   [/] [steelblue1]{Markup.Escape(inP)}[/]",
-                $"[grey]out →   [/] [mediumspringgreen]{Markup.Escape(outP)}[/]"
+                $"[grey]in  {Glyphs.FlowRight} [/] [steelblue1]{Markup.Escape(inP)}[/]",
+                $"[grey]out {Glyphs.FlowRight} [/] [mediumspringgreen]{Markup.Escape(outP)}[/]"
             ]));
         }
 
@@ -767,7 +819,7 @@ public sealed class PipelineDashboard
     {
         var logs = _state.GetNodeLogs(nodeId, 8);
         IRenderable body = logs.Count == 0
-            ? new Markup("[grey42](no events yet…)[/]")
+            ? new Markup("[grey42](no events yet...)[/]")
             : new Markup(string.Join("\n", logs.Select(l =>
             {
                 var color = l.Level switch

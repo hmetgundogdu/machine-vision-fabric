@@ -19,11 +19,16 @@ public static class GraphRenderer
     /// <summary>A node's in-box config line: pre-formatted text plus whether it is live-editable.</summary>
     public readonly record struct NodeConfigLine(string Text, bool Tunable);
 
-    // ── Status icons ────────────────────────────────────────────────────────
-    private const string IconIdle    = "[grey42]○[/]";
-    private const string IconActive  = "[yellow1]▶[/]";
-    private const string IconDone    = "[green3]✔[/]";
-    private const string IconFaulted = "[red1]✘[/]";
+    // ── Status icons (ASCII markers; colour carries the meaning — see Glyphs) ──
+    private const string IconIdle    = "[grey42]" + Glyphs.Idle    + "[/]";
+    private const string IconActive  = "[yellow1]" + Glyphs.Active  + "[/]";
+    private const string IconDone    = "[green3]" + Glyphs.Done     + "[/]";
+    private const string IconFaulted = "[red1]" + Glyphs.Faulted    + "[/]";
+
+    // ── Motion (see Anim; every animated token is ASCII and width-1, so a frame never shifts a cell) ──
+    private const int FlowTrack = 4;                                                // cells of animated edge shaft
+    private const int AfterglowMs = 220;                                            // a Done node stays bold this long after firing
+    private static readonly string[] Breathe = ["darkorange", "gold1", "yellow1"];  // active-border pulse shades
 
     // ── Category colours (the node title) ────────────────────────────────────
     // Categories are the ones PipelineExpander assigns: source / compute / classify / control /
@@ -46,7 +51,7 @@ public static class GraphRenderer
         "integration-module" => ("M", "steelblue1"),
         "embedded-primitive" => ("P", "gold1"),
         "runtime-builtin"    => ("B", "mediumspringgreen"),
-        _                    => ("·", "grey54")
+        _                    => (Glyphs.UnknownKind, "grey54")
     };
 
     private static string EdgeColor(string kind) => kind.ToLowerInvariant() switch
@@ -62,7 +67,9 @@ public static class GraphRenderer
         string? selectedNodeId,
         string? activeNodeId,
         int terminalWidth,
-        int anchorLayer)
+        int anchorLayer,
+        long nowMs,
+        bool animate)
     {
         var (viewStart, viewEnd) = layout.ComputeViewport(terminalWidth, anchorLayer);
 
@@ -96,7 +103,7 @@ public static class GraphRenderer
             {
                 var layerNodes = layout.Layers[layerIdx];
                 var nodeRenderable = slot < layerNodes.Count
-                    ? RenderNodeBox(layerNodes[slot], nodeStates, configLines, selectedNodeId, activeNodeId)
+                    ? RenderNodeBox(layerNodes[slot], nodeStates, configLines, selectedNodeId, activeNodeId, nowMs, animate)
                     : new Markup(string.Empty);
 
                 rowCells.Add(nodeRenderable);
@@ -107,7 +114,7 @@ public static class GraphRenderer
                     var edgesHere = layout.Edges
                         .Where(e => e.From.Layer == layerIdx && e.From.Slot == slot)
                         .ToList();
-                    rowCells.Add(RenderEdgeColumn(edgesHere));
+                    rowCells.Add(RenderEdgeColumn(edgesHere, activeNodeId, nowMs, animate));
                 }
             }
 
@@ -116,7 +123,7 @@ public static class GraphRenderer
 
         // Viewport hint — only when the graph is wider than the window.
         IRenderable hint = layout.LayerCount > (viewEnd - viewStart)
-            ? new Markup($"[grey50]◄ layers {viewStart + 1}–{viewEnd} of {layout.LayerCount} ►[/]\n")
+            ? new Markup($"[grey50]{Glyphs.ArrowLeft} layers {viewStart + 1}-{viewEnd} of {layout.LayerCount} {Glyphs.ArrowRight}[/]\n")
             : new Markup(string.Empty);
 
         return new Rows(hint, grid);
@@ -127,7 +134,9 @@ public static class GraphRenderer
         IReadOnlyDictionary<string, PipelineNodeState> states,
         IReadOnlyDictionary<string, NodeConfigLine> configLines,
         string? selectedNodeId,
-        string? activeNodeId)
+        string? activeNodeId,
+        long nowMs,
+        bool animate)
     {
         if (!states.TryGetValue(nodeId, out var state))
             return new Markup($"[grey]{Markup.Escape(nodeId)}[/]");
@@ -136,8 +145,10 @@ public static class GraphRenderer
         var isActive   = string.Equals(nodeId, activeNodeId, StringComparison.OrdinalIgnoreCase)
                          && state.Status != NodeLifecycleStatus.Faulted;
 
+        // The live node spins while it works; everything else shows its steady status glyph. The spinner is a
+        // single width-1 frame, so swapping it in never changes the title line's width.
         var icon = isActive
-            ? IconActive
+            ? (animate ? $"[yellow1]{Anim.SpinnerFrame(nowMs)}[/]" : IconActive)
             : state.Status switch
             {
                 NodeLifecycleStatus.Done    => IconDone,
@@ -163,13 +174,13 @@ public static class GraphRenderer
         if (configLines.TryGetValue(nodeId, out var cfg) && cfg.Text.Length > 0)
         {
             var color = cfg.Tunable ? "deepskyblue1" : "grey66";
-            var tail  = cfg.Tunable ? " [grey42]✎[/]" : string.Empty;
+            var tail  = cfg.Tunable ? $" [grey42]{Glyphs.Editable}[/]" : string.Empty;
             lines.Add($"[{color}]{Markup.Escape(Truncate(cfg.Text, w - (cfg.Tunable ? 2 : 0)))}[/]{tail}");
         }
 
         var cycles = state.TotalCycles == 0
             ? "[grey42]waiting[/]"
-            : $"[grey42]×[/][white]{state.TotalCycles}[/] [grey42]ok[/][green3]{state.AcceptedCycles}[/]";
+            : $"[grey42]{Glyphs.Times}[/][white]{state.TotalCycles}[/] [grey42]ok[/][green3]{state.AcceptedCycles}[/]";
         var timing = state.LastDurationMicros > 0
             ? $" [grey46]{DurationText.Format(state.LastDurationMicros)}[/]"
             : string.Empty;
@@ -183,12 +194,25 @@ public static class GraphRenderer
 
         var content = new Markup(string.Join("\n", lines));
 
-        var (border, borderStyle) =
-            isSelected                                 ? (BoxBorder.Heavy,   Style.Parse("deepskyblue1 bold")) :
-            isActive                                   ? (BoxBorder.Rounded, Style.Parse("yellow1 bold")) :
-            state.Status == NodeLifecycleStatus.Faulted ? (BoxBorder.Rounded, Style.Parse("red1")) :
-            state.Status == NodeLifecycleStatus.Done    ? (BoxBorder.Rounded, Style.Parse(catColor)) :
-                                                          (BoxBorder.Rounded, Style.Parse("grey35"));
+        // Border colour only ever breathes/fades — the box geometry is identical every frame. The live node
+        // pulses between warm shades; a node that just ran keeps a bold afterglow that settles back to its
+        // category colour, so the execution wave is visible sweeping through the graph.
+        var border = isSelected ? BoxBorder.Heavy : BoxBorder.Rounded;
+        Style borderStyle;
+        if (isSelected)
+            borderStyle = Style.Parse("deepskyblue1 bold");
+        else if (isActive)
+            borderStyle = animate
+                ? Style.Parse(Breathe[Anim.Triangle(nowMs, 800, Breathe.Length)] + " bold")
+                : Style.Parse("yellow1 bold");
+        else if (state.Status == NodeLifecycleStatus.Faulted)
+            borderStyle = Style.Parse("red1");
+        else if (state.Status == NodeLifecycleStatus.Done)
+            borderStyle = animate && nowMs - state.LastActiveTicks < AfterglowMs
+                ? Style.Parse(catColor + " bold")
+                : Style.Parse(catColor);
+        else
+            borderStyle = Style.Parse("grey35");
 
         return new Panel(content)
         {
@@ -198,7 +222,11 @@ public static class GraphRenderer
         };
     }
 
-    private static IRenderable RenderEdgeColumn(List<GraphLayout.LayoutEdge> edges)
+    private static IRenderable RenderEdgeColumn(
+        List<GraphLayout.LayoutEdge> edges,
+        string? activeNodeId,
+        long nowMs,
+        bool animate)
     {
         if (edges.Count == 0)
             return new Markup("[grey]   [/]");
@@ -207,10 +235,26 @@ public static class GraphRenderer
         foreach (var edge in edges)
         {
             var color = EdgeColor(edge.Kind);
-            // Control edges are dashed so a data/control mix is legible at a glance, not just by colour.
-            var shaft = edge.Kind.Equals("control", StringComparison.OrdinalIgnoreCase) ? "╌" : "─";
-            var label = Truncate(edge.FromPort, GraphLayout.EdgeColumnWidth - 5);
-            lines.Add($"[{color}]{shaft}{Markup.Escape(label)}▶[/]");
+            // Control edges use a different ASCII shaft so a data/control mix is legible at a glance, not just by colour.
+            var shaft = edge.Kind.Equals("control", StringComparison.OrdinalIgnoreCase) ? Glyphs.ControlShaft : Glyphs.DataShaft;
+
+            // An edge leaving the live node carries a pulse from source to target — the hand-off you watch
+            // move between nodes. The track is a fixed width, so only which cell is lit changes per frame.
+            var hot = animate && string.Equals(edge.FromNode, activeNodeId, StringComparison.OrdinalIgnoreCase);
+            if (hot)
+            {
+                var label = Truncate(edge.FromPort, GraphLayout.EdgeColumnWidth - FlowTrack - 2);
+                var pos   = Anim.FlowPos(nowMs, FlowTrack, 700);
+                var track = new System.Text.StringBuilder(FlowTrack * 16);
+                for (var i = 0; i < FlowTrack; i++)
+                    track.Append(i == pos ? $"[white]{shaft}[/]" : $"[{color}]{shaft}[/]");
+                lines.Add($"{track}[grey54]{Markup.Escape(label)}[/][{color}]{Glyphs.ArrowRight}[/]");
+            }
+            else
+            {
+                var label = Truncate(edge.FromPort, GraphLayout.EdgeColumnWidth - 5);
+                lines.Add($"[{color}]{shaft}{Markup.Escape(label)}{Glyphs.ArrowRight}[/]");
+            }
         }
 
         return new Markup(string.Join("\n", lines));
@@ -219,6 +263,6 @@ public static class GraphRenderer
     private static string Truncate(string s, int max)
     {
         if (max <= 0) return string.Empty;
-        return s.Length <= max ? s : s[..(max - 1)] + "…";
+        return s.Length <= max ? s : s[..(max - 1)] + Glyphs.Ellipsis;
     }
 }
