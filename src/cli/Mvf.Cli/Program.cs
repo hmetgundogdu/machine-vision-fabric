@@ -344,10 +344,10 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
     // (a fresh session) and keep trying, so an outage is ridden out and the run resumes when the source comes
     // back. --source-restart-limit caps it; 'fail' is the strict fast-fail. A node's onError config wins.
     var sourceFailureMode = invocation.Options.TryGetValue("on-source-error", out var ose)
-        && SourceFailurePolicy.TryParseMode(ose, out var parsedSourceMode)
+        && NodeFailurePolicy.TryParseMode(ose, out var parsedSourceMode)
         ? parsedSourceMode
-        : SourceFailureMode.Restart;
-    var sourcePolicy = new SourceFailurePolicy { Mode = sourceFailureMode };   // Limit defaults to 0 = forever
+        : NodeFailureMode.Restart;
+    var sourcePolicy = new NodeFailurePolicy { Mode = sourceFailureMode };   // Limit defaults to 0 = forever
     if ((invocation.Options.TryGetValue("source-restart-limit", out var sl) || invocation.Options.TryGetValue("source-retries", out sl))
         && int.TryParse(sl, out var slInt) && slInt >= 0)
         sourcePolicy = sourcePolicy with { Limit = slInt };

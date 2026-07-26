@@ -2,42 +2,45 @@ using System.Text.Json.Nodes;
 
 namespace Mvf.Graph.Execution;
 
-/// <summary>What a run does when a <b>source</b> node throws mid-stream (a camera timing out, a stream dropping).</summary>
-public enum SourceFailureMode
+/// <summary>What a run does when a node throws while executing (a camera timing out, a sink losing its connection).</summary>
+public enum NodeFailureMode
 {
-    /// <summary>End the run with the source's error. The honest default: a faulted source is not a clean, empty success.</summary>
+    /// <summary>
+    /// Let the failure fall through to the executor's default for the node's role: a <b>source</b> ends the
+    /// run (a faulted source is not a clean, empty success), while a mid-graph node's cycle is skipped and the
+    /// run carries on. This is the honest baseline and the default for every node.
+    /// </summary>
     Fail,
 
     /// <summary>
-    /// Restart the node — dispose it and bring it back from scratch (a fresh session) — then carry on.
-    /// <see cref="SourceFailurePolicy.Limit"/> caps how many restarts before the run gives up; 0 means forever.
-    /// This is one general action (it fits a camera, a file, a simulator alike); "how persistent" is the number,
-    /// not a second mode.
+    /// Restart the node — dispose it and bring it back from scratch (a fresh session/model) — then carry on.
+    /// <see cref="NodeFailurePolicy.Limit"/> caps how many restarts before the failure falls through to the
+    /// role default above; 0 means forever. One general action (it fits a camera, a file, a classifier, a
+    /// sink alike); "how persistent" is the number, not a second mode.
     /// </summary>
     Restart
 }
 
 /// <summary>
-/// How the runtime handles a source node that fails while producing frames.
+/// How the runtime handles a node that fails while executing.
 ///
 /// <para>The failure policy is a <b>pipeline/runtime</b> concern, not a module one: a module's job is to throw
-/// and say what broke, but whether that ends the whole run is an operational choice that differs per
-/// deployment (a CI check wants <see cref="SourceFailureMode.Fail"/>; a panel PC on a line wants an unbounded
-/// <see cref="SourceFailureMode.Restart"/>). So it lives here, settable per source (the node's <c>onError</c>
-/// config) with a run-level default, and applied uniformly by a decorator around the source runner — the
+/// and say what broke, but whether that ends the run, skips a cycle, or restarts the node is an operational
+/// choice that differs per deployment. So it lives here, settable per node (the node's <c>onError</c> config)
+/// with a source-level run default, and applied uniformly by a decorator around the node runner — the
 /// executors are unaware of it.</para>
 ///
-/// <para>There is deliberately one recovery action, <see cref="SourceFailureMode.Restart"/>, with a numeric
+/// <para>There is deliberately one recovery action, <see cref="NodeFailureMode.Restart"/>, with a numeric
 /// <see cref="Limit"/> rather than separate "retry"/"reconnect" modes: bounded vs. forever is a count, not a
-/// different verb. The default is <see cref="SourceFailureMode.Fail"/> so the "a faulted source is not a clean
-/// success" guarantee holds unless a deployment opts into recovery.</para>
+/// different verb. The default is <see cref="NodeFailureMode.Fail"/> so existing behaviour holds unless a
+/// deployment opts into recovery — a faulted source still ends the run, a faulted mid-graph node still skips.</para>
 /// </summary>
-public sealed record SourceFailurePolicy
+public sealed record NodeFailurePolicy
 {
-    /// <summary>What to do on a source read failure.</summary>
-    public SourceFailureMode Mode { get; init; } = SourceFailureMode.Fail;
+    /// <summary>What to do when the node throws.</summary>
+    public NodeFailureMode Mode { get; init; } = NodeFailureMode.Fail;
 
-    /// <summary>How many restarts before the run fails. <c>0</c> (or negative) means restart forever.</summary>
+    /// <summary>How many restarts before the failure falls through to the role default. <c>0</c> (or negative) means restart forever.</summary>
     public int Limit { get; init; }
 
     /// <summary>First backoff, doubled each attempt up to <see cref="MaxBackoffMs"/>.</summary>
@@ -46,15 +49,15 @@ public sealed record SourceFailurePolicy
     /// <summary>Upper bound on a single backoff wait.</summary>
     public int MaxBackoffMs { get; init; } = 5_000;
 
-    /// <summary>The honest fail-fast default.</summary>
-    public static SourceFailurePolicy Fail { get; } = new();
+    /// <summary>The honest fall-through default (source ends the run, mid-graph node skips).</summary>
+    public static NodeFailurePolicy Fail { get; } = new();
 
-    /// <summary>True when the policy restarts at all (i.e. the source runner needs wrapping).</summary>
-    public bool WillRestart => Mode == SourceFailureMode.Restart;
+    /// <summary>True when the policy restarts at all (i.e. the node runner needs wrapping).</summary>
+    public bool WillRestart => Mode == NodeFailureMode.Restart;
 
     /// <summary>Whether restart attempt <paramref name="attempt"/> (1-based) is allowed. Unbounded when <see cref="Limit"/> ≤ 0.</summary>
     public bool AllowsAttempt(int attempt) =>
-        Mode == SourceFailureMode.Restart && (Limit <= 0 || attempt <= Limit);
+        Mode == NodeFailureMode.Restart && (Limit <= 0 || attempt <= Limit);
 
     /// <summary>The backoff before restart attempt <paramref name="attempt"/> (1-based): exponential, capped.</summary>
     public TimeSpan BackoffFor(int attempt)
@@ -69,7 +72,7 @@ public sealed record SourceFailurePolicy
     /// shorthand (<c>"fail"</c>/<c>"restart"</c>) or an object <c>{ mode, limit, backoffMs, maxBackoffMs }</c>.
     /// An unrecognised value keeps the fallback.
     /// </summary>
-    public static SourceFailurePolicy FromConfig(JsonObject? config, SourceFailurePolicy fallback)
+    public static NodeFailurePolicy FromConfig(JsonObject? config, NodeFailurePolicy fallback)
     {
         if (config is null || !config.TryGetPropertyValue("onError", out var node) || node is null)
         {
@@ -90,10 +93,10 @@ public sealed record SourceFailurePolicy
 
             var policy = fallback with { Mode = mode };
             // 'limit' is canonical; 'maxRetries' is accepted as an alias for the earlier field name.
-            if (TryReadInt(obj, "limit",        out var lim)) policy = policy with { Limit = lim };
+            if (TryReadInt(obj, "limit",         out var lim)) policy = policy with { Limit = lim };
             else if (TryReadInt(obj, "maxRetries", out var mr)) policy = policy with { Limit = mr };
-            if (TryReadInt(obj, "backoffMs",    out var bo)) policy = policy with { BaseBackoffMs = bo };
-            if (TryReadInt(obj, "maxBackoffMs", out var mb)) policy = policy with { MaxBackoffMs  = mb };
+            if (TryReadInt(obj, "backoffMs",     out var bo)) policy = policy with { BaseBackoffMs = bo };
+            if (TryReadInt(obj, "maxBackoffMs",  out var mb)) policy = policy with { MaxBackoffMs  = mb };
             return policy;
         }
 
@@ -105,21 +108,21 @@ public sealed record SourceFailurePolicy
     /// <c>"reconnect"</c> and <c>"forever"</c> tokens are accepted as aliases for <c>restart</c> so older
     /// configs and commands keep working.
     /// </summary>
-    public static bool TryParseMode(string? text, out SourceFailureMode mode)
+    public static bool TryParseMode(string? text, out NodeFailureMode mode)
     {
         switch (text?.Trim().ToLowerInvariant())
         {
             case "fail":
-                mode = SourceFailureMode.Fail;
+                mode = NodeFailureMode.Fail;
                 return true;
             case "restart":
             case "retry":
             case "reconnect":
             case "forever":
-                mode = SourceFailureMode.Restart;
+                mode = NodeFailureMode.Restart;
                 return true;
             default:
-                mode = SourceFailureMode.Fail;
+                mode = NodeFailureMode.Fail;
                 return false;
         }
     }

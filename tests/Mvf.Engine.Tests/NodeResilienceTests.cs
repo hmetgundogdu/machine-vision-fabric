@@ -9,18 +9,19 @@ using Mvf.Graph.Pipelines;
 namespace Mvf.Engine.Tests;
 
 /// <summary>
-/// A source that throws mid-stream should not always kill the run. These cover the failure-policy decorator
-/// (<see cref="ResilientSourceRunner"/>): a bounded restart recovers within its limit or rethrows once spent,
-/// an unbounded restart never gives up, and a hard restart rebuilds the node from scratch. The engine default
-/// stays <c>fail</c>, so nothing changes for a deployment that does not opt in.
+/// A node that throws should not always take its default path (a source ending the run, a mid-graph node
+/// skipping). These cover the failure-policy decorator (<see cref="ResilientNodeRunner"/>): a bounded restart
+/// recovers within its limit or rethrows once spent, an unbounded restart never gives up, and a hard restart
+/// rebuilds the node from scratch. The wrapper is node-agnostic — the same decorator serves a source, a
+/// classifier, or a sink. The engine default stays <c>fail</c>, so nothing changes without opting in.
 /// </summary>
-public sealed class SourceResilienceTests
+public sealed class NodeResilienceTests
 {
-    private static readonly SourceFailurePolicy FastRestart3 =
-        new() { Mode = SourceFailureMode.Restart, Limit = 3, BaseBackoffMs = 0, MaxBackoffMs = 0 };
+    private static readonly NodeFailurePolicy FastRestart3 =
+        new() { Mode = NodeFailureMode.Restart, Limit = 3, BaseBackoffMs = 0, MaxBackoffMs = 0 };
 
-    private static readonly SourceFailurePolicy FastRestartForever =
-        new() { Mode = SourceFailureMode.Restart, Limit = 0, BaseBackoffMs = 0, MaxBackoffMs = 0 };
+    private static readonly NodeFailurePolicy FastRestartForever =
+        new() { Mode = NodeFailureMode.Restart, Limit = 0, BaseBackoffMs = 0, MaxBackoffMs = 0 };
 
     private static NodeExecutionInputs EmptyInputs() =>
         new(new Dictionary<string, PortValue>(), new NodeExecutionContext { RunId = "r", CycleIndex = 0, CycleStartedAt = DateTime.UtcNow });
@@ -28,9 +29,9 @@ public sealed class SourceResilienceTests
     [Fact]
     public async Task Restart_Bounded_RecoversWithinItsLimit()
     {
-        // Fails the first two reads, then yields a frame — like a camera that drops and comes back.
-        var inner = new ScriptedSource("cam", throwsBeforeSuccess: 2);
-        var runner = ResilientSourceRunnerFactory.Wrap(inner, FastRestart3, log: null);
+        // Fails the first two runs, then yields a result — like a node that faults and comes back.
+        var inner = new ScriptedNode("cam", throwsBeforeSuccess: 2);
+        var runner = ResilientNodeRunnerFactory.Wrap(inner, FastRestart3, log: null);
 
         await runner.ActivateAsync(CancellationToken.None);
         var result = await runner.ExecuteAsync(EmptyInputs(), CancellationToken.None);
@@ -43,23 +44,23 @@ public sealed class SourceResilienceTests
     [Fact]
     public async Task Restart_Bounded_RethrowsOriginalError_WhenLimitIsExhausted()
     {
-        var inner = new ScriptedSource("cam", throwsBeforeSuccess: int.MaxValue, message: "camera offline");
-        var runner = ResilientSourceRunnerFactory.Wrap(inner, FastRestart3, log: null);
+        var inner = new ScriptedNode("cam", throwsBeforeSuccess: int.MaxValue, message: "node offline");
+        var runner = ResilientNodeRunnerFactory.Wrap(inner, FastRestart3, log: null);
 
         await runner.ActivateAsync(CancellationToken.None);
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => runner.ExecuteAsync(EmptyInputs(), CancellationToken.None));
 
-        Assert.Contains("camera offline", ex.Message);
+        Assert.Contains("node offline", ex.Message);
         Assert.Equal(3, inner.RestartCalls);                 // exactly Limit restarts, then it gives up
     }
 
     [Fact]
     public async Task Restart_Unbounded_KeepsGoingUntilItSucceeds()
     {
-        // Ten failures then a frame: a limit of 3 would give up, forever rides it out.
-        var inner = new ScriptedSource("cam", throwsBeforeSuccess: 10);
-        var runner = ResilientSourceRunnerFactory.Wrap(inner, FastRestartForever, log: null);
+        // Ten failures then a result: a limit of 3 would give up, forever rides it out.
+        var inner = new ScriptedNode("cam", throwsBeforeSuccess: 10);
+        var runner = ResilientNodeRunnerFactory.Wrap(inner, FastRestartForever, log: null);
 
         await runner.ActivateAsync(CancellationToken.None);
         var result = await runner.ExecuteAsync(EmptyInputs(), CancellationToken.None);
@@ -69,24 +70,24 @@ public sealed class SourceResilienceTests
     }
 
     [Fact]
-    public async Task Exhaustion_IsNotAFailure_NoOutputPassesThroughWithoutRestart()
+    public async Task EmptyResult_IsNotAFailure_NoOutputPassesThroughWithoutRestart()
     {
-        var inner = new ScriptedSource("cam", throwsBeforeSuccess: 0, exhaustAfter: 0); // returns NoOutput at once
-        var runner = ResilientSourceRunnerFactory.Wrap(inner, FastRestartForever, log: null);
+        var inner = new ScriptedNode("cam", throwsBeforeSuccess: 0, exhaustAfter: 0); // returns NoOutput at once
+        var runner = ResilientNodeRunnerFactory.Wrap(inner, FastRestartForever, log: null);
 
         await runner.ActivateAsync(CancellationToken.None);
         var result = await runner.ExecuteAsync(EmptyInputs(), CancellationToken.None);
 
         Assert.False(result.HasOutput);
-        Assert.Equal(1, inner.ActivateCalls);                // initial only — a clean end of stream is never restarted
+        Assert.Equal(1, inner.ActivateCalls);                // initial only — an empty result is never restarted
     }
 
     [Fact]
     public async Task Cancellation_DuringBackoff_Propagates()
     {
-        var inner = new ScriptedSource("cam", throwsBeforeSuccess: int.MaxValue);
-        var policy = new SourceFailurePolicy { Mode = SourceFailureMode.Restart, BaseBackoffMs = 60_000, MaxBackoffMs = 60_000 };
-        var runner = ResilientSourceRunnerFactory.Wrap(inner, policy, log: null);
+        var inner = new ScriptedNode("cam", throwsBeforeSuccess: int.MaxValue);
+        var policy = new NodeFailurePolicy { Mode = NodeFailureMode.Restart, BaseBackoffMs = 60_000, MaxBackoffMs = 60_000 };
+        var runner = ResilientNodeRunnerFactory.Wrap(inner, policy, log: null);
         using var cts = new CancellationTokenSource();
 
         await runner.ActivateAsync(CancellationToken.None);
@@ -99,8 +100,8 @@ public sealed class SourceResilienceTests
     [Fact]
     public void Wrap_KeepsRewindableCapability_OnlyWhenInnerHasIt()
     {
-        var rewindable = ResilientSourceRunnerFactory.Wrap(new RewindableSource("a"), FastRestartForever, null);
-        var plain      = ResilientSourceRunnerFactory.Wrap(new ScriptedSource("b", 0), FastRestartForever, null);
+        var rewindable = ResilientNodeRunnerFactory.Wrap(new RewindableNode("a"), FastRestartForever, null);
+        var plain      = ResilientNodeRunnerFactory.Wrap(new ScriptedNode("b", 0), FastRestartForever, null);
 
         Assert.IsAssignableFrom<IRewindableSource>(rewindable);
         Assert.IsNotAssignableFrom<IRewindableSource>(plain);
@@ -109,12 +110,13 @@ public sealed class SourceResilienceTests
     [Fact]
     public async Task HardRestart_RebuildsFromScratchAndDisposesTheBrokenRunner()
     {
-        var broken  = new TrackingSource("cam", () => throw new InvalidOperationException("dead session"));
-        var healthy = new TrackingSource("cam", () => NodeExecutionResult.Single("frame", PortValue.FromFrame(Frame(1))));
+        // The same hard restart serves any node — here a stand-in for a sink or classifier that faults.
+        var broken  = new TrackingNode("sink", () => throw new InvalidOperationException("dead session"));
+        var healthy = new TrackingNode("sink", () => NodeExecutionResult.Single("frame", PortValue.FromFrame(Frame(1))));
         var builds  = 0;
         Func<CancellationToken, Task<INodeRunner>> rebuild = _ => { builds++; return Task.FromResult<INodeRunner>(healthy); };
 
-        var runner = ResilientSourceRunnerFactory.Wrap(broken, FastRestartForever, log: null, rebuild);
+        var runner = ResilientNodeRunnerFactory.Wrap(broken, FastRestartForever, log: null, rebuild);
         await runner.ActivateAsync(CancellationToken.None);
         var result = await runner.ExecuteAsync(EmptyInputs(), CancellationToken.None);
 
@@ -131,7 +133,7 @@ public sealed class SourceResilienceTests
     [Fact]
     public async Task HardRestart_FailedRebuildsCountAsAttempts_ThenRecovers()
     {
-        var healthy = new TrackingSource("cam", () => NodeExecutionResult.Single("frame", PortValue.FromFrame(Frame(1))));
+        var healthy = new TrackingNode("cam", () => NodeExecutionResult.Single("frame", PortValue.FromFrame(Frame(1))));
         var builds  = 0;
         Func<CancellationToken, Task<INodeRunner>> rebuild = _ =>
         {
@@ -139,11 +141,11 @@ public sealed class SourceResilienceTests
             if (builds <= 2) throw new InvalidOperationException("OpenSession failed"); // session not up yet
             return Task.FromResult<INodeRunner>(healthy);
         };
-        var broken = new TrackingSource("cam", () => throw new InvalidOperationException("dead"));
+        var broken = new TrackingNode("cam", () => throw new InvalidOperationException("dead"));
 
-        var runner = ResilientSourceRunnerFactory.Wrap(
+        var runner = ResilientNodeRunnerFactory.Wrap(
             broken,
-            new SourceFailurePolicy { Mode = SourceFailureMode.Restart, Limit = 5, BaseBackoffMs = 0, MaxBackoffMs = 0 },
+            new NodeFailurePolicy { Mode = NodeFailureMode.Restart, Limit = 5, BaseBackoffMs = 0, MaxBackoffMs = 0 },
             log: null,
             rebuild);
         await runner.ActivateAsync(CancellationToken.None);
@@ -156,33 +158,33 @@ public sealed class SourceResilienceTests
     [Fact]
     public async Task EndToEnd_ExhaustedRestart_StillFailsTheRunHonestly()
     {
-        // The whole point: restart buys recoveries, but a source that never recovers must still fail the run
-        // (and not report a clean, empty success). Wire a wrapped always-throwing source through the executor.
-        var inner = new ThrowingEveryTimeSource("source1", "unreachable");
-        var wrapped = ResilientSourceRunnerFactory.Wrap(
-            inner, new SourceFailurePolicy { Mode = SourceFailureMode.Restart, Limit = 2, BaseBackoffMs = 0, MaxBackoffMs = 0 }, null);
+        // Restart buys recoveries, but a source that never recovers must still fail the run (and not report a
+        // clean, empty success). Wire a wrapped always-throwing source through the executor.
+        var inner = new ThrowingEveryTimeNode("source1", "unreachable");
+        var wrapped = ResilientNodeRunnerFactory.Wrap(
+            inner, new NodeFailurePolicy { Mode = NodeFailureMode.Restart, Limit = 2, BaseBackoffMs = 0, MaxBackoffMs = 0 }, null);
 
-        var report = await new PipelineGraphExecutor(new PresetActivator(("source1", wrapped), ("sink1", new SinkSource("sink1"))))
+        var report = await new PipelineGraphExecutor(new PresetActivator(("source1", wrapped), ("sink1", new SinkNode("sink1"))))
             .ExecuteAsync(BuildSourceToSink(), new PipelineExecutionOptions { PackageRoot = ".", IntegrationsRoot = "." }, CancellationToken.None);
 
         Assert.False(report.Succeeded);
         Assert.Equal(0, report.TotalCycles);
         Assert.Contains("unreachable", report.ErrorMessage);
-        Assert.Equal(3, inner.ExecuteCalls);                 // 1 read + 2 restarted reads, then the run fails
+        Assert.Equal(3, inner.ExecuteCalls);                 // 1 run + 2 restarted runs, then the run fails
     }
 
     // ---- policy parsing ----
 
     [Theory]
-    [InlineData("fail", SourceFailureMode.Fail)]
-    [InlineData("restart", SourceFailureMode.Restart)]
-    [InlineData("retry", SourceFailureMode.Restart)]       // legacy alias
-    [InlineData("reconnect", SourceFailureMode.Restart)]   // legacy alias
-    [InlineData("forever", SourceFailureMode.Restart)]     // legacy alias
-    public void FromConfig_StringShorthand_SetsMode(string token, SourceFailureMode expected)
+    [InlineData("fail", NodeFailureMode.Fail)]
+    [InlineData("restart", NodeFailureMode.Restart)]
+    [InlineData("retry", NodeFailureMode.Restart)]       // legacy alias
+    [InlineData("reconnect", NodeFailureMode.Restart)]   // legacy alias
+    [InlineData("forever", NodeFailureMode.Restart)]     // legacy alias
+    public void FromConfig_StringShorthand_SetsMode(string token, NodeFailureMode expected)
     {
         var config = new JsonObject { ["onError"] = token };
-        Assert.Equal(expected, SourceFailurePolicy.FromConfig(config, SourceFailurePolicy.Fail).Mode);
+        Assert.Equal(expected, NodeFailurePolicy.FromConfig(config, NodeFailurePolicy.Fail).Mode);
     }
 
     [Fact]
@@ -193,9 +195,9 @@ public sealed class SourceResilienceTests
             ["onError"] = new JsonObject { ["mode"] = "restart", ["limit"] = 9, ["backoffMs"] = 250 }
         };
 
-        var policy = SourceFailurePolicy.FromConfig(config, SourceFailurePolicy.Fail);
+        var policy = NodeFailurePolicy.FromConfig(config, NodeFailurePolicy.Fail);
 
-        Assert.Equal(SourceFailureMode.Restart, policy.Mode);
+        Assert.Equal(NodeFailureMode.Restart, policy.Mode);
         Assert.Equal(9, policy.Limit);
         Assert.Equal(250, policy.BaseBackoffMs);
     }
@@ -204,21 +206,21 @@ public sealed class SourceResilienceTests
     public void FromConfig_Object_AcceptsMaxRetriesAsLimitAlias()
     {
         var config = new JsonObject { ["onError"] = new JsonObject { ["mode"] = "restart", ["maxRetries"] = 7 } };
-        Assert.Equal(7, SourceFailurePolicy.FromConfig(config, SourceFailurePolicy.Fail).Limit);
+        Assert.Equal(7, NodeFailurePolicy.FromConfig(config, NodeFailurePolicy.Fail).Limit);
     }
 
     [Fact]
     public void FromConfig_MissingOrUnknown_KeepsFallback()
     {
-        var fallback = new SourceFailurePolicy { Mode = SourceFailureMode.Restart };
-        Assert.Equal(fallback, SourceFailurePolicy.FromConfig(new JsonObject(), fallback));
-        Assert.Equal(fallback.Mode, SourceFailurePolicy.FromConfig(new JsonObject { ["onError"] = "nonsense" }, fallback).Mode);
+        var fallback = new NodeFailurePolicy { Mode = NodeFailureMode.Restart };
+        Assert.Equal(fallback, NodeFailurePolicy.FromConfig(new JsonObject(), fallback));
+        Assert.Equal(fallback.Mode, NodeFailurePolicy.FromConfig(new JsonObject { ["onError"] = "nonsense" }, fallback).Mode);
     }
 
     [Fact]
     public void BackoffFor_IsExponential_AndCapped()
     {
-        var p = new SourceFailurePolicy { BaseBackoffMs = 100, MaxBackoffMs = 500 };
+        var p = new NodeFailurePolicy { BaseBackoffMs = 100, MaxBackoffMs = 500 };
         Assert.Equal(100, p.BackoffFor(1).TotalMilliseconds);
         Assert.Equal(200, p.BackoffFor(2).TotalMilliseconds);
         Assert.Equal(400, p.BackoffFor(3).TotalMilliseconds);
@@ -229,23 +231,23 @@ public sealed class SourceResilienceTests
     [Fact]
     public void AllowsAttempt_UnboundedWhenLimitIsZero()
     {
-        var forever = new SourceFailurePolicy { Mode = SourceFailureMode.Restart, Limit = 0 };
+        var forever = new NodeFailurePolicy { Mode = NodeFailureMode.Restart, Limit = 0 };
         Assert.True(forever.AllowsAttempt(1));
         Assert.True(forever.AllowsAttempt(1_000_000));
 
-        var bounded = new SourceFailurePolicy { Mode = SourceFailureMode.Restart, Limit = 2 };
+        var bounded = new NodeFailurePolicy { Mode = NodeFailureMode.Restart, Limit = 2 };
         Assert.True(bounded.AllowsAttempt(2));
         Assert.False(bounded.AllowsAttempt(3));
 
-        Assert.False(SourceFailurePolicy.Fail.AllowsAttempt(1)); // fail never restarts
+        Assert.False(NodeFailurePolicy.Fail.AllowsAttempt(1)); // fail never restarts
     }
 
     // ---- fakes ----
 
     private static IFrameEnvelope Frame(int i) => new BinaryFrameEnvelope("cam", i, $"f{i}.bmp", [(byte)i], "image/bmp");
 
-    /// <summary>Throws on the first N reads, then yields one frame (or exhausts). Plain INodeRunner (not rewindable).</summary>
-    private sealed class ScriptedSource(string nodeId, int throwsBeforeSuccess, string message = "read failed", int exhaustAfter = 1)
+    /// <summary>Throws on the first N runs, then yields one result (or exhausts). Plain INodeRunner (not rewindable).</summary>
+    private sealed class ScriptedNode(string nodeId, int throwsBeforeSuccess, string message = "run failed", int exhaustAfter = 1)
         : INodeRunner
     {
         private int _thrown;
@@ -276,7 +278,7 @@ public sealed class SourceResilienceTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private sealed class RewindableSource(string nodeId) : INodeRunner, IRewindableSource
+    private sealed class RewindableNode(string nodeId) : INodeRunner, IRewindableSource
     {
         public string NodeId { get; } = nodeId;
         public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
@@ -286,19 +288,19 @@ public sealed class SourceResilienceTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    /// <summary>Tracks activation/disposal and reads via a supplied delegate (which may throw). Used for hard-restart tests.</summary>
-    private sealed class TrackingSource(string nodeId, Func<NodeExecutionResult> read) : INodeRunner
+    /// <summary>Tracks activation/disposal and runs via a supplied delegate (which may throw). Used for hard-restart tests.</summary>
+    private sealed class TrackingNode(string nodeId, Func<NodeExecutionResult> run) : INodeRunner
     {
         public int ActivateCalls { get; private set; }
         public bool Disposed { get; private set; }
         public string NodeId { get; } = nodeId;
         public Task ActivateAsync(CancellationToken cancellationToken) { ActivateCalls++; return Task.CompletedTask; }
         public Task<NodeExecutionResult> ExecuteAsync(NodeExecutionInputs inputs, CancellationToken cancellationToken) =>
-            Task.FromResult(read());
+            Task.FromResult(run());
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }
 
-    private sealed class ThrowingEveryTimeSource(string nodeId, string message) : INodeRunner
+    private sealed class ThrowingEveryTimeNode(string nodeId, string message) : INodeRunner
     {
         public int ExecuteCalls { get; private set; }
         public string NodeId { get; } = nodeId;
@@ -311,7 +313,7 @@ public sealed class SourceResilienceTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private sealed class SinkSource(string nodeId) : INodeRunner
+    private sealed class SinkNode(string nodeId) : INodeRunner
     {
         public string NodeId { get; } = nodeId;
         public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;

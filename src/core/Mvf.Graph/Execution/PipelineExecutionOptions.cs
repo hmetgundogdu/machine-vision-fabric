@@ -52,14 +52,15 @@ public sealed record PipelineExecutionOptions
     public BackpressurePolicy BackpressurePolicy { get; init; } = BackpressurePolicy.Stall;
 
     /// <summary>
-    /// What a run does when a <b>source</b> node throws mid-stream (a camera timing out, a connection
-    /// dropping): <see cref="SourceFailureMode.Fail"/> or <see cref="SourceFailureMode.Restart"/> (with a
-    /// <see cref="SourceFailurePolicy.Limit"/>). The default is <see cref="SourceFailurePolicy.Fail"/> — a
-    /// faulted source ends the run and is not reported as a clean, empty success. A source's own <c>onError</c>
-    /// config overrides this per node; see <see cref="SourceFailurePolicy"/>. Applied by a decorator around the
-    /// source runner, so the executors are unaware of it.
+    /// The run-level default failure policy for <b>source</b> nodes (a camera timing out, a stream dropping):
+    /// <see cref="NodeFailureMode.Fail"/> or <see cref="NodeFailureMode.Restart"/> (with a
+    /// <see cref="NodeFailurePolicy.Limit"/>). The default is <see cref="NodeFailurePolicy.Fail"/> — a faulted
+    /// source ends the run and is not reported as a clean, empty success. Any node's own <c>onError</c> config
+    /// overrides this per node (mid-graph nodes default to skipping a failed cycle unless they opt into
+    /// <c>restart</c>); see <see cref="NodeFailurePolicy"/>. Applied by a decorator around the node runner, so
+    /// the executors are unaware of it.
     /// </summary>
-    public SourceFailurePolicy SourceFailurePolicy { get; init; } = SourceFailurePolicy.Fail;
+    public NodeFailurePolicy SourceFailurePolicy { get; init; } = NodeFailurePolicy.Fail;
 
     /// <summary>
     /// How the graph is driven. <see cref="PipelineExecutionMode.Serial"/> (default) runs one node at a

@@ -140,14 +140,19 @@ mvf execute-graph --package packages/loop-demo --max-cycles 200
 
 ---
 
-## E2 · When a source drops — staying alive
+## E2 · When a node fails — staying alive
 
 A `loop` keeps a pipeline *iterating*; this keeps it *alive* when the world misbehaves. The failure
 policy is the **runtime's** to set, not the module's: a module throws and says what broke (a camera
-request timing out, a connection dropping), and you decide whether that ends the run.
+request timing out, a sink losing its connection), and you decide what happens next.
 
-There are two actions — end the run, or **restart the node** — and one number that says how hard to
-try. Set it with `--on-source-error`, or per source in the node's `onError` config:
+By default the runtime already does the sensible thing per role — a **source** that fails ends the
+run (a dead camera is not a clean, empty success), while a **mid-graph** node's cycle is skipped and
+the run carries on. `onError` lets any node opt into **restart** instead.
+
+There are two actions — fall through to that default, or **restart the node** — and one number that
+says how hard to try. Set the source default with `--on-source-error`, or put `onError` on **any**
+node (a source, a sink, a classifier):
 
 | Mode | On a source failure |
 |---|---|
@@ -160,12 +165,15 @@ mvf execute-graph --path my.json --on-source-error restart --source-restart-limi
 mvf execute-graph --path my.json --on-source-error fail                 # strict
 ```
 
-Per source, in `pipeline.json` (overrides the CLI default) — a bare string is `restart`-forever, or spell
-out the knobs:
+Per node, in `pipeline.json` (overrides the default) — a bare string is `restart`-forever, or spell out
+the knobs. Works on a source, and equally on a mid-graph node that would otherwise just skip:
 
 ```json
 { "id": "cam", "moduleId": "ivp.cognex-hmi-camera",
   "config": { "onError": { "mode": "restart", "limit": 0, "backoffMs": 1000, "maxBackoffMs": 30000 } } }
+
+{ "id": "save", "moduleId": "mvf.dataset-writer",
+  "config": { "onError": "restart" } }   // a sink that reconnects instead of dropping the cycle
 ```
 
 Three things worth knowing:

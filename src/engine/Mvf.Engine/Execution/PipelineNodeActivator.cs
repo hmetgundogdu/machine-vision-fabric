@@ -40,7 +40,7 @@ public sealed class PipelineNodeActivator(
     {
         var runner = await BuildRunnerAsync(node, options, cancellationToken);
 
-        runner = WrapSourceResilience(node, options, runner);
+        runner = WrapNodeResilience(node, options, runner);
 
         RegisterModuleBindings(node);
         await runner.ActivateAsync(cancellationToken);
@@ -65,22 +65,19 @@ public sealed class PipelineNodeActivator(
         };
 
     /// <summary>
-    /// Wraps a source runner so a mid-stream read failure is retried per the effective
-    /// <see cref="SourceFailurePolicy"/> instead of ending the run. The policy is the node's own
-    /// <c>onError</c> config, falling back to the run-level default; <see cref="SourceFailureMode.Fail"/>
-    /// (the default) leaves the runner untouched, so nothing changes unless a deployment opts in. Retry
-    /// notices are forwarded through <see cref="PipelineExecutionOptions.OnNodeLog"/> so the operator sees
-    /// them live in the node's log.
+    /// Wraps a node runner so a failure is restarted per the effective <see cref="NodeFailurePolicy"/>
+    /// instead of taking the node's default path straight away. The effective policy is the node's own
+    /// <c>onError</c> config, falling back to a role default: a <b>source</b> falls back to the run-level
+    /// default (so <c>--on-source-error</c> governs cameras and streams), while a mid-graph node falls back to
+    /// <see cref="NodeFailureMode.Fail"/> — i.e. its cycle is skipped as before unless it explicitly opts into
+    /// <c>restart</c>. So nothing changes unless a deployment asks for it. Restart notices are forwarded
+    /// through <see cref="PipelineExecutionOptions.OnNodeLog"/> so the operator sees them live in the node's log.
     /// </summary>
-    private INodeRunner WrapSourceResilience(
+    private INodeRunner WrapNodeResilience(
         PipelineNodeDefinition node, PipelineExecutionOptions options, INodeRunner runner)
     {
-        if (!NodeRoles.IsSource(node))
-        {
-            return runner;
-        }
-
-        var policy = SourceFailurePolicy.FromConfig(node.Config, options.SourceFailurePolicy);
+        var roleDefault = NodeRoles.IsSource(node) ? options.SourceFailurePolicy : NodeFailurePolicy.Fail;
+        var policy = NodeFailurePolicy.FromConfig(node.Config, roleDefault);
         if (!policy.WillRestart)
         {
             return runner;
@@ -97,12 +94,12 @@ public sealed class PipelineNodeActivator(
                 Message = message
             });
 
-        // A hard restart rebuilds the source from scratch — a fresh OpenSession — so it recovers even when
-        // the session is dead, not just stalled. The factory returns a raw, unwrapped runner (the wrapper
+        // A hard restart rebuilds the node from scratch — a fresh session/model — so it recovers even when
+        // its state is dead, not just stalled. The factory returns a raw, unwrapped runner (the wrapper
         // activates it); binding registration is not repeated on a restart.
         Task<INodeRunner> Rebuild(CancellationToken token) => BuildRunnerAsync(node, options, token);
 
-        return ResilientSourceRunnerFactory.Wrap(runner, policy, log, Rebuild);
+        return ResilientNodeRunnerFactory.Wrap(runner, policy, log, Rebuild);
     }
 
     /// <summary>
