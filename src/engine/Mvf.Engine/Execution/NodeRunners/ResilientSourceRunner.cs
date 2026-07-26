@@ -19,9 +19,9 @@ namespace Mvf.Engine.Execution.NodeRunners;
 ///     exhausted source is not a failure and is never retried.</item>
 ///   <item>A read only ever runs against a freshly restarted runner, so a returned NoOutput always means a
 ///     genuine end of stream, never a broken reader reporting empty.</item>
-///   <item>When the policy's attempts are exhausted (bounded <see cref="SourceFailureMode.Retry"/>) the last
+///   <item>When a bounded restart runs out of attempts (<see cref="SourceFailurePolicy.Limit"/>) the last
 ///     error is rethrown, so the executor fails the run exactly as it would have without this wrapper — the
-///     honesty guarantee is preserved. <see cref="SourceFailureMode.Reconnect"/> restarts until cancelled,
+///     honesty guarantee is preserved. An unbounded restart (<c>Limit == 0</c>) keeps going until cancelled,
 ///     so a run rides out an outage and resumes the moment the source comes back.</item>
 /// </list>
 ///
@@ -72,7 +72,7 @@ internal class ResilientSourceRunner(
                     }
 
                     var backoff = policy.BackoffFor(attempt);
-                    var bound   = policy.Mode == SourceFailureMode.Retry ? $"/{policy.MaxRetries}" : string.Empty;
+                    var bound   = policy.Limit > 0 ? $"/{policy.Limit}" : string.Empty;
                     log?.Invoke("warn", $"source error (attempt {attempt}{bound}), restarting in {backoff.TotalMilliseconds:F0}ms: {lastError.Message}");
 
                     await Task.Delay(backoff, cancellationToken);

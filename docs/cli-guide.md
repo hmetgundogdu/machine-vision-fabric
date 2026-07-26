@@ -146,25 +146,26 @@ A `loop` keeps a pipeline *iterating*; this keeps it *alive* when the world misb
 policy is the **runtime's** to set, not the module's: a module throws and says what broke (a camera
 request timing out, a connection dropping), and you decide whether that ends the run.
 
-Set it with `--on-source-error`, or per source in the node's `onError` config:
+There are two actions — end the run, or **restart the node** — and one number that says how hard to
+try. Set it with `--on-source-error`, or per source in the node's `onError` config:
 
 | Mode | On a source failure |
 |---|---|
-| `reconnect` *(default)* | **Hard-restart the source, forever** — dispose it, open a fresh session, back off, retry. The run rides out an outage and resumes the moment the source comes back. For a 24/7 edge box. |
-| `retry` | A few hard restarts (`--source-retries`, default 4) with exponential backoff, then the run fails. |
+| `restart` *(default)* | **Restart the node** — dispose it and bring it back from scratch (a fresh session), back off, and read again. `--source-restart-limit` caps how many restarts before the run fails; **`0` (the default) means forever**, so the run rides out an outage and resumes the moment the source comes back. One verb whether the source is a camera, a file, or a simulator. |
 | `fail` | End the run at once with the source's error. The strict, honest fast-fail — good for CI. |
 
 ```bash
-mvf execute-graph --package packages/loop-demo                        # reconnect (default)
-mvf execute-graph --path my.json --on-source-error retry --source-retries 6
-mvf execute-graph --path my.json --on-source-error fail               # strict
+mvf execute-graph --package packages/loop-demo                          # restart forever (default)
+mvf execute-graph --path my.json --on-source-error restart --source-restart-limit 6
+mvf execute-graph --path my.json --on-source-error fail                 # strict
 ```
 
-Per source, in `pipeline.json` (overrides the CLI default):
+Per source, in `pipeline.json` (overrides the CLI default) — a bare string is `restart`-forever, or spell
+out the knobs:
 
 ```json
 { "id": "cam", "moduleId": "ivp.cognex-hmi-camera",
-  "config": { "onError": { "mode": "reconnect", "backoffMs": 1000, "maxBackoffMs": 30000 } } }
+  "config": { "onError": { "mode": "restart", "limit": 0, "backoffMs": 1000, "maxBackoffMs": 30000 } } }
 ```
 
 Three things worth knowing:
@@ -173,8 +174,8 @@ Three things worth knowing:
   fast, so a wrong address is reported immediately — not hidden behind an endless retry.
 - A **hard restart** rebuilds the node from scratch (a fresh session), so it recovers even when the
   connection is not just stalled but dead.
-- A `retry` that runs out of attempts **still fails the run** — a source that never recovers is never
-  mistaken for a clean, empty success. Restart notices show live in the node's log while it waits.
+- A **bounded** restart that runs out of its limit **still fails the run** — a source that never
+  recovers is never mistaken for a clean, empty success. Restart notices show live in the node's log.
 
 ---
 
@@ -228,8 +229,8 @@ execute-graph
   --checkpoint-every <n>      write a resumable checkpoint every n cycles
   --resume-dir <path>         resume a run from its last checkpoint
   --backpressure stall|drop   what a fast source does when a stage falls behind
-  --on-source-error <mode>    on a source failure: reconnect (default), retry, or fail
-  --source-retries <n>        hard restarts before 'retry' gives up (default 4)
+  --on-source-error <mode>    on a source failure: restart (default) or fail
+  --source-restart-limit <n>  restarts before the run fails (0 = forever, default)
   --source-backoff-ms <n>     first backoff before a restart, doubled each attempt (default 500)
   --queue <n>                 inter-stage queue depth (pipelined mode)
   --arena-slots <n>           override the shared-memory arena slot count

@@ -81,7 +81,7 @@ public sealed class PipelineNodeActivator(
         }
 
         var policy = SourceFailurePolicy.FromConfig(node.Config, options.SourceFailurePolicy);
-        if (!policy.WillRetry)
+        if (!policy.WillRestart)
         {
             return runner;
         }

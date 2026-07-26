@@ -10,56 +10,56 @@ namespace Mvf.Engine.Tests;
 
 /// <summary>
 /// A source that throws mid-stream should not always kill the run. These cover the failure-policy decorator
-/// (<see cref="ResilientSourceRunner"/>): retry reconnects and continues, reconnect never gives up, and an
-/// exhausted retry still rethrows so the run fails honestly. The engine default stays <c>fail</c>, so nothing
-/// changes for a deployment that does not opt in.
+/// (<see cref="ResilientSourceRunner"/>): a bounded restart recovers within its limit or rethrows once spent,
+/// an unbounded restart never gives up, and a hard restart rebuilds the node from scratch. The engine default
+/// stays <c>fail</c>, so nothing changes for a deployment that does not opt in.
 /// </summary>
 public sealed class SourceResilienceTests
 {
-    private static readonly SourceFailurePolicy FastRetry3 =
-        new() { Mode = SourceFailureMode.Retry, MaxRetries = 3, BaseBackoffMs = 0, MaxBackoffMs = 0 };
+    private static readonly SourceFailurePolicy FastRestart3 =
+        new() { Mode = SourceFailureMode.Restart, Limit = 3, BaseBackoffMs = 0, MaxBackoffMs = 0 };
 
-    private static readonly SourceFailurePolicy FastReconnect =
-        new() { Mode = SourceFailureMode.Reconnect, BaseBackoffMs = 0, MaxBackoffMs = 0 };
+    private static readonly SourceFailurePolicy FastRestartForever =
+        new() { Mode = SourceFailureMode.Restart, Limit = 0, BaseBackoffMs = 0, MaxBackoffMs = 0 };
 
     private static NodeExecutionInputs EmptyInputs() =>
         new(new Dictionary<string, PortValue>(), new NodeExecutionContext { RunId = "r", CycleIndex = 0, CycleStartedAt = DateTime.UtcNow });
 
     [Fact]
-    public async Task Retry_ReconnectsAndReturnsAFrame_WhenReadsRecover()
+    public async Task Restart_Bounded_RecoversWithinItsLimit()
     {
         // Fails the first two reads, then yields a frame — like a camera that drops and comes back.
         var inner = new ScriptedSource("cam", throwsBeforeSuccess: 2);
-        var runner = ResilientSourceRunnerFactory.Wrap(inner, FastRetry3, log: null);
+        var runner = ResilientSourceRunnerFactory.Wrap(inner, FastRestart3, log: null);
 
         await runner.ActivateAsync(CancellationToken.None);
         var result = await runner.ExecuteAsync(EmptyInputs(), CancellationToken.None);
 
         Assert.True(result.HasOutput);
         Assert.Equal(3, inner.ExecuteCalls);                 // 2 failures + 1 success
-        Assert.Equal(1 + 2, inner.ActivateCalls);            // initial activation + 2 reconnects
+        Assert.Equal(1 + 2, inner.ActivateCalls);            // initial activation + 2 restarts
     }
 
     [Fact]
-    public async Task Retry_RethrowsOriginalError_WhenAttemptsAreExhausted()
+    public async Task Restart_Bounded_RethrowsOriginalError_WhenLimitIsExhausted()
     {
         var inner = new ScriptedSource("cam", throwsBeforeSuccess: int.MaxValue, message: "camera offline");
-        var runner = ResilientSourceRunnerFactory.Wrap(inner, FastRetry3, log: null);
+        var runner = ResilientSourceRunnerFactory.Wrap(inner, FastRestart3, log: null);
 
         await runner.ActivateAsync(CancellationToken.None);
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => runner.ExecuteAsync(EmptyInputs(), CancellationToken.None));
 
         Assert.Contains("camera offline", ex.Message);
-        Assert.Equal(3, inner.ReconnectCalls);               // exactly MaxRetries reconnects, then it gives up
+        Assert.Equal(3, inner.RestartCalls);                 // exactly Limit restarts, then it gives up
     }
 
     [Fact]
-    public async Task Reconnect_KeepsRetryingUntilItSucceeds()
+    public async Task Restart_Unbounded_KeepsGoingUntilItSucceeds()
     {
-        // Ten failures then a frame: bounded retry(3) would give up, reconnect rides it out.
+        // Ten failures then a frame: a limit of 3 would give up, forever rides it out.
         var inner = new ScriptedSource("cam", throwsBeforeSuccess: 10);
-        var runner = ResilientSourceRunnerFactory.Wrap(inner, FastReconnect, log: null);
+        var runner = ResilientSourceRunnerFactory.Wrap(inner, FastRestartForever, log: null);
 
         await runner.ActivateAsync(CancellationToken.None);
         var result = await runner.ExecuteAsync(EmptyInputs(), CancellationToken.None);
@@ -69,23 +69,23 @@ public sealed class SourceResilienceTests
     }
 
     [Fact]
-    public async Task Exhaustion_IsNotAFailure_NoOutputPassesThroughWithoutRetry()
+    public async Task Exhaustion_IsNotAFailure_NoOutputPassesThroughWithoutRestart()
     {
         var inner = new ScriptedSource("cam", throwsBeforeSuccess: 0, exhaustAfter: 0); // returns NoOutput at once
-        var runner = ResilientSourceRunnerFactory.Wrap(inner, FastReconnect, log: null);
+        var runner = ResilientSourceRunnerFactory.Wrap(inner, FastRestartForever, log: null);
 
         await runner.ActivateAsync(CancellationToken.None);
         var result = await runner.ExecuteAsync(EmptyInputs(), CancellationToken.None);
 
         Assert.False(result.HasOutput);
-        Assert.Equal(1, inner.ActivateCalls);                // initial only — a clean end of stream is never retried
+        Assert.Equal(1, inner.ActivateCalls);                // initial only — a clean end of stream is never restarted
     }
 
     [Fact]
     public async Task Cancellation_DuringBackoff_Propagates()
     {
         var inner = new ScriptedSource("cam", throwsBeforeSuccess: int.MaxValue);
-        var policy = new SourceFailurePolicy { Mode = SourceFailureMode.Reconnect, BaseBackoffMs = 60_000, MaxBackoffMs = 60_000 };
+        var policy = new SourceFailurePolicy { Mode = SourceFailureMode.Restart, BaseBackoffMs = 60_000, MaxBackoffMs = 60_000 };
         var runner = ResilientSourceRunnerFactory.Wrap(inner, policy, log: null);
         using var cts = new CancellationTokenSource();
 
@@ -99,29 +99,11 @@ public sealed class SourceResilienceTests
     [Fact]
     public void Wrap_KeepsRewindableCapability_OnlyWhenInnerHasIt()
     {
-        var rewindable = ResilientSourceRunnerFactory.Wrap(new RewindableSource("a"), FastReconnect, null);
-        var plain      = ResilientSourceRunnerFactory.Wrap(new ScriptedSource("b", 0), FastReconnect, null);
+        var rewindable = ResilientSourceRunnerFactory.Wrap(new RewindableSource("a"), FastRestartForever, null);
+        var plain      = ResilientSourceRunnerFactory.Wrap(new ScriptedSource("b", 0), FastRestartForever, null);
 
         Assert.IsAssignableFrom<IRewindableSource>(rewindable);
         Assert.IsNotAssignableFrom<IRewindableSource>(plain);
-    }
-
-    [Fact]
-    public async Task EndToEnd_ExhaustedRetry_StillFailsTheRunHonestly()
-    {
-        // The whole point: retry buys reconnections, but a source that never recovers must still fail the run
-        // (and not report a clean, empty success). Wire a wrapped always-throwing source through the executor.
-        var inner = new ThrowingEveryTimeSource("source1", "unreachable");
-        var wrapped = ResilientSourceRunnerFactory.Wrap(
-            inner, new SourceFailurePolicy { Mode = SourceFailureMode.Retry, MaxRetries = 2, BaseBackoffMs = 0, MaxBackoffMs = 0 }, null);
-
-        var report = await new PipelineGraphExecutor(new PresetActivator(("source1", wrapped), ("sink1", new SinkSource("sink1"))))
-            .ExecuteAsync(BuildSourceToSink(), new PipelineExecutionOptions { PackageRoot = ".", IntegrationsRoot = "." }, CancellationToken.None);
-
-        Assert.False(report.Succeeded);
-        Assert.Equal(0, report.TotalCycles);
-        Assert.Contains("unreachable", report.ErrorMessage);
-        Assert.Equal(3, inner.ExecuteCalls);                 // 1 read + 2 retried reads, then the run fails
     }
 
     [Fact]
@@ -132,7 +114,7 @@ public sealed class SourceResilienceTests
         var builds  = 0;
         Func<CancellationToken, Task<INodeRunner>> rebuild = _ => { builds++; return Task.FromResult<INodeRunner>(healthy); };
 
-        var runner = ResilientSourceRunnerFactory.Wrap(broken, FastReconnect, log: null, rebuild);
+        var runner = ResilientSourceRunnerFactory.Wrap(broken, FastRestartForever, log: null, rebuild);
         await runner.ActivateAsync(CancellationToken.None);
         var result = await runner.ExecuteAsync(EmptyInputs(), CancellationToken.None);
 
@@ -161,7 +143,7 @@ public sealed class SourceResilienceTests
 
         var runner = ResilientSourceRunnerFactory.Wrap(
             broken,
-            new SourceFailurePolicy { Mode = SourceFailureMode.Retry, MaxRetries = 5, BaseBackoffMs = 0, MaxBackoffMs = 0 },
+            new SourceFailurePolicy { Mode = SourceFailureMode.Restart, Limit = 5, BaseBackoffMs = 0, MaxBackoffMs = 0 },
             log: null,
             rebuild);
         await runner.ActivateAsync(CancellationToken.None);
@@ -171,13 +153,32 @@ public sealed class SourceResilienceTests
         Assert.Equal(3, builds);                 // two failed OpenSessions counted, the third came up
     }
 
+    [Fact]
+    public async Task EndToEnd_ExhaustedRestart_StillFailsTheRunHonestly()
+    {
+        // The whole point: restart buys recoveries, but a source that never recovers must still fail the run
+        // (and not report a clean, empty success). Wire a wrapped always-throwing source through the executor.
+        var inner = new ThrowingEveryTimeSource("source1", "unreachable");
+        var wrapped = ResilientSourceRunnerFactory.Wrap(
+            inner, new SourceFailurePolicy { Mode = SourceFailureMode.Restart, Limit = 2, BaseBackoffMs = 0, MaxBackoffMs = 0 }, null);
+
+        var report = await new PipelineGraphExecutor(new PresetActivator(("source1", wrapped), ("sink1", new SinkSource("sink1"))))
+            .ExecuteAsync(BuildSourceToSink(), new PipelineExecutionOptions { PackageRoot = ".", IntegrationsRoot = "." }, CancellationToken.None);
+
+        Assert.False(report.Succeeded);
+        Assert.Equal(0, report.TotalCycles);
+        Assert.Contains("unreachable", report.ErrorMessage);
+        Assert.Equal(3, inner.ExecuteCalls);                 // 1 read + 2 restarted reads, then the run fails
+    }
+
     // ---- policy parsing ----
 
     [Theory]
     [InlineData("fail", SourceFailureMode.Fail)]
-    [InlineData("retry", SourceFailureMode.Retry)]
-    [InlineData("reconnect", SourceFailureMode.Reconnect)]
-    [InlineData("forever", SourceFailureMode.Reconnect)]
+    [InlineData("restart", SourceFailureMode.Restart)]
+    [InlineData("retry", SourceFailureMode.Restart)]       // legacy alias
+    [InlineData("reconnect", SourceFailureMode.Restart)]   // legacy alias
+    [InlineData("forever", SourceFailureMode.Restart)]     // legacy alias
     public void FromConfig_StringShorthand_SetsMode(string token, SourceFailureMode expected)
     {
         var config = new JsonObject { ["onError"] = token };
@@ -189,20 +190,27 @@ public sealed class SourceResilienceTests
     {
         var config = new JsonObject
         {
-            ["onError"] = new JsonObject { ["mode"] = "retry", ["maxRetries"] = 9, ["backoffMs"] = 250 }
+            ["onError"] = new JsonObject { ["mode"] = "restart", ["limit"] = 9, ["backoffMs"] = 250 }
         };
 
         var policy = SourceFailurePolicy.FromConfig(config, SourceFailurePolicy.Fail);
 
-        Assert.Equal(SourceFailureMode.Retry, policy.Mode);
-        Assert.Equal(9, policy.MaxRetries);
+        Assert.Equal(SourceFailureMode.Restart, policy.Mode);
+        Assert.Equal(9, policy.Limit);
         Assert.Equal(250, policy.BaseBackoffMs);
+    }
+
+    [Fact]
+    public void FromConfig_Object_AcceptsMaxRetriesAsLimitAlias()
+    {
+        var config = new JsonObject { ["onError"] = new JsonObject { ["mode"] = "restart", ["maxRetries"] = 7 } };
+        Assert.Equal(7, SourceFailurePolicy.FromConfig(config, SourceFailurePolicy.Fail).Limit);
     }
 
     [Fact]
     public void FromConfig_MissingOrUnknown_KeepsFallback()
     {
-        var fallback = new SourceFailurePolicy { Mode = SourceFailureMode.Reconnect };
+        var fallback = new SourceFailurePolicy { Mode = SourceFailureMode.Restart };
         Assert.Equal(fallback, SourceFailurePolicy.FromConfig(new JsonObject(), fallback));
         Assert.Equal(fallback.Mode, SourceFailurePolicy.FromConfig(new JsonObject { ["onError"] = "nonsense" }, fallback).Mode);
     }
@@ -218,6 +226,20 @@ public sealed class SourceResilienceTests
         Assert.Equal(500, p.BackoffFor(9).TotalMilliseconds);
     }
 
+    [Fact]
+    public void AllowsAttempt_UnboundedWhenLimitIsZero()
+    {
+        var forever = new SourceFailurePolicy { Mode = SourceFailureMode.Restart, Limit = 0 };
+        Assert.True(forever.AllowsAttempt(1));
+        Assert.True(forever.AllowsAttempt(1_000_000));
+
+        var bounded = new SourceFailurePolicy { Mode = SourceFailureMode.Restart, Limit = 2 };
+        Assert.True(bounded.AllowsAttempt(2));
+        Assert.False(bounded.AllowsAttempt(3));
+
+        Assert.False(SourceFailurePolicy.Fail.AllowsAttempt(1)); // fail never restarts
+    }
+
     // ---- fakes ----
 
     private static IFrameEnvelope Frame(int i) => new BinaryFrameEnvelope("cam", i, $"f{i}.bmp", [(byte)i], "image/bmp");
@@ -229,7 +251,7 @@ public sealed class SourceResilienceTests
         private int _thrown;
         public int ExecuteCalls { get; private set; }
         public int ActivateCalls { get; private set; }
-        public int ReconnectCalls => ActivateCalls - 1;
+        public int RestartCalls => ActivateCalls - 1;
         public string NodeId { get; } = nodeId;
 
         public Task ActivateAsync(CancellationToken cancellationToken)

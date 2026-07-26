@@ -340,16 +340,17 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         : 2;
 
     // What happens when a source (a camera, a stream) throws mid-run. This is an edge runtime meant to keep
-    // running without a babysitter, so the CLI defaults to 'reconnect': hard-restart the source (a fresh
-    // session) and keep trying, so an outage is ridden out and the run resumes when the source comes back.
-    // 'retry' gives up after a few attempts; 'fail' is the strict fast-fail. A node's onError config wins.
+    // running without a babysitter, so the CLI defaults to 'restart' with no limit: hard-restart the source
+    // (a fresh session) and keep trying, so an outage is ridden out and the run resumes when the source comes
+    // back. --source-restart-limit caps it; 'fail' is the strict fast-fail. A node's onError config wins.
     var sourceFailureMode = invocation.Options.TryGetValue("on-source-error", out var ose)
         && SourceFailurePolicy.TryParseMode(ose, out var parsedSourceMode)
         ? parsedSourceMode
-        : SourceFailureMode.Reconnect;
-    var sourcePolicy = new SourceFailurePolicy { Mode = sourceFailureMode };
-    if (invocation.Options.TryGetValue("source-retries", out var sr) && int.TryParse(sr, out var srInt) && srInt >= 0)
-        sourcePolicy = sourcePolicy with { MaxRetries = srInt };
+        : SourceFailureMode.Restart;
+    var sourcePolicy = new SourceFailurePolicy { Mode = sourceFailureMode };   // Limit defaults to 0 = forever
+    if ((invocation.Options.TryGetValue("source-restart-limit", out var sl) || invocation.Options.TryGetValue("source-retries", out sl))
+        && int.TryParse(sl, out var slInt) && slInt >= 0)
+        sourcePolicy = sourcePolicy with { Limit = slInt };
     if (invocation.Options.TryGetValue("source-backoff-ms", out var sb) && int.TryParse(sb, out var sbInt) && sbInt >= 0)
         sourcePolicy = sourcePolicy with { BaseBackoffMs = sbInt };
 
@@ -689,8 +690,8 @@ void PrintHelp()
 {
     Console.WriteLine("Mvf.Cli");
     Console.WriteLine("Commands:");
-    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--arena-slots <n>] [--on-source-error fail|retry|reconnect] [--source-retries <n>] [--source-backoff-ms <n>] [--no-tui] [--no-prompt]");
-    Console.WriteLine("      --on-source-error: on a source (camera/stream) failure — reconnect (hard-restart forever, default), retry (a few restarts then fail), or fail (end the run at once).");
+    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--arena-slots <n>] [--on-source-error fail|restart] [--source-restart-limit <n>] [--source-backoff-ms <n>] [--no-tui] [--no-prompt]");
+    Console.WriteLine("      --on-source-error: on a source (camera/stream) failure — restart (hard-restart the node, default) or fail (end the run at once). --source-restart-limit caps restarts (0 = forever, default).");
     Console.WriteLine("      --no-prompt never asks an operator for a value/select binding; an unresolved one fails the run.");
     Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");
     Console.WriteLine("  modules [--root <path>]");
