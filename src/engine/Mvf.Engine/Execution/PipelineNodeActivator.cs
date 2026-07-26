@@ -38,15 +38,7 @@ public sealed class PipelineNodeActivator(
         PipelineExecutionOptions options,
         CancellationToken cancellationToken)
     {
-        INodeRunner runner = node.Kind switch
-        {
-            "integration-module" => await CreateIntegrationModuleRunnerAsync(node, options, cancellationToken),
-            "embedded-primitive" => CreateEmbeddedPrimitiveRunner(node),
-            "runtime-builtin" => CreateRuntimeBuiltinRunner(node, options),
-            _ => throw new InvalidOperationException(
-                $"Node '{node.Id}' has unknown kind '{node.Kind}'. " +
-                $"Expected one of: integration-module, embedded-primitive, runtime-builtin.")
-        };
+        var runner = await BuildRunnerAsync(node, options, cancellationToken);
 
         runner = WrapSourceResilience(node, options, runner);
 
@@ -56,6 +48,23 @@ public sealed class PipelineNodeActivator(
     }
 
     /// <summary>
+    /// Builds a raw (unwrapped, not-yet-activated) runner for a node. Kept separate so a source can be rebuilt
+    /// from scratch on a hard restart — this is the exact call the resilience wrapper re-runs to get a fresh
+    /// <c>OpenSession</c>, so it must not itself wrap or activate.
+    /// </summary>
+    private async Task<INodeRunner> BuildRunnerAsync(
+        PipelineNodeDefinition node, PipelineExecutionOptions options, CancellationToken cancellationToken) =>
+        node.Kind switch
+        {
+            "integration-module" => await CreateIntegrationModuleRunnerAsync(node, options, cancellationToken),
+            "embedded-primitive" => CreateEmbeddedPrimitiveRunner(node),
+            "runtime-builtin" => CreateRuntimeBuiltinRunner(node, options),
+            _ => throw new InvalidOperationException(
+                $"Node '{node.Id}' has unknown kind '{node.Kind}'. " +
+                $"Expected one of: integration-module, embedded-primitive, runtime-builtin.")
+        };
+
+    /// <summary>
     /// Wraps a source runner so a mid-stream read failure is retried per the effective
     /// <see cref="SourceFailurePolicy"/> instead of ending the run. The policy is the node's own
     /// <c>onError</c> config, falling back to the run-level default; <see cref="SourceFailureMode.Fail"/>
@@ -63,7 +72,7 @@ public sealed class PipelineNodeActivator(
     /// notices are forwarded through <see cref="PipelineExecutionOptions.OnNodeLog"/> so the operator sees
     /// them live in the node's log.
     /// </summary>
-    private static INodeRunner WrapSourceResilience(
+    private INodeRunner WrapSourceResilience(
         PipelineNodeDefinition node, PipelineExecutionOptions options, INodeRunner runner)
     {
         if (!NodeRoles.IsSource(node))
@@ -88,7 +97,12 @@ public sealed class PipelineNodeActivator(
                 Message = message
             });
 
-        return ResilientSourceRunnerFactory.Wrap(runner, policy, log);
+        // A hard restart rebuilds the source from scratch — a fresh OpenSession — so it recovers even when
+        // the session is dead, not just stalled. The factory returns a raw, unwrapped runner (the wrapper
+        // activates it); binding registration is not repeated on a restart.
+        Task<INodeRunner> Rebuild(CancellationToken token) => BuildRunnerAsync(node, options, token);
+
+        return ResilientSourceRunnerFactory.Wrap(runner, policy, log, Rebuild);
     }
 
     /// <summary>

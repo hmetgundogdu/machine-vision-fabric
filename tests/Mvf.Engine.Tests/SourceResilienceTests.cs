@@ -124,6 +124,53 @@ public sealed class SourceResilienceTests
         Assert.Equal(3, inner.ExecuteCalls);                 // 1 read + 2 retried reads, then the run fails
     }
 
+    [Fact]
+    public async Task HardRestart_RebuildsFromScratchAndDisposesTheBrokenRunner()
+    {
+        var broken  = new TrackingSource("cam", () => throw new InvalidOperationException("dead session"));
+        var healthy = new TrackingSource("cam", () => NodeExecutionResult.Single("frame", PortValue.FromFrame(Frame(1))));
+        var builds  = 0;
+        Func<CancellationToken, Task<INodeRunner>> rebuild = _ => { builds++; return Task.FromResult<INodeRunner>(healthy); };
+
+        var runner = ResilientSourceRunnerFactory.Wrap(broken, FastReconnect, log: null, rebuild);
+        await runner.ActivateAsync(CancellationToken.None);
+        var result = await runner.ExecuteAsync(EmptyInputs(), CancellationToken.None);
+
+        Assert.True(result.HasOutput);
+        Assert.Equal(1, builds);                 // rebuilt once, from scratch (a fresh session)
+        Assert.True(broken.Disposed);            // the dead runner was torn down
+        Assert.False(healthy.Disposed);
+        Assert.True(healthy.ActivateCalls >= 1); // the fresh runner was activated
+
+        await runner.DisposeAsync();
+        Assert.True(healthy.Disposed);           // the wrapper disposes its current (healthy) runner
+    }
+
+    [Fact]
+    public async Task HardRestart_FailedRebuildsCountAsAttempts_ThenRecovers()
+    {
+        var healthy = new TrackingSource("cam", () => NodeExecutionResult.Single("frame", PortValue.FromFrame(Frame(1))));
+        var builds  = 0;
+        Func<CancellationToken, Task<INodeRunner>> rebuild = _ =>
+        {
+            builds++;
+            if (builds <= 2) throw new InvalidOperationException("OpenSession failed"); // session not up yet
+            return Task.FromResult<INodeRunner>(healthy);
+        };
+        var broken = new TrackingSource("cam", () => throw new InvalidOperationException("dead"));
+
+        var runner = ResilientSourceRunnerFactory.Wrap(
+            broken,
+            new SourceFailurePolicy { Mode = SourceFailureMode.Retry, MaxRetries = 5, BaseBackoffMs = 0, MaxBackoffMs = 0 },
+            log: null,
+            rebuild);
+        await runner.ActivateAsync(CancellationToken.None);
+        var result = await runner.ExecuteAsync(EmptyInputs(), CancellationToken.None);
+
+        Assert.True(result.HasOutput);
+        Assert.Equal(3, builds);                 // two failed OpenSessions counted, the third came up
+    }
+
     // ---- policy parsing ----
 
     [Theory]
@@ -215,6 +262,18 @@ public sealed class SourceResilienceTests
             Task.FromResult(NodeExecutionResult.NoOutput);
         public Task RewindAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>Tracks activation/disposal and reads via a supplied delegate (which may throw). Used for hard-restart tests.</summary>
+    private sealed class TrackingSource(string nodeId, Func<NodeExecutionResult> read) : INodeRunner
+    {
+        public int ActivateCalls { get; private set; }
+        public bool Disposed { get; private set; }
+        public string NodeId { get; } = nodeId;
+        public Task ActivateAsync(CancellationToken cancellationToken) { ActivateCalls++; return Task.CompletedTask; }
+        public Task<NodeExecutionResult> ExecuteAsync(NodeExecutionInputs inputs, CancellationToken cancellationToken) =>
+            Task.FromResult(read());
+        public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }
 
     private sealed class ThrowingEveryTimeSource(string nodeId, string message) : INodeRunner

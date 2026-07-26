@@ -339,13 +339,14 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         ? qInt
         : 2;
 
-    // What happens when a source (a camera, a stream) throws mid-run. The CLI defaults to 'retry' so a
-    // transient blip — a camera request timing out — reconnects instead of killing the run; 'fail' is the
-    // strict fast-fail, 'reconnect' rides out an outage forever. A source's own onError config overrides it.
+    // What happens when a source (a camera, a stream) throws mid-run. This is an edge runtime meant to keep
+    // running without a babysitter, so the CLI defaults to 'reconnect': hard-restart the source (a fresh
+    // session) and keep trying, so an outage is ridden out and the run resumes when the source comes back.
+    // 'retry' gives up after a few attempts; 'fail' is the strict fast-fail. A node's onError config wins.
     var sourceFailureMode = invocation.Options.TryGetValue("on-source-error", out var ose)
         && SourceFailurePolicy.TryParseMode(ose, out var parsedSourceMode)
         ? parsedSourceMode
-        : SourceFailureMode.Retry;
+        : SourceFailureMode.Reconnect;
     var sourcePolicy = new SourceFailurePolicy { Mode = sourceFailureMode };
     if (invocation.Options.TryGetValue("source-retries", out var sr) && int.TryParse(sr, out var srInt) && srInt >= 0)
         sourcePolicy = sourcePolicy with { MaxRetries = srInt };
@@ -689,7 +690,7 @@ void PrintHelp()
     Console.WriteLine("Mvf.Cli");
     Console.WriteLine("Commands:");
     Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--arena-slots <n>] [--on-source-error fail|retry|reconnect] [--source-retries <n>] [--source-backoff-ms <n>] [--no-tui] [--no-prompt]");
-    Console.WriteLine("      --on-source-error: on a source (camera/stream) failure — fail (end the run), retry (reconnect a few times, default), or reconnect (retry forever, for 24/7 edge).");
+    Console.WriteLine("      --on-source-error: on a source (camera/stream) failure — reconnect (hard-restart forever, default), retry (a few restarts then fail), or fail (end the run at once).");
     Console.WriteLine("      --no-prompt never asks an operator for a value/select binding; an unresolved one fails the run.");
     Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");
     Console.WriteLine("  modules [--root <path>]");
