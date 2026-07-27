@@ -429,23 +429,95 @@ public sealed class PipelineDashboard
     /// </summary>
     private static void PaintInPlace(IRenderable renderable)
     {
-        try { Console.SetCursorPosition(0, 0); } catch { }
+        int cols, rows;
+        try
+        {
+            cols = Console.WindowWidth  > 0 ? Console.WindowWidth  : 120;
+            rows = Console.WindowHeight > 0 ? Console.WindowHeight : 40;
+        }
+        catch { cols = 120; rows = 40; }
 
-        AnsiConsole.Write(renderable);
+        // Render the frame to an ANSI string at the exact console width, then write it line by line, padding
+        // each line out to the full width with spaces. Spectre draws every line only as wide as its content,
+        // so without this a frame whose line is shorter than the previous frame's at that row leaves the old
+        // tail on screen — the overwrite corruption (a half-erased "space:pause", a log line bleeding into the
+        // next). Padding rather than an erase-escape keeps the Windows-console portability the in-place
+        // strategy was chosen for, and the last row is held back so a full-width final line can't wrap and
+        // scroll the whole view.
+        var lines = RenderToAnsi(renderable, cols).Split('\n');
 
         try
         {
-            var cur  = Console.CursorTop;
-            var rows = Console.WindowHeight > 0 ? Console.WindowHeight : 40;
-            var cols = Console.WindowWidth  > 0 ? Console.WindowWidth  : 120;
+            var r = 0;
+            for (; r < lines.Length && r < rows - 1; r++)
+            {
+                var line = lines[r].TrimEnd('\r');
+                Console.SetCursorPosition(0, r);
+                Console.Write(line);
+                var pad = cols - VisibleLength(line);
+                if (pad > 0) Console.Write(new string(' ', pad));
+            }
+
+            // Blank any rows a previous, taller frame used.
             var blank = new string(' ', cols);
-            for (var r = cur; r < rows - 1; r++)
+            for (; r < rows - 1; r++)
             {
                 Console.SetCursorPosition(0, r);
                 Console.Write(blank);
             }
         }
         catch { /* ignore on non-interactive hosts */ }
+    }
+
+    /// <summary>Renders a frame to an ANSI string at a fixed width, preserving the terminal's colour system so
+    /// the captured output is identical to a direct write — the capture only exists so each line can be padded
+    /// to full width and clear the residue of a longer previous frame.</summary>
+    private static string RenderToAnsi(IRenderable renderable, int width)
+    {
+        var buffer  = new StringWriter();
+        var console = AnsiConsole.Create(new AnsiConsoleSettings
+        {
+            Ansi        = AnsiSupport.Yes,
+            ColorSystem = MapColorSystem(AnsiConsole.Profile.Capabilities.ColorSystem),
+            Interactive = InteractionSupport.No,
+            Out         = new AnsiConsoleOutput(buffer)
+        });
+        console.Profile.Width  = width;
+        console.Profile.Height = 10_000;   // large, so nothing is clipped
+        console.Write(renderable);
+        return buffer.ToString();
+    }
+
+    private static ColorSystemSupport MapColorSystem(ColorSystem system) => system switch
+    {
+        ColorSystem.NoColors  => ColorSystemSupport.NoColors,
+        ColorSystem.Legacy    => ColorSystemSupport.Legacy,
+        ColorSystem.Standard  => ColorSystemSupport.Standard,
+        ColorSystem.EightBit  => ColorSystemSupport.EightBit,
+        ColorSystem.TrueColor => ColorSystemSupport.TrueColor,
+        _                     => ColorSystemSupport.Standard
+    };
+
+    /// <summary>Visible column count of an ANSI line. Every glyph is ASCII width-1 (enforced by GlyphsAsciiTests),
+    /// so this is the char count minus the CSI escape sequences — exactly how much padding fills the rest of the row.</summary>
+    private static int VisibleLength(string s)
+    {
+        var n = 0;
+        for (var i = 0; i < s.Length; i++)
+        {
+            if (s[i] == '\x1b')
+            {
+                i++;
+                if (i < s.Length && s[i] == '[')
+                {
+                    i++;
+                    while (i < s.Length && !(s[i] >= '@' && s[i] <= '~')) i++;
+                }
+                continue;
+            }
+            n++;
+        }
+        return n;
     }
 
     // ── Layout ───────────────────────────────────────────────────────────────
@@ -542,17 +614,18 @@ public sealed class PipelineDashboard
             ? "  [grey42]space:" + (IsPaused ? "resume" : "pause") + "[/]"
             : string.Empty;
 
-        var elapsed = snapshot.Elapsed.TotalSeconds > 0
-            ? $"{snapshot.Elapsed.TotalSeconds:F1}s"
+        var elapsed = snapshot.Elapsed > TimeSpan.Zero
+            ? DurationText.Format(snapshot.Elapsed)
             : "-";
 
         // Per-cycle timing: total wall clock alone hides whether the graph is keeping up. avg is elapsed
         // over completed cycles; last is the most recent cycle's wall clock. Both blank until a cycle lands.
+        // Formatted with the same adaptive scale as t:, so a slow cycle rolls up to s / m instead of huge ms.
         var avgCycle  = _state.AverageCycleDuration;
         var lastCycle = _state.LastCycleDuration;
         var cycleCell = snapshot.TotalCycles > 0
-            ? $"  [grey]avg:[/][grey58]{avgCycle.TotalMilliseconds:F0}ms[/]" +
-              (lastCycle > TimeSpan.Zero ? $" [grey42](last {lastCycle.TotalMilliseconds:F0}ms)[/]" : string.Empty)
+            ? $"  [grey]avg:[/][grey58]{DurationText.Format(avgCycle)}[/]" +
+              (lastCycle > TimeSpan.Zero ? $" [grey42](last {DurationText.Format(lastCycle)})[/]" : string.Empty)
             : string.Empty;
 
         // Truncate run ID to 8 chars
@@ -565,8 +638,13 @@ public sealed class PipelineDashboard
             ? $"  [grey]rst:[/][red]{restarts}[/]"
             : string.Empty;
 
+        // The logo breathes while the run is live: a colour wave sweeps M-V-F and a width-1 ASCII mark
+        // morphs beside it, so the terminal shows the run is alive without a spinner stealing a whole cell.
+        var animate = snapshot.Status == PipelineExecutionStatus.Running && !IsPaused;
+        var logo = BuildLogo(animate, Environment.TickCount64);
+
         return new Markup(
-            $"[bold deepskyblue1]MVF[/] [grey]|[/] " +
+            logo +
             $"[bold]{Markup.Escape(_definition.Name)}[/]  " +
             $"[grey]run:[/][grey58]{Markup.Escape(runId)}[/]  " +
             $"{status}  " +
@@ -576,6 +654,33 @@ public sealed class PipelineDashboard
             cycleCell +
             restartCell +
             pauseHint);
+    }
+
+    // Logo colour wave: dim → mid → bright. The lit letter is brightest; its neighbours fall off, so the
+    // highlight reads as a wave sweeping across M-V-F. All shades of the same hue, so it never reads as an error.
+    private static readonly string[] LogoShades = ["grey42", "deepskyblue3", "deepskyblue1"];
+
+    /// <summary>
+    /// The "MVF" logo cell. Static (plain bright) when the run is not advancing; while it runs the letters
+    /// ride a colour wave and a width-1 ASCII mark morphs beside them. The mark occupies one column in both
+    /// forms (a space when static), so switching between them never shifts anything to the right — the same
+    /// width discipline the rest of the TUI keeps (see <see cref="Glyphs"/>).
+    /// </summary>
+    private static string BuildLogo(bool animate, long nowMs)
+    {
+        const string name = "MVF";
+        if (!animate)
+            return $"[bold deepskyblue1]{name}[/]  [grey]|[/] ";
+
+        var pos = Anim.FlowPos(nowMs, name.Length, 900);
+        var sb  = new System.Text.StringBuilder(64);
+        for (var i = 0; i < name.Length; i++)
+        {
+            var shade = LogoShades[Math.Max(0, LogoShades.Length - 1 - Math.Abs(i - pos))];
+            sb.Append($"[bold {shade}]{name[i]}[/]");
+        }
+        sb.Append($"[deepskyblue1]{Anim.LogoFrame(nowMs)}[/] [grey]|[/] ");
+        return sb.ToString();
     }
 
     private IRenderable BuildLogPanel(int capacity, int width)
@@ -764,23 +869,35 @@ public sealed class PipelineDashboard
                 NodeLifecycleStatus.Active  => "[yellow]active[/]",
                 _                           => "[grey]idle[/]"
             };
-            var lastMs = st.LastDurationMicros / 1000.0;
-            var avgMs  = st.AverageDurationMicros / 1000.0;
-            var minMs  = st.MinDurationMicros == long.MaxValue ? 0 : st.MinDurationMicros / 1000.0;
-            var maxMs  = st.MaxDurationMicros / 1000.0;
+            var minMicros = st.MinDurationMicros == long.MaxValue ? 0 : st.MinDurationMicros;
             var inP    = st.LastInputPorts.Count  > 0 ? string.Join(",", st.LastInputPorts)  : Glyphs.None;
             var outP   = st.LastOutputPorts.Count > 0 ? string.Join(",", st.LastOutputPorts) : Glyphs.None;
 
-            body = new Markup(string.Join("\n",
-            [
+            var lines = new List<string>
+            {
                 $"[grey]status  [/] {statusText}",
                 $"[grey]cycles  [/] [white]{st.TotalCycles}[/]  [grey]ok[/] [green]{st.AcceptedCycles}[/]  [grey]fault[/] [red]{st.FaultedCycles}[/]",
-                $"[grey]last    [/] {lastMs:F2}ms",
-                $"[grey]avg/min/max[/] {avgMs:F2} / {minMs:F2} / {maxMs:F2} ms",
-                $"[grey]restarts[/] [red]{st.WorkerRestarts}[/]",
-                $"[grey]in  {Glyphs.FlowRight} [/] [steelblue1]{Markup.Escape(inP)}[/]",
-                $"[grey]out {Glyphs.FlowRight} [/] [mediumspringgreen]{Markup.Escape(outP)}[/]"
-            ]));
+                $"[grey]last    [/] {DurationText.Format(st.LastDurationMicros)}",
+                $"[grey]avg/min/max[/] {DurationText.Format((long)st.AverageDurationMicros)} / {DurationText.Format(minMicros)} / {DurationText.Format(st.MaxDurationMicros)}",
+                $"[grey]restarts[/] [red]{st.WorkerRestarts}[/]"
+            };
+
+            // Source acquisition breakdown: the single node line above ("last") is essentially the wait for
+            // a source, so the receive/queue split only shows here, where there's room for last + average.
+            if (st.HasAcquisition)
+            {
+                var recv = st.HasReceive
+                    ? $"[steelblue1]{DurationText.Format(st.LastReceiveMicros)}[/] [grey42]avg[/] {DurationText.Format((long)st.AverageReceiveMicros)}"
+                    : "[grey42]- (wrap fetch in BeginAcquire)[/]";
+                lines.Add($"[grey]recv    [/] {recv}");
+                lines.Add($"[grey]wait    [/] {DurationText.Format(st.LastWaitMicros)} [grey42]avg[/] {DurationText.Format((long)st.AverageWaitMicros)}");
+                lines.Add($"[grey]queue   [/] {DurationText.Format(st.LastQueueMicros)} [grey42]avg[/] {DurationText.Format((long)st.AverageQueueMicros)}");
+            }
+
+            lines.Add($"[grey]in  {Glyphs.FlowRight} [/] [steelblue1]{Markup.Escape(inP)}[/]");
+            lines.Add($"[grey]out {Glyphs.FlowRight} [/] [mediumspringgreen]{Markup.Escape(outP)}[/]");
+
+            body = new Markup(string.Join("\n", lines));
         }
 
         return new Panel(body)

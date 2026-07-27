@@ -426,6 +426,18 @@ public sealed class PipelineGraphExecutor(
                         workerMetricsByNode[node.Id] = workerMetrics;
                     }
 
+                    // A source's frame was fetched on a producer thread, so its receive/queue/wait is not in
+                    // nodeTicks above. Poll it once per produced frame, alongside the worker-metrics poll.
+                    FrameAcquisitionSample? acquisition = null;
+                    if (result.HasOutput
+                        && runner is ISourceAcquisitionMetrics sourceMetrics
+                        && sourceMetrics.GetLastAcquisition() is { } sample
+                        && acc is not null)
+                    {
+                        (acc.Source ??= new SourceAcquisitionAccumulator()).Record(sample);
+                        acquisition = sample;
+                    }
+
                     options.OnNodeExecuted?.Invoke(new NodeExecutionEvent
                     {
                         RunId = runId,
@@ -435,6 +447,7 @@ public sealed class PipelineGraphExecutor(
                         Faulted = faulted,
                         DurationMicros = TicksToMicros(nodeTicks),
                         WorkerRestarts = workerMetricsByNode.TryGetValue(node.Id, out var wm) ? wm.Restarts : 0,
+                        Acquisition = acquisition,
                         OutputPortNames = result.HasOutput
                             ? result.All.Select(kvp => kvp.Key).ToList()
                             : [],
@@ -593,7 +606,8 @@ public sealed class PipelineGraphExecutor(
                 TotalDurationMicros = TicksToMicros(kvp.Value.TotalDurationTicks),
                 WarmupMs = warmupByNode.GetValueOrDefault(kvp.Key),
                 ActivationMode = activationModeByNode.GetValueOrDefault(kvp.Key, NodeActivationMode.Resident),
-                Worker = workerMetricsByNode.GetValueOrDefault(kvp.Key)
+                Worker = workerMetricsByNode.GetValueOrDefault(kvp.Key),
+                Source = kvp.Value.Source?.ToProfile()
             },
             StringComparer.OrdinalIgnoreCase);
 
@@ -749,5 +763,6 @@ public sealed class PipelineGraphExecutor(
         public int TotalCycles;
         public int FaultedCycles;
         public long TotalDurationTicks;
+        public SourceAcquisitionAccumulator? Source;
     }
 }

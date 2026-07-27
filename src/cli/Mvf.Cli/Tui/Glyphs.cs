@@ -54,6 +54,10 @@ internal static class Glyphs
     // Spinner frames for the active node — four width-1 ASCII glyphs cycled by Anim.SpinnerFrame.
     public const string SpinnerFrames = @"|/-\";
 
+    // Logo pulse frames — a small width-1 ASCII mark that morphs beside the MVF logo while a run is live
+    // (Anim.LogoFrame). Grows and shrinks so it reads as a heartbeat; all ASCII, so it never shifts a cell.
+    public const string LogoPulseFrames = ".oOo";
+
     // Panel decorations.
     public const string Bullet   = "*";  // legend dots
     public const string NodeMark = "#";  // node-detail title

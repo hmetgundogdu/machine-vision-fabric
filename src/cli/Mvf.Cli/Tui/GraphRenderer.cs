@@ -26,7 +26,7 @@ public static class GraphRenderer
     private const string IconFaulted = "[red1]" + Glyphs.Faulted    + "[/]";
 
     // ── Motion (see Anim; every animated token is ASCII and width-1, so a frame never shifts a cell) ──
-    private const int FlowTrack = 4;                                                // cells of animated edge shaft
+    private const int FlowTrack = 6;                                                // cells of animated edge shaft
     private const int AfterglowMs = 220;                                            // a Done node stays bold this long after firing
     private static readonly string[] Breathe = ["darkorange", "gold1", "yellow1"];  // active-border pulse shades
 
@@ -181,9 +181,13 @@ public static class GraphRenderer
         var cycles = state.TotalCycles == 0
             ? "[grey42]waiting[/]"
             : $"[grey42]{Glyphs.Times}[/][white]{state.TotalCycles}[/] [grey42]ok[/][green3]{state.AcceptedCycles}[/]";
-        var timing = state.LastDurationMicros > 0
-            ? $" [grey46]{DurationText.Format(state.LastDurationMicros)}[/]"
-            : string.Empty;
+        // A source that measures acquisition headlines the receive time — the thing the node span hides.
+        // Falls back to the node span (≈ inter-frame wait for a source; the useful work for everything else).
+        var timing = state.HasReceive
+            ? $" [grey46]recv[/][steelblue1]{DurationText.Format(state.LastReceiveMicros)}[/]"
+            : state.LastDurationMicros > 0
+                ? $" [grey46]{DurationText.Format(state.LastDurationMicros)}[/]"
+                : string.Empty;
         var restarts = state.WorkerRestarts > 0
             ? $" [red1]r{state.WorkerRestarts}[/]"
             : string.Empty;
@@ -231,30 +235,47 @@ public static class GraphRenderer
         if (edges.Count == 0)
             return new Markup("[grey]   [/]");
 
+        var labelMax = GraphLayout.EdgeColumnWidth - FlowTrack - 3;   // shaft + label + arrow inside the column
         var lines = new List<string>();
         foreach (var edge in edges)
         {
+            var isControl = edge.Kind.Equals("control", StringComparison.OrdinalIgnoreCase);
             var color = EdgeColor(edge.Kind);
             // Control edges use a different ASCII shaft so a data/control mix is legible at a glance, not just by colour.
-            var shaft = edge.Kind.Equals("control", StringComparison.OrdinalIgnoreCase) ? Glyphs.ControlShaft : Glyphs.DataShaft;
+            var shaft = isControl ? Glyphs.ControlShaft : Glyphs.DataShaft;
+            var label = Truncate(edge.FromPort, labelMax);
 
-            // An edge leaving the live node carries a pulse from source to target — the hand-off you watch
-            // move between nodes. The track is a fixed width, so only which cell is lit changes per frame.
-            var hot = animate && string.Equals(edge.FromNode, activeNodeId, StringComparison.OrdinalIgnoreCase);
-            if (hot)
+            // Data edges carry a comet — a bright head with a fading tail sweeping source → target — so flow
+            // is visible across the whole graph, not just at the live node; the edge leaving the live node
+            // gets a white head and a faster pass so the current hand-off still stands out. Control edges stay
+            // steady (a decision, not a stream) and keep their '=' shaft. Only which cell is lit changes per
+            // frame — the track is a fixed width — so motion never shifts a cell.
+            string track;
+            if (animate && !isControl)
             {
-                var label = Truncate(edge.FromPort, GraphLayout.EdgeColumnWidth - FlowTrack - 2);
-                var pos   = Anim.FlowPos(nowMs, FlowTrack, 700);
-                var track = new System.Text.StringBuilder(FlowTrack * 16);
+                var fromActive = string.Equals(edge.FromNode, activeNodeId, StringComparison.OrdinalIgnoreCase);
+                var head = Anim.FlowPos(nowMs, FlowTrack, fromActive ? 550 : 900);
+                var sb   = new System.Text.StringBuilder(FlowTrack * 20);
                 for (var i = 0; i < FlowTrack; i++)
-                    track.Append(i == pos ? $"[white]{shaft}[/]" : $"[{color}]{shaft}[/]");
-                lines.Add($"{track}[grey54]{Markup.Escape(label)}[/][{color}]{Glyphs.ArrowRight}[/]");
+                {
+                    // Distance behind the head → the comet's fade. Cells ahead of the head sit at the base dim.
+                    var cell = (head - i) switch
+                    {
+                        0 => fromActive ? "white" : "steelblue1",
+                        1 => "steelblue3",
+                        2 => "grey42",
+                        _ => "grey35"
+                    };
+                    sb.Append($"[{cell}]{shaft}[/]");
+                }
+                track = sb.ToString();
             }
             else
             {
-                var label = Truncate(edge.FromPort, GraphLayout.EdgeColumnWidth - 5);
-                lines.Add($"[{color}]{shaft}{Markup.Escape(label)}{Glyphs.ArrowRight}[/]");
+                track = $"[{color}]{new string(shaft[0], FlowTrack)}[/]";
             }
+
+            lines.Add($"{track}[grey54]{Markup.Escape(label)}[/][{color}]{Glyphs.ArrowRight}[/]");
         }
 
         return new Markup(string.Join("\n", lines));

@@ -12,7 +12,9 @@ public sealed class GraphLayout
     // often the viewport has to scroll. Detail lives in the node detail view, not in the box.
     public const int NodeBoxWidth    = 22;
     public const int NodeBoxHeight   = 5;
-    public const int EdgeColumnWidth = 13;
+    // Wider than the box strictly needs so the shaft has room for a longer, flowing comet between nodes —
+    // ComputeViewport derives how many layers fit from this, so a wider edge simply shows fewer layers at once.
+    public const int EdgeColumnWidth = 18;
     public const int NodeRowPad      = 1;
 
     /// <summary>Node ID → (layer index, slot index within layer).</summary>

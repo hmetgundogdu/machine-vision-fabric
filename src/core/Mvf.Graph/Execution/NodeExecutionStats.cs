@@ -49,6 +49,13 @@ public sealed class NodeExecutionStats
     /// </summary>
     public StageProfile? Stage { get; init; }
 
+    /// <summary>
+    /// Per-frame acquisition timing when this node is a source (wait/queue always, receive when the source
+    /// opts in via <c>BeginAcquire()</c>), or null for a non-source node. This is where the time to actually
+    /// pull an image off the camera becomes visible, separate from the inter-frame wait.
+    /// </summary>
+    public SourceProfile? Source { get; init; }
+
     /// <summary>Average milliseconds per execution cycle. 0 if no cycles ran.</summary>
     public double AverageDurationMs => TotalCycles > 0 ? TotalDurationMicros / 1000.0 / TotalCycles : 0;
 }

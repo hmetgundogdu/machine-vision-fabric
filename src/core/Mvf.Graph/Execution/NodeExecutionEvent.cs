@@ -29,4 +29,11 @@ public sealed class NodeExecutionEvent
     /// makes recovery visible live rather than only in the final report.
     /// </summary>
     public int WorkerRestarts { get; init; }
+
+    /// <summary>
+    /// This cycle's frame-acquisition timing when the node is a source, or null for a non-source node (and
+    /// for a cycle that produced no frame). Lets the live TUI show receive/wait/queue as the frame lands,
+    /// not just in the final report.
+    /// </summary>
+    public FrameAcquisitionSample? Acquisition { get; init; }
 }

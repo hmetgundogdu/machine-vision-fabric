@@ -90,6 +90,23 @@ public sealed class PipelineRenderState
             node.LastInputPorts = e.InputPortNames;
             node.LastOutputPorts = e.OutputPortNames;
 
+            // A source frame's acquisition timing (wait/queue always, receive when the source opted in) —
+            // accumulated so the box can headline the receive time and the detail view can average it.
+            if (e.Acquisition is { } acq)
+            {
+                node.AcqFrames++;
+                node.LastQueueMicros = acq.QueueMicros;
+                node.LastWaitMicros = acq.WaitMicros;
+                node.TotalQueueMicros += acq.QueueMicros;
+                node.TotalWaitMicros += acq.WaitMicros;
+                if (acq.AcquireMicros is { } receive)
+                {
+                    node.AcqReceiveFrames++;
+                    node.LastReceiveMicros = receive;
+                    node.TotalReceiveMicros += receive;
+                }
+            }
+
             // The node that just ran is the one the graph highlights as "live"; the highlight moves as the
             // next node reports. The tick stamp lets the renderer fade its afterglow once the wave moves on.
             LastActiveNodeId = e.NodeId;

@@ -362,6 +362,17 @@ public sealed class PipelinedGraphExecutor(
                 acc.Worker = snapshot;
             }
 
+            // A source's frame arrived on a producer thread, so its receive/queue/wait never shows in the
+            // node span above. Poll it exactly as the worker metrics are polled — once per produced frame.
+            FrameAcquisitionSample? acquisition = null;
+            if (result.HasOutput
+                && runner_ is ISourceAcquisitionMetrics sourceMetrics
+                && sourceMetrics.GetLastAcquisition() is { } sample)
+            {
+                (acc.Source ??= new SourceAcquisitionAccumulator()).Record(sample);
+                acquisition = sample;
+            }
+
             options.OnNodeExecuted?.Invoke(new NodeExecutionEvent
             {
                 RunId = runId,
@@ -371,6 +382,7 @@ public sealed class PipelinedGraphExecutor(
                 Faulted = faulted,
                 DurationMicros = TicksToMicros(Stopwatch.GetTimestamp() - start),
                 WorkerRestarts = acc.Worker?.Restarts ?? 0,
+                Acquisition = acquisition,
                 OutputPortNames = result.HasOutput ? result.All.Select(kvp => kvp.Key).ToList() : [],
                 InputPortNames = inputs.All.Select(kvp => kvp.Key).ToList()
             });
@@ -734,6 +746,7 @@ public sealed class PipelinedGraphExecutor(
                 WarmupMs = warmupByNode.GetValueOrDefault(kvp.Key),
                 ActivationMode = activationModeByNode.GetValueOrDefault(kvp.Key, NodeActivationMode.Resident),
                 Worker = workerMetricsByNode.GetValueOrDefault(kvp.Key),
+                Source = kvp.Value.Source?.ToProfile(),
                 Stage = new StageProfile
                 {
                     BusyMicros = TicksToMicros(kvp.Value.TotalDurationTicks),
@@ -928,5 +941,6 @@ public sealed class PipelinedGraphExecutor(
         public long WriteBlockedTicks;
         public long ReadBlockedTicks;
         public WorkerMetricsSnapshot? Worker;
+        public SourceAcquisitionAccumulator? Source;
     }
 }

@@ -44,14 +44,54 @@ public sealed class PipelineNodeState
 
     public IReadOnlyList<string> LastInputPorts { get; set; } = [];
     public IReadOnlyList<string> LastOutputPorts { get; set; } = [];
+
+    // ── Source acquisition (populated only for a source node that reports it) ──
+    // Kept alongside the duration stats so the box can headline the receive time and the detail view can
+    // show wait/recv/queue with a rolling average, without waiting for the run's final report.
+    public long AcqFrames { get; set; }          // frames that reported a sample (wait/queue)
+    public long AcqReceiveFrames { get; set; }   // frames that also reported a receive time (source opted in)
+    public long LastReceiveMicros { get; set; }
+    public long LastQueueMicros { get; set; }
+    public long LastWaitMicros { get; set; }
+    public long TotalReceiveMicros { get; set; }
+    public long TotalQueueMicros { get; set; }
+    public long TotalWaitMicros { get; set; }
+
+    /// <summary>True once this node has reported any acquisition sample — i.e. it is an instrumented source.</summary>
+    public bool HasAcquisition => AcqFrames > 0;
+
+    /// <summary>True once a frame reported a receive time (the source wrapped its fetch in <c>BeginAcquire()</c>).</summary>
+    public bool HasReceive => AcqReceiveFrames > 0;
+
+    public double AverageReceiveMicros => AcqReceiveFrames > 0 ? (double)TotalReceiveMicros / AcqReceiveFrames : 0;
+    public double AverageQueueMicros => AcqFrames > 0 ? (double)TotalQueueMicros / AcqFrames : 0;
+    public double AverageWaitMicros => AcqFrames > 0 ? (double)TotalWaitMicros / AcqFrames : 0;
 }
 
 /// <summary>
-/// Renders a node duration. A local stage is routinely sub-millisecond, so whole milliseconds would
-/// show most of the graph as "0ms"; below 10ms one decimal is kept.
+/// Renders a duration compactly, scaling the unit to the magnitude so it stays readable and narrow from a
+/// sub-millisecond stage to an hours-long run. A local stage is routinely sub-millisecond, so whole
+/// milliseconds would show most of the graph as "0ms" — below 10ms one decimal is kept; past a minute the
+/// value rolls up to <c>m s</c> / <c>h m</c> so a header like <c>t:2044.9s</c> becomes <c>t:34m 05s</c>.
 /// </summary>
 internal static class DurationText
 {
-    public static string Format(long micros) =>
-        micros < 10_000 ? $"{micros / 1000.0:F1}ms" : $"{micros / 1000}ms";
+    public static string Format(long micros)
+    {
+        if (micros < 10_000)    return $"{micros / 1000.0:F1}ms";  // <10ms — keep sub-ms detail
+        if (micros < 1_000_000) return $"{micros / 1000}ms";       // <1s — whole milliseconds
+
+        var seconds = micros / 1_000_000.0;
+        if (seconds < 60) return $"{seconds:F1}s";                 // one decimal through a minute (12.3s)
+
+        var totalSeconds = (long)Math.Round(seconds);
+        if (totalSeconds < 3600)
+            return $"{totalSeconds / 60}m {totalSeconds % 60:00}s";
+
+        var totalMinutes = totalSeconds / 60;
+        return $"{totalMinutes / 60}h {totalMinutes % 60:00}m";
+    }
+
+    /// <summary>Same scaling for a <see cref="TimeSpan"/> — the header's elapsed and per-cycle readouts.</summary>
+    public static string Format(TimeSpan span) => Format((long)span.TotalMicroseconds);
 }

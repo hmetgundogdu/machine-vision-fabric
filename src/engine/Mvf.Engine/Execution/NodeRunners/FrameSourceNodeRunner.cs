@@ -19,12 +19,18 @@ internal interface IRewindableSource
 /// Each ExecuteAsync call advances the async enumerator by one frame.
 /// Returns NoOutput when the source stream is exhausted.
 /// </summary>
-internal sealed class FrameSourceNodeRunner(string nodeId, IFrameSourceSession session) : INodeRunner, IRewindableSource
+internal sealed class FrameSourceNodeRunner(string nodeId, IFrameSourceSession session)
+    : INodeRunner, IRewindableSource, ISourceAcquisitionMetrics
 {
     private IAsyncEnumerator<IFrameEnvelope>? _enumerator;
     private bool _exhausted;
 
     public string NodeId { get; } = nodeId;
+
+    /// <summary>Forwards the wrapped session's per-frame acquisition timing, exactly as this runner forwards
+    /// worker metrics — null when the session does not track it (not a background source).</summary>
+    public FrameAcquisitionSample? GetLastAcquisition() =>
+        (session as ISourceAcquisitionMetrics)?.GetLastAcquisition();
 
     public Task ActivateAsync(CancellationToken cancellationToken)
     {
