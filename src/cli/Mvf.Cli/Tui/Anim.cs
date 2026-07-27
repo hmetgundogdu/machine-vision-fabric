@@ -18,14 +18,6 @@ internal static class Anim
         return frames[i].ToString();
     }
 
-    /// <summary>The logo pulse character for this instant — one width-1 ASCII frame from <see cref="Glyphs.LogoPulseFrames"/>.</summary>
-    public static string LogoFrame(long ms, int stepMs = 180)
-    {
-        var frames = Glyphs.LogoPulseFrames;
-        var i = (int)(Math.Max(0, ms) / Math.Max(1, stepMs) % frames.Length);
-        return frames[i].ToString();
-    }
-
     /// <summary>
     /// A triangle wave quantised to <paramref name="steps"/> buckets (0 .. steps-1 .. 0) over
     /// <paramref name="periodMs"/> — used to breathe a border between a few colour shades.

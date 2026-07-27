@@ -660,26 +660,50 @@ public sealed class PipelineDashboard
     // highlight reads as a wave sweeping across M-V-F. All shades of the same hue, so it never reads as an error.
     private static readonly string[] LogoShades = ["grey42", "deepskyblue3", "deepskyblue1"];
 
+    // Cells of the logo comet — a fixed-width flow track beside the name. Wide enough to read as motion, and
+    // the same width whether animating or not, so the header never shifts.
+    private const int LogoCometWidth = 6;
+
     /// <summary>
     /// The "MVF" logo cell. Static (plain bright) when the run is not advancing; while it runs the letters
-    /// ride a colour wave and a width-1 ASCII mark morphs beside them. The mark occupies one column in both
-    /// forms (a space when static), so switching between them never shifts anything to the right — the same
-    /// width discipline the rest of the TUI keeps (see <see cref="Glyphs"/>).
+    /// ride a colour wave and a comet flows rightward beside them — a bright <c>&gt;</c> head with a fading
+    /// <c>-</c> tail, in the very shades the data edges use, so the logo and the edges read as one animation.
+    /// The comet track is a fixed <see cref="LogoCometWidth"/> columns (blank when static), so switching
+    /// between the two forms never shifts anything right — the width discipline the whole TUI keeps (see
+    /// <see cref="Glyphs"/>).
     /// </summary>
     private static string BuildLogo(bool animate, long nowMs)
     {
         const string name = "MVF";
         if (!animate)
-            return $"[bold deepskyblue1]{name}[/]  [grey]|[/] ";
+            return $"[bold deepskyblue1]{name}[/] {new string(' ', LogoCometWidth)} [grey]|[/] ";
 
         var pos = Anim.FlowPos(nowMs, name.Length, 900);
-        var sb  = new System.Text.StringBuilder(64);
+        var sb  = new System.Text.StringBuilder(128);
         for (var i = 0; i < name.Length; i++)
         {
             var shade = LogoShades[Math.Max(0, LogoShades.Length - 1 - Math.Abs(i - pos))];
             sb.Append($"[bold {shade}]{name[i]}[/]");
         }
-        sb.Append($"[deepskyblue1]{Anim.LogoFrame(nowMs)}[/] [grey]|[/] ");
+        sb.Append(' ');   // the gap between MVF and the comet
+
+        // Same comet as the data edges: a bright head with a fading tail, flowing left → right. The head is an
+        // arrow, the tail is the data shaft, so it reads as "--->" streaming through the logo.
+        var head = Anim.FlowPos(nowMs, LogoCometWidth, 650);
+        for (var i = 0; i < LogoCometWidth; i++)
+        {
+            var cell = (head - i) switch
+            {
+                0 => "white",
+                1 => "steelblue1",
+                2 => "steelblue3",
+                3 => "grey42",
+                _ => "grey35"
+            };
+            var glyph = head - i == 0 ? Glyphs.ArrowRight : Glyphs.DataShaft;
+            sb.Append($"[{cell}]{glyph}[/]");
+        }
+        sb.Append(" [grey]|[/] ");
         return sb.ToString();
     }
 
