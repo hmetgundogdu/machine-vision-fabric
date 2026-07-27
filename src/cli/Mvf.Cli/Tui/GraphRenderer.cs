@@ -181,11 +181,19 @@ public static class GraphRenderer
         var cycles = state.TotalCycles == 0
             ? "[grey42]waiting[/]"
             : $"[grey42]{Glyphs.Times}[/][white]{state.TotalCycles}[/] [grey42]ok[/][green3]{state.AcceptedCycles}[/]";
-        // A source that measures acquisition headlines the receive time — the thing the node span hides.
-        // Falls back to the node span (≈ inter-frame wait for a source; the useful work for everything else).
-        var timing = state.HasReceive
-            ? $" [grey46]recv[/][steelblue1]{DurationText.Format(state.LastReceiveMicros)}[/]"
-            : state.LastDurationMicros > 0
+        // One headline metric per box, chosen by role so it fits the narrow width: a worker node shows its
+        // memory + CPU (the thing you watch on a heavy node); a source shows its receive time; a plain
+        // frame node shows the frame size; everything else falls back to the node span. The full breakdown
+        // is always in the detail view.
+        string timing;
+        if (state.HasWorker)
+            timing = $" [steelblue1]{Bytes.Format(state.LastWorkerWorkingSetBytes)}[/] [mediumspringgreen]{state.LastWorkerCpuPercent:F0}%[/]";
+        else if (state.HasReceive)
+            timing = $" [grey46]recv[/][steelblue1]{DurationText.Format(state.LastReceiveMicros)}[/]";
+        else if (state.HasFrameBytes)
+            timing = $" [grey46]{Bytes.Format(state.LastFrameBytes)}[/]";
+        else
+            timing = state.LastDurationMicros > 0
                 ? $" [grey46]{DurationText.Format(state.LastDurationMicros)}[/]"
                 : string.Empty;
         var restarts = state.WorkerRestarts > 0

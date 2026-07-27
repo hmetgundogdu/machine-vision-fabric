@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Mvf.Abstractions;
+using Mvf.Graph.Execution;
 
 namespace Mvf.Hosting.Worker;
 
@@ -19,6 +20,14 @@ public sealed class StdioWorkerProcess : IWorkerChannel
     private readonly StreamReader _stdout;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Action<WorkerLogLine>? _onLog;
+
+    // CPU/memory sampling state. Throttled (~500ms) so the engine can poll it every cycle for free and the
+    // CPU% is measured over a real window instead of a noisy sub-millisecond slice.
+    private static readonly long SampleThrottleTicks = Stopwatch.Frequency / 2;
+    private readonly object _sampleLock = new();
+    private long _lastSampleTimestamp;         // Stopwatch ticks; 0 = never sampled
+    private TimeSpan _lastCpuTime;
+    private WorkerResourceSample? _lastSample;
 
     private StdioWorkerProcess(Process process, Action<WorkerLogLine>? onLog)
     {
@@ -51,6 +60,65 @@ public sealed class StdioWorkerProcess : IWorkerChannel
         {
             try { return _process.HasExited; }
             catch { return true; }
+        }
+    }
+
+    /// <summary>
+    /// Current CPU/memory of the child process, throttled to ~500ms. CPU% is the child's processor time
+    /// since the previous sample over the wall-clock elapsed, normalised to all cores (0–100); the first
+    /// sample has no prior reading so it reports 0. Returns null once the child has exited.
+    /// </summary>
+    public WorkerResourceSample? SampleResources()
+    {
+        lock (_sampleLock)
+        {
+            var now = Stopwatch.GetTimestamp();
+            if (_lastSample is { } cached && _lastSampleTimestamp != 0 && now - _lastSampleTimestamp < SampleThrottleTicks)
+            {
+                return cached;
+            }
+
+            try
+            {
+                if (_process.HasExited)
+                {
+                    _lastSample = null;
+                    return null;
+                }
+
+                _process.Refresh();   // Process caches these — refresh for a live reading.
+                var workingSet = _process.WorkingSet64;
+                long peak = 0;
+                try { peak = _process.PeakWorkingSet64; } catch { /* not tracked on this platform */ }
+                var cpuTime = _process.TotalProcessorTime;
+
+                double cpuPercent = 0;
+                if (_lastSampleTimestamp != 0)
+                {
+                    var wall = Stopwatch.GetElapsedTime(_lastSampleTimestamp, now);
+                    if (wall > TimeSpan.Zero)
+                    {
+                        var cores = Math.Max(1, Environment.ProcessorCount);
+                        cpuPercent = Math.Clamp(
+                            (cpuTime - _lastCpuTime).TotalMilliseconds / wall.TotalMilliseconds / cores * 100.0, 0, 100);
+                    }
+                }
+
+                _lastCpuTime = cpuTime;
+                _lastSampleTimestamp = now;
+                _lastSample = new WorkerResourceSample
+                {
+                    WorkingSetBytes = workingSet,
+                    PeakWorkingSetBytes = peak,
+                    CpuPercent = cpuPercent
+                };
+                return _lastSample;
+            }
+            catch
+            {
+                // Racing the child's exit, or a host that refuses the query — keep the last good reading.
+                return _lastSample;
+            }
         }
     }
 

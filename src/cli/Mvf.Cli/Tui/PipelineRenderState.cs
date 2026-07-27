@@ -107,6 +107,24 @@ public sealed class PipelineRenderState
                 }
             }
 
+            // Worker CPU/memory (worker nodes only — null for an in-process node). Peak is the largest
+            // working set seen so far this run.
+            if (e.WorkerWorkingSetBytes is { } ws)
+            {
+                node.HasWorker = true;
+                node.LastWorkerWorkingSetBytes = ws;
+                node.PeakWorkerWorkingSetBytes = Math.Max(node.PeakWorkerWorkingSetBytes, ws);
+                node.LastWorkerCpuPercent = e.WorkerCpuPercent ?? 0;
+            }
+
+            // Frame size of what the node emitted this cycle (frame-producing nodes).
+            if (e.OutputFrameBytes is { } frameBytes)
+            {
+                node.FrameBytesCount++;
+                node.LastFrameBytes = frameBytes;
+                node.TotalFrameBytes += frameBytes;
+            }
+
             // The node that just ran is the one the graph highlights as "live"; the highlight moves as the
             // next node reports. The tick stamp lets the renderer fade its afterglow once the wave moves on.
             LastActiveNodeId = e.NodeId;

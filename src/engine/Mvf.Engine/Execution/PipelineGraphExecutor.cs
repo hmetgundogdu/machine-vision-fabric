@@ -438,6 +438,7 @@ public sealed class PipelineGraphExecutor(
                         acquisition = sample;
                     }
 
+                    var workerSnap = workerMetricsByNode.GetValueOrDefault(node.Id);
                     options.OnNodeExecuted?.Invoke(new NodeExecutionEvent
                     {
                         RunId = runId,
@@ -446,8 +447,11 @@ public sealed class PipelineGraphExecutor(
                         HasOutput = result.HasOutput,
                         Faulted = faulted,
                         DurationMicros = TicksToMicros(nodeTicks),
-                        WorkerRestarts = workerMetricsByNode.TryGetValue(node.Id, out var wm) ? wm.Restarts : 0,
+                        WorkerRestarts = workerSnap?.Restarts ?? 0,
+                        WorkerCpuPercent = workerSnap?.CpuPercent,
+                        WorkerWorkingSetBytes = workerSnap?.WorkingSetBytes,
                         Acquisition = acquisition,
+                        OutputFrameBytes = LargestFrameBytes(result),
                         OutputPortNames = result.HasOutput
                             ? result.All.Select(kvp => kvp.Key).ToList()
                             : [],
@@ -757,6 +761,24 @@ public sealed class PipelineGraphExecutor(
 
     /// <summary>Stopwatch ticks → microseconds. Done in double so a long run cannot overflow the scale-up.</summary>
     private static long TicksToMicros(long ticks) => (long)(ticks * (1_000_000.0 / Stopwatch.Frequency));
+
+    /// <summary>Size of the largest frame a node emitted this cycle, or null when it produced no frame — how
+    /// big the data flowing out actually is, read from the frame envelope's own content length.</summary>
+    private static long? LargestFrameBytes(NodeExecutionResult result)
+    {
+        long? largest = null;
+        if (result.HasOutput)
+        {
+            foreach (var (_, value) in result.All)
+            {
+                if (value.IsFrame && value.Frame?.ContentLength is { } bytes && bytes > (largest ?? -1))
+                {
+                    largest = bytes;
+                }
+            }
+        }
+        return largest;
+    }
 
     private sealed class NodeStatsAccumulator
     {

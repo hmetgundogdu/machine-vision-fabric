@@ -42,6 +42,10 @@ public sealed class SupervisedWorker : IWorkerChannel, ICheckpointable
     public WorkerRestartStats RestartStats =>
         new(_restarts, _warmRestarts, _lastRestartUtc, _lastRestartReason);
 
+    /// <summary>Samples the current child. A restart swaps <see cref="_worker"/> for a fresh process, so its
+    /// CPU baseline resets on its own — the first sample after recovery simply reports 0% CPU.</summary>
+    public Mvf.Graph.Execution.WorkerResourceSample? SampleResources() => _worker.SampleResources();
+
     /// <summary>
     /// Starts a supervised worker. When <paramref name="pool"/> is given, the initial worker and every
     /// restart come from the pre-warmed pool (no cold-start on the recovery hot path); the pool is owned

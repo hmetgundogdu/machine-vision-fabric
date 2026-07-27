@@ -66,6 +66,22 @@ public sealed class PipelineNodeState
     public double AverageReceiveMicros => AcqReceiveFrames > 0 ? (double)TotalReceiveMicros / AcqReceiveFrames : 0;
     public double AverageQueueMicros => AcqFrames > 0 ? (double)TotalQueueMicros / AcqFrames : 0;
     public double AverageWaitMicros => AcqFrames > 0 ? (double)TotalWaitMicros / AcqFrames : 0;
+
+    // ── Worker resource usage (out-of-process / worker nodes only) ──
+    // Populated only when the node reports a worker snapshot; an in-process node leaves HasWorker false.
+    // Peak is the largest working set the dashboard has observed this run (samples are throttled to ~500ms).
+    public bool HasWorker { get; set; }
+    public double LastWorkerCpuPercent { get; set; }
+    public long LastWorkerWorkingSetBytes { get; set; }
+    public long PeakWorkerWorkingSetBytes { get; set; }
+
+    // ── Frame size (frame-producing nodes) ──
+    public long FrameBytesCount { get; set; }
+    public long LastFrameBytes { get; set; }
+    public long TotalFrameBytes { get; set; }
+
+    public bool HasFrameBytes => FrameBytesCount > 0;
+    public double AverageFrameBytes => FrameBytesCount > 0 ? (double)TotalFrameBytes / FrameBytesCount : 0;
 }
 
 /// <summary>
@@ -94,4 +110,21 @@ internal static class DurationText
 
     /// <summary>Same scaling for a <see cref="TimeSpan"/> — the header's elapsed and per-cycle readouts.</summary>
     public static string Format(TimeSpan span) => Format((long)span.TotalMicroseconds);
+}
+
+/// <summary>
+/// Renders a byte count compactly (B / K / M / G), for memory footprints and frame sizes. One decimal below
+/// ten of a unit so a small frame or a lean worker still reads with precision (e.g. <c>301K</c>, <c>1.4G</c>).
+/// </summary>
+internal static class Bytes
+{
+    public static string Format(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes}B";
+        var kb = bytes / 1024.0;
+        if (kb < 1024) return kb < 10 ? $"{kb:F1}K" : $"{kb:F0}K";
+        var mb = kb / 1024.0;
+        if (mb < 1024) return mb < 10 ? $"{mb:F1}M" : $"{mb:F0}M";
+        return $"{mb / 1024.0:F1}G";
+    }
 }

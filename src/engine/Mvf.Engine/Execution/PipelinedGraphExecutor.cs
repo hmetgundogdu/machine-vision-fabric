@@ -382,7 +382,10 @@ public sealed class PipelinedGraphExecutor(
                 Faulted = faulted,
                 DurationMicros = TicksToMicros(Stopwatch.GetTimestamp() - start),
                 WorkerRestarts = acc.Worker?.Restarts ?? 0,
+                WorkerCpuPercent = acc.Worker?.CpuPercent,
+                WorkerWorkingSetBytes = acc.Worker?.WorkingSetBytes,
                 Acquisition = acquisition,
+                OutputFrameBytes = LargestFrameBytes(result),
                 OutputPortNames = result.HasOutput ? result.All.Select(kvp => kvp.Key).ToList() : [],
                 InputPortNames = inputs.All.Select(kvp => kvp.Key).ToList()
             });
@@ -913,6 +916,24 @@ public sealed class PipelinedGraphExecutor(
     }
 
     private static long TicksToMicros(long ticks) => (long)(ticks * (1_000_000.0 / Stopwatch.Frequency));
+
+    /// <summary>Size of the largest frame a node emitted this cycle, or null when it produced no frame — how
+    /// big the data flowing out actually is, read from the frame envelope's own content length.</summary>
+    private static long? LargestFrameBytes(NodeExecutionResult result)
+    {
+        long? largest = null;
+        if (result.HasOutput)
+        {
+            foreach (var (_, value) in result.All)
+            {
+                if (value.IsFrame && value.Frame?.ContentLength is { } bytes && bytes > (largest ?? -1))
+                {
+                    largest = bytes;
+                }
+            }
+        }
+        return largest;
+    }
 
     private static PipelineExecutionReport Failure(string message, DateTime startedAt) =>
         new()

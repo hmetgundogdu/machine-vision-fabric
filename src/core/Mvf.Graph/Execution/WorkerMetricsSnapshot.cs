@@ -42,6 +42,18 @@ public sealed record WorkerMetricsSnapshot
     /// <summary>The failure that was classified as worker death, for the most recent restart.</summary>
     public string? LastRestartReason { get; init; }
 
+    /// <summary>Resident memory of the worker's child process (Working Set / RSS), in bytes. 0 when unknown.</summary>
+    public long WorkingSetBytes { get; init; }
+
+    /// <summary>Peak resident memory of the child process, in bytes. Best-effort — 0 when unknown.</summary>
+    public long PeakWorkingSetBytes { get; init; }
+
+    /// <summary>Most recent CPU usage of the child process, normalised to all cores (0–100). 0 when unknown.</summary>
+    public double CpuPercent { get; init; }
+
+    /// <summary>Resident memory of the child process in whole megabytes.</summary>
+    public double WorkingSetMb => WorkingSetBytes / (1024.0 * 1024.0);
+
     /// <summary>Average milliseconds per worker request. 0 when no request was made.</summary>
     public double AverageRequestMs => Requests > 0 ? TotalRequestMicros / 1000.0 / Requests : 0;
 

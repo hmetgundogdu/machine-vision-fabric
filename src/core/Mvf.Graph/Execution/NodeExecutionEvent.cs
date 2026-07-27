@@ -36,4 +36,16 @@ public sealed class NodeExecutionEvent
     /// not just in the final report.
     /// </summary>
     public FrameAcquisitionSample? Acquisition { get; init; }
+
+    /// <summary>CPU usage (0–100, all-core) of this node's worker child process, or null for an in-process
+    /// node — which shares the host and cannot be attributed a figure of its own.</summary>
+    public double? WorkerCpuPercent { get; init; }
+
+    /// <summary>Resident memory (Working Set) of this node's worker child process in bytes, or null for an
+    /// in-process node.</summary>
+    public long? WorkerWorkingSetBytes { get; init; }
+
+    /// <summary>Size in bytes of the largest frame this node emitted this cycle, or null when it emitted no
+    /// frame. Lets the TUI show how big the data flowing through actually is.</summary>
+    public long? OutputFrameBytes { get; init; }
 }

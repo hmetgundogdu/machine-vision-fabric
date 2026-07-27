@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Mvf.Graph.Execution;
 
 namespace Mvf.Hosting.Worker;
 
@@ -18,6 +19,13 @@ public interface IWorkerChannel : IAsyncDisposable
     /// which is what makes an absorbed crash visible in the execution report.
     /// </summary>
     WorkerRestartStats RestartStats => WorkerRestartStats.None;
+
+    /// <summary>
+    /// Current CPU/memory of the child process backing this channel, or null when there is no measurable
+    /// process (or it has exited). The engine polls it through <see cref="Mvf.Abstractions.IWorkerMetricsSource"/>
+    /// like the restart history, so per-node resource use is observed without depending on processes here.
+    /// </summary>
+    WorkerResourceSample? SampleResources() => null;
 
     /// <summary>Sends one request and returns the matching response (log lines skipped).</summary>
     Task<JsonObject> RequestAsync(JsonObject request, CancellationToken cancellationToken);

@@ -84,6 +84,11 @@ public sealed class WorkerObservabilityTests
         Assert.Null(before.LastRestartUtc);
         Assert.True(before.AverageRequestMs > 0, "a real stdio round-trip must register some latency");
 
+        // Per-node resource usage: a live child process reports a real working set; CPU% is 0 on the first
+        // sample (no prior reading to difference against) but never negative.
+        Assert.True(before.WorkingSetBytes > 0, "a live worker child must report a non-zero working set");
+        Assert.True(before.CpuPercent >= 0);
+
         await ((ICheckpointable)classifier).CheckpointAsync(cts.Token);
         supervised.KillCurrentWorkerForTest();
 

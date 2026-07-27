@@ -69,6 +69,7 @@ internal sealed class WorkerCallMetrics
     public WorkerMetricsSnapshot Snapshot(IWorkerChannel channel)
     {
         var restarts = channel.RestartStats;
+        var resources = channel.SampleResources();
         return new WorkerMetricsSnapshot
         {
             ModuleId = channel.ModuleId,
@@ -79,7 +80,10 @@ internal sealed class WorkerCallMetrics
             Restarts = restarts.Restarts,
             WarmRestarts = restarts.WarmRestarts,
             LastRestartUtc = restarts.LastRestartUtc,
-            LastRestartReason = restarts.LastRestartReason
+            LastRestartReason = restarts.LastRestartReason,
+            WorkingSetBytes = resources?.WorkingSetBytes ?? 0,
+            PeakWorkingSetBytes = resources?.PeakWorkingSetBytes ?? 0,
+            CpuPercent = resources?.CpuPercent ?? 0
         };
     }
 }

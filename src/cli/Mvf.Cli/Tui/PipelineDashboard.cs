@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Mvf.Graph.Execution;
 using Mvf.Graph.Pipelines;
@@ -54,6 +55,16 @@ public sealed class PipelineDashboard
 
     /// <summary>Last edit outcome, shown under the panel until the next one.</summary>
     private string? _editNotice;
+
+    // Whole-engine resource sampler for the header. In-process nodes (camera, primitives) share this process
+    // and can't be attributed a figure each, so the header shows the total. Throttled to ~500ms and cached,
+    // so repainting every frame costs nothing and the CPU% is measured over a real window.
+    private readonly Process _hostProcess = Process.GetCurrentProcess();
+    private static readonly long HostSampleThrottleTicks = Stopwatch.Frequency / 2;
+    private long _hostSampleTimestamp;
+    private TimeSpan _hostLastCpuTime;
+    private long _hostWorkingSet;
+    private double _hostCpuPercent;
 
     public PipelineDashboard(
         IPipelineExecutionHost host,
@@ -638,6 +649,11 @@ public sealed class PipelineDashboard
             ? $"  [grey]rst:[/][red]{restarts}[/]"
             : string.Empty;
 
+        // Whole-engine footprint: covers the camera, primitives and engine that per-node figures can't
+        // attribute. Per-worker CPU/memory shows on the worker node boxes themselves.
+        var (hostWs, hostCpu) = SampleHostResources();
+        var resourceCell = $"  [grey]mem:[/][grey58]{Bytes.Format(hostWs)}[/] [grey]cpu:[/][grey58]{hostCpu:F0}%[/]";
+
         // The logo breathes while the run is live: a colour wave sweeps M-V-F and a width-1 ASCII mark
         // morphs beside it, so the terminal shows the run is alive without a spinner stealing a whole cell.
         var animate = snapshot.Status == PipelineExecutionStatus.Running && !IsPaused;
@@ -653,6 +669,7 @@ public sealed class PipelineDashboard
             $"[grey]t:[/][grey58]{elapsed}[/]" +
             cycleCell +
             restartCell +
+            resourceCell +
             pauseHint);
     }
 
@@ -705,6 +722,43 @@ public sealed class PipelineDashboard
         }
         sb.Append(" [grey]|[/] ");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Working set and all-core CPU% of the whole engine process, throttled to ~500ms. CPU% is this
+    /// process's processor time since the previous sample over the wall-clock elapsed. Covers everything
+    /// per-node can't — the camera, the primitives, the engine itself.
+    /// </summary>
+    private (long WorkingSet, double CpuPercent) SampleHostResources()
+    {
+        var now = Stopwatch.GetTimestamp();
+        if (_hostSampleTimestamp != 0 && now - _hostSampleTimestamp < HostSampleThrottleTicks)
+        {
+            return (_hostWorkingSet, _hostCpuPercent);
+        }
+
+        try
+        {
+            _hostProcess.Refresh();
+            var cpuTime = _hostProcess.TotalProcessorTime;
+            if (_hostSampleTimestamp != 0)
+            {
+                var wall = Stopwatch.GetElapsedTime(_hostSampleTimestamp, now);
+                if (wall > TimeSpan.Zero)
+                {
+                    var cores = Math.Max(1, Environment.ProcessorCount);
+                    _hostCpuPercent = Math.Clamp(
+                        (cpuTime - _hostLastCpuTime).TotalMilliseconds / wall.TotalMilliseconds / cores * 100.0, 0, 100);
+                }
+            }
+
+            _hostLastCpuTime = cpuTime;
+            _hostSampleTimestamp = now;
+            _hostWorkingSet = _hostProcess.WorkingSet64;
+        }
+        catch { /* keep the last good reading */ }
+
+        return (_hostWorkingSet, _hostCpuPercent);
     }
 
     private IRenderable BuildLogPanel(int capacity, int width)
@@ -916,6 +970,19 @@ public sealed class PipelineDashboard
                 lines.Add($"[grey]recv    [/] {recv}");
                 lines.Add($"[grey]wait    [/] {DurationText.Format(st.LastWaitMicros)} [grey42]avg[/] {DurationText.Format((long)st.AverageWaitMicros)}");
                 lines.Add($"[grey]queue   [/] {DurationText.Format(st.LastQueueMicros)} [grey42]avg[/] {DurationText.Format((long)st.AverageQueueMicros)}");
+            }
+
+            // Worker CPU/memory — only a node backed by its own child process can report these.
+            if (st.HasWorker)
+            {
+                lines.Add($"[grey]cpu     [/] [mediumspringgreen]{st.LastWorkerCpuPercent:F0}%[/]");
+                lines.Add($"[grey]mem     [/] [steelblue1]{Bytes.Format(st.LastWorkerWorkingSetBytes)}[/] [grey42]peak[/] {Bytes.Format(st.PeakWorkerWorkingSetBytes)}");
+            }
+
+            // Frame size of what this node emits.
+            if (st.HasFrameBytes)
+            {
+                lines.Add($"[grey]frame   [/] {Bytes.Format(st.LastFrameBytes)} [grey42]avg[/] {Bytes.Format((long)st.AverageFrameBytes)}");
             }
 
             lines.Add($"[grey]in  {Glyphs.FlowRight} [/] [steelblue1]{Markup.Escape(inP)}[/]");
