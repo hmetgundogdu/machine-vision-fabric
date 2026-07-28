@@ -12,7 +12,13 @@
        never uses. StackTraceSupport is intentionally left on for diagnostics. -->
   <PropertyGroup>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- Compression shrinks the single-file bundle, but on macOS arm64 the compressed path
+         corrupts memory while decompressing assemblies into memory at startup — surfacing as a
+         non-deterministic runtime AccessViolationException (seen at Interop.Sys.Fcntl and even
+         EventArgs..ctor), most visibly the first time an out-of-process worker's stdio pipe is
+         read. Confirmed 2026-07-28: off = clean, on = crash, same runtime; framework-dependent
+         is always clean. Keep it on for win/linux (safe, ~45MB saved); disable on osx. -->
+    <EnableCompressionInSingleFile Condition="!$(RuntimeIdentifier.StartsWith('osx'))">true</EnableCompressionInSingleFile>
     <DebuggerSupport>false</DebuggerSupport>
     <EventSourceSupport>false</EventSourceSupport>
     <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
