@@ -131,6 +131,34 @@ the harder lifetime/ownership choices and should be talked through as they come 
 ### M3 / M4
 Hardening then optional frontiers (see table).
 
+### Android edge-runtime target (EG — feasibility confirmed 2026-07-28, gated on user)
+A new **host target**, not a rewrite: run the engine as a self-contained edge runtime on
+Android-based industrial panels/tablets (a natural extension of the panel-PC/edge orientation,
+even though the CLI stays Windows-first). Captured so it is not lost:
+- **Feasibility confirmed by inspection.** `Mvf.Graph`, `Mvf.Abstractions`, `Mvf.Engine` reference
+  only `Logging.Abstractions` + `Options`, and carry **zero** `Process.Start` / `MemoryMappedFile` /
+  `System.Console` / `DllImport` in their source. The out-of-process worker host
+  (`Mvf.Hosting.Worker`) and the shared-memory transport are wired at the **CLI composition layer**,
+  not inside the engine — exactly the "adapters behind seams" shape. So the core is Android-buildable
+  with a TFM change and no refactor.
+- **Hard platform constraint (defines the target's shape).** The Android app sandbox forbids
+  `exec` of arbitrary child binaries (W^X, SELinux). Therefore the **out-of-process polyglot worker
+  path and the shared-memory data plane are unavailable on Android** — this target runs **in-process
+  managed modules only**. This is not a hole in the design: the worker/shm adapters are simply absent
+  on this host; the core interfaces are unchanged. (Consequence: a `runtime: "python"` node cannot run
+  on Android — see the desktop/edge answer for why the resident-worker path is the correct one *there*.)
+- **Presentation is a rewrite, not a port.** The Spectre TUI (18 console-bound files) has no terminal
+  on Android; the dashboard must be re-authored as native UI (MAUI/Compose) over the same engine — the
+  logic is UI-agnostic, only the render layer moves.
+- **Phased plan.** **Phase 0** — multitarget the three core projects to `net10.0-android`, prove
+  restore/build (prereq: `maui-android` workload on the build machine); the cheapest de-risking step.
+  **Phase 1** — minimal MAUI app hosting the engine in-process with a **simulator source**
+  (Simulator-First: folder/loop camera, hardware-free) + a status UI. **Phase 2** — `Camera2/CameraX`
+  source node + `Microsoft.ML.OnnxRuntime` in-process inference (Android runtimes ship in the NuGet).
+  **Phase 3** — richer native UI (port dashboard concepts or host the React studio in a WebView) +
+  optional WebSocket telemetry publisher (existing egress seam).
+- **Status:** not started; feasibility done. Awaiting go-ahead to start Phase 0.
+
 ### L-track — Module lifecycle (standards-aligned)
 The trigger was "model lifecycle," but the real abstraction is **module readiness**: loading an ML model,
 loading a package, connecting a camera/PLC, or finishing init are the same question — *"is this module
