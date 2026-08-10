@@ -66,20 +66,23 @@ public sealed class StdioModuleHost(IDataPlane dataPlane) : IOutOfProcessModuleH
                 Args: [activation.EntryPath],
                 WorkingDirectory: activation.WorkingDirectory,
                 PythonPath: ResolvePythonSdkPath(activation.WorkingDirectory),
-                ArenaPath: dataPlane.BackingPath),
+                ArenaPath: dataPlane.BackingPath,
+                StartupBudget: ReadStartupBudget(activation.ModuleId)),
 
             "node" => new WorkerLaunchInfo(
                 Command: Environment.GetEnvironmentVariable("MVF_NODE") ?? "node",
                 Args: [activation.EntryPath],
                 WorkingDirectory: activation.WorkingDirectory,
-                ArenaPath: dataPlane.BackingPath),
+                ArenaPath: dataPlane.BackingPath,
+                StartupBudget: ReadStartupBudget(activation.ModuleId)),
 
             // A compiled module (e.g. built with the C++ SDK): the entry *is* the executable.
             "native" => new WorkerLaunchInfo(
                 Command: activation.EntryPath,
                 Args: [],
                 WorkingDirectory: activation.WorkingDirectory,
-                ArenaPath: dataPlane.BackingPath),
+                ArenaPath: dataPlane.BackingPath,
+                StartupBudget: ReadStartupBudget(activation.ModuleId)),
 
             _ => throw new NotSupportedException(
                 $"Runtime '{activation.Runtime}' is not supported by the stdio worker host. Supported: python, node, native.")
@@ -88,6 +91,38 @@ public sealed class StdioModuleHost(IDataPlane dataPlane) : IOutOfProcessModuleH
     private static string PythonCommand() =>
         Environment.GetEnvironmentVariable("MVF_PYTHON")
         ?? (OperatingSystem.IsWindows() ? "python" : "python3");
+
+    private static TimeSpan? ReadStartupBudget(string moduleId)
+    {
+        var scopedKey = $"MVF_WORKER_STARTUP_BUDGET_SECONDS__{NormalizeModuleId(moduleId)}";
+        if (TryReadSeconds(scopedKey, out var scoped))
+        {
+            return scoped;
+        }
+
+        return TryReadSeconds("MVF_WORKER_STARTUP_BUDGET_SECONDS", out var global)
+            ? global
+            : null;
+    }
+
+    private static bool TryReadSeconds(string key, out TimeSpan value)
+    {
+        value = default;
+        var raw = Environment.GetEnvironmentVariable(key);
+        if (!double.TryParse(raw, out var seconds) || seconds <= 0)
+        {
+            return false;
+        }
+
+        value = TimeSpan.FromSeconds(seconds);
+        return true;
+    }
+
+    private static string NormalizeModuleId(string moduleId)
+    {
+        var chars = moduleId.Select(ch => char.IsLetterOrDigit(ch) ? char.ToUpperInvariant(ch) : '_').ToArray();
+        return new string(chars);
+    }
 
     /// <summary>
     /// Locates the Python SDK (<c>src/sdk/python</c>, which exports <c>mvf_sdk</c>) so the child's

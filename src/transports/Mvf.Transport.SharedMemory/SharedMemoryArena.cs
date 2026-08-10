@@ -27,6 +27,7 @@ public sealed class SharedMemoryArena : IDataPlane, IDisposable
 
     private MemoryMappedFile? _mmf;
     private MemoryMappedViewAccessor? _view;
+    private FileStream? _backingStream;
     private Stack<int>? _freeSlots;
     private int[]? _refCounts;
     private unsafe byte* _base;
@@ -217,9 +218,17 @@ public sealed class SharedMemoryArena : IDataPlane, IDisposable
 
         var path = Path.Combine(Path.GetTempPath(), $"mvf-arena-{Guid.NewGuid():N}.bin");
 
-        // CreateNew pre-sizes the backing file (sparse on most filesystems until pages are touched).
+        // Windows workers reopen this path, so the creating process must keep a shared handle.
+        var stream = new FileStream(
+            path,
+            FileMode.CreateNew,
+            FileAccess.ReadWrite,
+            FileShare.ReadWrite | FileShare.Delete);
+        stream.SetLength(Capacity);
+
         var mmf = MemoryMappedFile.CreateFromFile(
-            path, FileMode.CreateNew, mapName: null, Capacity, MemoryMappedFileAccess.ReadWrite);
+            stream, mapName: null, Capacity, MemoryMappedFileAccess.ReadWrite,
+            HandleInheritability.None, leaveOpen: true);
         var view = mmf.CreateViewAccessor(0, Capacity, MemoryMappedFileAccess.ReadWrite);
 
         unsafe
@@ -230,6 +239,7 @@ public sealed class SharedMemoryArena : IDataPlane, IDisposable
         }
 
         _mmf = mmf;
+        _backingStream = stream;
         _view = view;
         _backingPath = path;
         _refCounts = new int[_options.SlotCount];
@@ -263,6 +273,7 @@ public sealed class SharedMemoryArena : IDataPlane, IDisposable
             }
 
             _mmf?.Dispose();
+            _backingStream?.Dispose();
 
             if (_backingPath is not null)
             {
