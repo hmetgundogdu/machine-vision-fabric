@@ -18,6 +18,12 @@ public sealed class SupervisedWorker : IWorkerChannel, ICheckpointable
     private byte[]? _lastState;
     private int _requestId;
 
+    // The last config pushed into the child, re-applied after a restart. A fresh child reads its own
+    // defaults from wherever the module reads them, so without this a crash would silently revert an
+    // operator's live tuning — and nothing on screen would say so, because the tunable still shows the
+    // edited value. Held whether or not the child ever crashes; it is one small object per node.
+    private JsonNode? _lastConfig;
+
     // Recovery history. Restarts are transparent to the caller by design, so without this the crash
     // would leave no trace at all — this is what the execution report surfaces (M3 observability).
     private int _restarts;
@@ -74,6 +80,16 @@ public sealed class SupervisedWorker : IWorkerChannel, ICheckpointable
         }
     }
 
+    public bool SupportsConfigure => _worker.SupportsConfigure;
+
+    public async Task ConfigureAsync(JsonNode? config, CancellationToken cancellationToken)
+    {
+        await _worker.ConfigureAsync(config, cancellationToken);
+        // Recorded only after the child accepted it, so a refused change is not replayed onto the next
+        // one — the operator would then be told the edit failed and get it anyway after a crash.
+        _lastConfig = config?.DeepClone();
+    }
+
     public async Task<byte[]?> CheckpointAsync(CancellationToken cancellationToken)
     {
         _lastState = await WorkerCheckpoint.CheckpointAsync(_worker, _dataPlane, ++_requestId, cancellationToken);
@@ -102,6 +118,22 @@ public sealed class SupervisedWorker : IWorkerChannel, ICheckpointable
 
         _lastRestartUtc = DateTime.UtcNow;
         _lastRestartReason = reason;
+
+        // Config before state: the module's own restore may well read the config it was given, and a
+        // spare out of the warm pool was started long before this node's tuning existed.
+        if (_lastConfig is { } config && _worker.SupportsConfigure)
+        {
+            try
+            {
+                await _worker.ConfigureAsync(config, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Do not fail the recovery over it — a node running on its file defaults beats a node
+                // that is not running. The reason is kept where the report already looks.
+                _lastRestartReason = $"{reason} (config not re-applied: {ex.Message})";
+            }
+        }
 
         if (_lastState is { } state)
         {

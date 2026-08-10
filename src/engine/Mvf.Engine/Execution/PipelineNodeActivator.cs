@@ -222,7 +222,11 @@ public sealed class PipelineNodeActivator(
             Runtime: entry.Manifest.Runtime,
             EntryPath: Path.Combine(entry.Directory, entry.Manifest.Entry),
             WorkingDirectory: entry.Directory,
-            OnLog: onLog);
+            OnLog: onLog,
+            // The same config an in-process module gets. The binding pre-pass has already overlaid any
+            // stored edit onto it, so a worker starts on the value the operator last chose rather than
+            // on the file's default and a correction a moment later.
+            Config: node.Config.Count > 0 ? node.Config.DeepClone() : null);
 
         return node.Category switch
         {

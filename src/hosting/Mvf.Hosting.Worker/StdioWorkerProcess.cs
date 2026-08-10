@@ -53,6 +53,18 @@ public sealed class StdioWorkerProcess : IWorkerChannel
 
     public string ModuleId { get; private set; } = string.Empty;
 
+    /// <summary>
+    /// True when the child listed <c>configure</c> in its <c>hello</c>'s <c>features</c>. Opt-in rather
+    /// than assumed by protocol version: the SDKs' dispatch loops ignore an unknown message type instead
+    /// of answering it, so an engine that guessed wrong would block forever waiting for a reply.
+    /// </summary>
+    public bool SupportsConfigure { get; private set; }
+
+    //: Request ids for configure messages. The channel is strictly one-request-at-a-time (the semaphore
+    //: in RequestAsync), so this counter only has to be unique against itself for the reply to be
+    //: unambiguous — it does not need to share a sequence with the callers' execute ids.
+    private int _configureId;
+
     /// <summary>True once the child process has exited — the signal a supervisor uses to restart it.</summary>
     public bool HasExited
     {
@@ -246,6 +258,7 @@ public sealed class StdioWorkerProcess : IWorkerChannel
                     "Worker did not send a hello handshake." + await StartupDiagnosticsAsync());
             }
             worker.ModuleId = (string?)hello["moduleId"] ?? string.Empty;
+            worker.SupportsConfigure = HasFeature(hello, "configure");
 
             // Readiness (sd_notify-style): a worker that warms up asynchronously says "ready": false in its
             // hello and sends a separate `ready` when warm. Absent/true → ready now (backward compatible).
@@ -270,6 +283,42 @@ public sealed class StdioWorkerProcess : IWorkerChannel
         }
 
         return worker;
+    }
+
+    /// <summary>Does the handshake's optional <c>features</c> array list <paramref name="feature"/>?</summary>
+    private static bool HasFeature(JsonObject hello, string feature) =>
+        hello["features"] is JsonArray features
+        && features.Any(f => string.Equals((string?)f, feature, StringComparison.Ordinal));
+
+    /// <summary>
+    /// Hands the running child a new config block and waits for its acknowledgement.
+    ///
+    /// <para>Not guarded by <see cref="SupportsConfigure"/> here on purpose — the caller decides, and a
+    /// test that wants to prove an unsupporting worker is never sent one asserts on the caller.</para>
+    /// </summary>
+    public async Task ConfigureAsync(JsonNode? config, CancellationToken cancellationToken)
+    {
+        var request = new JsonObject
+        {
+            ["type"] = "configure",
+            ["id"] = ++_configureId,
+            ["config"] = config?.DeepClone(),
+        };
+
+        var response = await RequestAsync(request, cancellationToken);
+        var type = (string?)response["type"];
+        if (type == "configured")
+        {
+            return;
+        }
+
+        // An `error` carries the module's own reason; anything else means the child answered something
+        // nobody asked for, and continuing would leave the engine believing a config that never landed.
+        var reason = type == "error"
+            ? (string?)response["message"] ?? "no reason given"
+            : $"unexpected reply '{type}'";
+        throw new InvalidOperationException(
+            $"Worker '{ModuleId}' refused the configure message: {reason}");
     }
 
     /// <summary>Waits for the child's <c>ready</c> signal after warmup, skipping log lines.</summary>

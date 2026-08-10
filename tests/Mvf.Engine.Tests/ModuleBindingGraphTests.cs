@@ -122,6 +122,118 @@ public sealed class ModuleBindingGraphTests
         Assert.Equal(9, openedWith[^1]);
     }
 
+    [Fact]
+    public async Task EditingABindingOnATunableNode_HandsItTheValueWithoutReopeningIt()
+    {
+        // The reason the distinction is worth the code: a node that reads its config per frame does not
+        // need to be closed and reopened to read a new one, and for a worker holding a loaded model that
+        // difference is a process spawn plus a model warmup — tens of seconds, dropping frames — against
+        // one message between two frames.
+        var definition = Expand(GraphJson);
+        var registry = new LiveValueRegistry();
+
+        var openedWith = new List<int>();
+        var tunedTo = new List<int>();
+        var worker = new TunableRunner("worker", canReconfigure: true, applied: tunedTo);
+
+        INodeRunner MakeWorker(PipelineNodeDefinition node)
+        {
+            openedWith.Add(node.Config["factor"]!.GetValue<int>());
+            return worker;
+        }
+
+        var ticker = new TickRunner("ticks", totalTicks: 8, onTick: cycle =>
+        {
+            if (cycle == 3)
+            {
+                Assert.True(registry.TrySet("worker.factor", JsonValue.Create(9), out var error), error);
+            }
+        });
+
+        var report = await new PipelineGraphExecutor(
+                new BindingActivator(registry, ("ticks", _ => ticker), ("worker", MakeWorker)),
+                liveValues: registry)
+            .ExecuteAsync(
+                definition,
+                new PipelineExecutionOptions { PackageRoot = ".", IntegrationsRoot = "." },
+                CancellationToken.None);
+
+        Assert.True(report.Succeeded);
+        Assert.Equal([2], openedWith);      // opened once, at the start, and never again
+        Assert.Equal([9], tunedTo);         // the edit arrived as a config, not as a restart
+        Assert.Equal(1, worker.DisposeCount);   // only the run's own teardown, not a mid-run close
+    }
+
+    [Fact]
+    public async Task ANodeThatCannotTakeAConfigLive_IsStillReopened()
+    {
+        // CanReconfigure=false is a normal answer, not a failure: the old path has to stay intact or the
+        // feature would quietly cost every module that does not have it its live tunables.
+        var definition = Expand(GraphJson);
+        var registry = new LiveValueRegistry();
+
+        var openedWith = new List<int>();
+        INodeRunner MakeWorker(PipelineNodeDefinition node)
+        {
+            openedWith.Add(node.Config["factor"]!.GetValue<int>());
+            return new TunableRunner("worker", canReconfigure: false, applied: []);
+        }
+
+        var ticker = new TickRunner("ticks", totalTicks: 8, onTick: cycle =>
+        {
+            if (cycle == 3)
+            {
+                Assert.True(registry.TrySet("worker.factor", JsonValue.Create(9), out var error), error);
+            }
+        });
+
+        await new PipelineGraphExecutor(
+                new BindingActivator(registry, ("ticks", _ => ticker), ("worker", MakeWorker)),
+                liveValues: registry)
+            .ExecuteAsync(
+                definition,
+                new PipelineExecutionOptions { PackageRoot = ".", IntegrationsRoot = "." },
+                CancellationToken.None);
+
+        Assert.Equal(2, openedWith[0]);
+        Assert.Equal(9, openedWith[^1]);
+    }
+
+    [Fact]
+    public async Task ANodeThatThrowsOnALiveConfig_IsReopenedRatherThanLeftOnAnUnknownOne()
+    {
+        // The one outcome worth paying a re-activation to avoid: a node still running while the engine
+        // believes it took a value it never took.
+        var definition = Expand(GraphJson);
+        var registry = new LiveValueRegistry();
+
+        var openedWith = new List<int>();
+        INodeRunner MakeWorker(PipelineNodeDefinition node)
+        {
+            openedWith.Add(node.Config["factor"]!.GetValue<int>());
+            return new TunableRunner("worker", canReconfigure: true, applied: [], throwOnConfigure: true);
+        }
+
+        var ticker = new TickRunner("ticks", totalTicks: 8, onTick: cycle =>
+        {
+            if (cycle == 3)
+            {
+                Assert.True(registry.TrySet("worker.factor", JsonValue.Create(9), out var error), error);
+            }
+        });
+
+        var report = await new PipelineGraphExecutor(
+                new BindingActivator(registry, ("ticks", _ => ticker), ("worker", MakeWorker)),
+                liveValues: registry)
+            .ExecuteAsync(
+                definition,
+                new PipelineExecutionOptions { PackageRoot = ".", IntegrationsRoot = "." },
+                CancellationToken.None);
+
+        Assert.Equal(9, openedWith[^1]);    // reopened on the new value
+        Assert.Contains(report.Warnings, w => w.Contains("worker") && w.Contains("re-opening"));
+    }
+
     /// <summary>
     /// Creates a fresh runner per activation (via a factory) and registers each node's bindings as tunables,
     /// exactly as the real activator does — so the executor's re-activation path is exercised end to end.
@@ -185,6 +297,45 @@ public sealed class ModuleBindingGraphTests
             Task.FromResult(NodeExecutionResult.NoOutput);
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>A runner that can (or refuses to) take a config while running, recording what it took.</summary>
+    private sealed class TunableRunner(
+        string nodeId, bool canReconfigure, List<int> applied, bool throwOnConfigure = false)
+        : INodeRunner, IReconfigurable
+    {
+        public string NodeId { get; } = nodeId;
+
+        /// <summary>How often this instance was closed. 1 = only the run's final teardown.</summary>
+        public int DisposeCount { get; private set; }
+
+        public bool CanReconfigure { get; } = canReconfigure;
+
+        public Task<bool> TryReconfigureAsync(JsonNode? config, CancellationToken cancellationToken)
+        {
+            if (!CanReconfigure)
+            {
+                return Task.FromResult(false);
+            }
+            if (throwOnConfigure)
+            {
+                throw new InvalidOperationException("module refused the config");
+            }
+
+            applied.Add(config!["factor"]!.GetValue<int>());
+            return Task.FromResult(true);
+        }
+
+        public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task<NodeExecutionResult> ExecuteAsync(NodeExecutionInputs inputs, CancellationToken cancellationToken) =>
+            Task.FromResult(NodeExecutionResult.NoOutput);
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class StubBindingStore : IValueBindingStore

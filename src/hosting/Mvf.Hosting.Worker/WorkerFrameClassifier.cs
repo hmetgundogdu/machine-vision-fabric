@@ -17,12 +17,27 @@ namespace Mvf.Hosting.Worker;
 /// classifier publishes it into the data plane for the single RPC and releases it afterwards.</para>
 /// </summary>
 public sealed class WorkerFrameClassifier(IWorkerChannel worker, IDataPlane dataPlane)
-    : IFrameClassifier, ICheckpointable, IWorkerMetricsSource, IAsyncDisposable
+    : IFrameClassifier, ICheckpointable, IWorkerMetricsSource, IReconfigurable, IAsyncDisposable
 {
     private readonly WorkerCallMetrics _metrics = new();
     private int _requestId;
 
     public WorkerMetricsSnapshot GetWorkerMetrics() => _metrics.Snapshot(worker);
+
+    // Live config, when the module advertised it. The channel serialises this against classify calls, so
+    // the change lands between two frames and no frame is judged half-configured.
+    public bool CanReconfigure => worker.SupportsConfigure;
+
+    public async Task<bool> TryReconfigureAsync(JsonNode? config, CancellationToken cancellationToken)
+    {
+        if (!worker.SupportsConfigure)
+        {
+            return false;
+        }
+
+        await worker.ConfigureAsync(config, cancellationToken);
+        return true;
+    }
 
     // A supervised channel owns checkpoint/restore (it must hold the last state to recover with);
     // a plain channel falls back to a one-shot capture/restore.

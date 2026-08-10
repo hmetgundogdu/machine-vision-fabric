@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Mvf.Graph.Execution;
 using Mvf.Abstractions;
 
@@ -13,11 +14,20 @@ namespace Mvf.Engine.Execution.NodeRunners;
 /// Output ports: <c>class</c> (control)
 /// </summary>
 internal sealed class FrameClassifierNodeRunner(string nodeId, IFrameClassifier classifier)
-    : INodeRunner, ICheckpointable, IWorkerMetricsSource
+    : INodeRunner, ICheckpointable, IWorkerMetricsSource, IReconfigurable
 {
     public string NodeId { get; } = nodeId;
 
     public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    // Surfaces a live-configurable classifier (a worker-backed one whose module advertised it), so the
+    // executor can tune it in place instead of closing and reopening the node.
+    public bool CanReconfigure => (classifier as IReconfigurable)?.CanReconfigure ?? false;
+
+    public Task<bool> TryReconfigureAsync(JsonNode? config, CancellationToken cancellationToken) =>
+        classifier is IReconfigurable reconfigurable
+            ? reconfigurable.TryReconfigureAsync(config, cancellationToken)
+            : Task.FromResult(false);
 
     // Surfaces cross-process counters when the classifier runs out-of-process; an in-process one has none.
     public WorkerMetricsSnapshot? GetWorkerMetrics() =>

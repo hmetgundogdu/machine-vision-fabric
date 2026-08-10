@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Mvf.Abstractions;
 using Mvf.Graph.Execution;
 
@@ -34,7 +35,7 @@ internal class ResilientNodeRunner(
     INodeRunner inner,
     NodeFailurePolicy policy,
     Action<string, string>? log = null,
-    Func<CancellationToken, Task<INodeRunner>>? rebuild = null) : INodeRunner
+    Func<CancellationToken, Task<INodeRunner>>? rebuild = null) : INodeRunner, IReconfigurable
 {
     private INodeRunner _inner = inner;
 
@@ -42,6 +43,16 @@ internal class ResilientNodeRunner(
     protected INodeRunner Inner => _inner;
 
     public string NodeId => _inner.NodeId;
+
+    // Forwarded, or the wrapper would silently cost every restart-configured node its live tuning: the
+    // executor tests the runner it holds, which is this one. A hard restart needs no bookkeeping here —
+    // the rebuild reads the node's config, which the executor has already updated with the new value.
+    public bool CanReconfigure => (_inner as IReconfigurable)?.CanReconfigure ?? false;
+
+    public Task<bool> TryReconfigureAsync(JsonNode? config, CancellationToken cancellationToken) =>
+        _inner is IReconfigurable reconfigurable
+            ? reconfigurable.TryReconfigureAsync(config, cancellationToken)
+            : Task.FromResult(false);
 
     // Initial activation is deliberately not retried — a node that never comes up at start is reported now.
     public Task ActivateAsync(CancellationToken cancellationToken) => _inner.ActivateAsync(cancellationToken);

@@ -231,25 +231,48 @@ def _do_restore(msg, request_id, arena_view, on_restore):
     _send({"type": "restored", "id": request_id})
 
 
-def _serve(module_id, capability, writable, on_execute, on_checkpoint, on_restore, on_start=None):
+def _do_configure(msg, request_id, on_configure):
+    """Apply a new node config to the running module and acknowledge it.
+
+    Arrives between two ``execute`` messages — this loop is single-threaded and answers in order — so a
+    module needs no locking and no frame is ever processed half-configured.
+
+    An exception propagates to the caller's handler and is reported as ``error``; the engine treats that
+    as "not applied" and re-opens the node instead, so a module is free to refuse a config it cannot use.
+    """
+    on_configure(msg.get("config") or {})
+    _send({"type": "configured", "id": request_id})
+
+
+def _serve(module_id, capability, writable, on_execute, on_checkpoint, on_restore, on_start=None,
+           on_configure=None):
     """Shared stdio loop: handshake, dispatch execute + checkpoint/restore, per-request error isolation.
 
     Readiness (sd_notify-style, see protocol/README.md): when ``on_start`` is given, the module warms up
     (e.g. loads a model, connects a device) *after* the ``hello`` handshake and signals ``ready`` when done.
     The ``hello`` carries ``"ready": false`` so the engine waits (bounded by its startup budget) — a slow
     warmup is a startup concern, not a liveness failure. With no ``on_start`` the module is ready at once.
+
+    Live config (``on_configure``): advertised in the handshake's ``features`` rather than implied by the
+    protocol version, because this loop *ignores* a message type it does not know. An engine that assumed
+    the capability and sent ``configure`` to an older module would wait forever for a reply, so the module
+    has to say so first.
     """
     arena = _open_arena(writable=writable)
     if arena is None:
         raise RuntimeError("MVF_ARENA_PATH is not set — the shared-memory data plane is required.")
     arena_view = memoryview(arena)
+    features = ["configure"] if on_configure is not None else []
     try:
+        hello = {"type": "hello", "protocol": 1, "moduleId": module_id, "capability": capability}
+        if features:
+            hello["features"] = features
         if on_start is not None:
-            _send({"type": "hello", "protocol": 1, "moduleId": module_id, "capability": capability, "ready": False})
+            _send({**hello, "ready": False})
             on_start()  # warmup: load model / connect device / init
             _send({"type": "ready", "moduleId": module_id})
         else:
-            _send({"type": "hello", "protocol": 1, "moduleId": module_id, "capability": capability})
+            _send(hello)
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -267,6 +290,8 @@ def _serve(module_id, capability, writable, on_execute, on_checkpoint, on_restor
                     _do_checkpoint(msg, request_id, arena_view, on_checkpoint)
                 elif msg_type == "restore":
                     _do_restore(msg, request_id, arena_view, on_restore)
+                elif msg_type == "configure" and on_configure is not None:
+                    _do_configure(msg, request_id, on_configure)
             except Exception as exc:  # report per-request failure, keep serving
                 _send({"type": "error", "id": request_id, "message": str(exc)})
     finally:
@@ -274,13 +299,16 @@ def _serve(module_id, capability, writable, on_execute, on_checkpoint, on_restor
         arena.close()
 
 
-def run_classifier(module_id, classify, on_checkpoint=None, on_restore=None, on_start=None):
+def run_classifier(module_id, classify, on_checkpoint=None, on_restore=None, on_start=None,
+                   on_configure=None):
     """Run the stdio loop for a classifier module.
 
     ``classify(payload, meta)`` returns ``(label, measurement, unit, details)`` (last three optional).
     Optional ``on_checkpoint() -> Output|None`` and ``on_restore(payload)`` make the module's state
     survive a restart (see :func:`blob` / :func:`tensor`). Optional ``on_start()`` runs warmup after the
     handshake (load a model / connect a device); the module signals ``ready`` when it returns.
+    Optional ``on_configure(config: dict)`` accepts the node's config — once before the first frame, and
+    again whenever an operator edits a bound field, without the module being restarted.
     """
     def on_execute(msg, request_id, arena_view):
         frame = msg.get("frame") or {}
@@ -296,15 +324,19 @@ def run_classifier(module_id, classify, on_checkpoint=None, on_restore=None, on_
         })
 
     writable = on_checkpoint is not None or on_restore is not None
-    _serve(module_id, "classifier", writable, on_execute, on_checkpoint, on_restore, on_start)
+    _serve(module_id, "classifier", writable, on_execute, on_checkpoint, on_restore, on_start,
+           on_configure)
 
 
-def run_processor(module_id, transform, on_checkpoint=None, on_restore=None, on_start=None):
+def run_processor(module_id, transform, on_checkpoint=None, on_restore=None, on_start=None,
+                  on_configure=None):
     """Run the stdio loop for a transformer module (frame in -> new frame out).
 
     ``transform(payload, meta)`` returns an :class:`Output` (see :func:`blob` / :func:`tensor`) or
     ``None`` to drop the frame. Optional ``on_checkpoint``/``on_restore`` persist module state. Optional
     ``on_start()`` runs warmup after the handshake; the module signals ``ready`` when it returns.
+    Optional ``on_configure(config: dict)`` accepts the node's config — once before the first frame, and
+    again whenever an operator edits a bound field, without the module being restarted.
     """
     def on_execute(msg, request_id, arena_view):
         frame = msg.get("frame") or {}
@@ -323,4 +355,5 @@ def run_processor(module_id, transform, on_checkpoint=None, on_restore=None, on_
             output.shape, _as_bytes(output.data), int(out["capacity"]))
         _send({"type": "result", "id": request_id, "frame": {"shm": {"offset": int(out["offset"])}}})
 
-    _serve(module_id, "processor", True, on_execute, on_checkpoint, on_restore, on_start)
+    _serve(module_id, "processor", True, on_execute, on_checkpoint, on_restore, on_start,
+           on_configure)

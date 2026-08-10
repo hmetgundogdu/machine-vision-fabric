@@ -252,9 +252,16 @@ public sealed class PipelineGraphExecutor(
             liveValues!.Changed += OnLiveValueChanged;
         }
 
-        // Re-opens every node with a queued live-config edit: merge the current tunable values into its
-        // config, dispose the old runner, activate a fresh one. Deduped, so several edits to one node cost
-        // one re-activation.
+        // Applies every queued live-config edit: merge the current tunable values into the node's config,
+        // then hand it to the node. Deduped, so several edits to one node cost one application.
+        //
+        // Two ways to land it, and which one is used is the difference between tuning and reconfiguring.
+        // A node that says it can take a config while running is simply handed the new one — that is one
+        // message between two frames. Everything else is closed and reopened, because a module reads its
+        // config when it opens. The distinction matters most exactly where live editing is most wanted:
+        // an out-of-process worker holding a loaded model pays a process spawn and a model warmup — tens
+        // of seconds on a panel PC, with the line dropping frames throughout — to change a number it
+        // re-reads on every frame anyway.
         async Task ApplyReactivationsAsync()
         {
             var toReactivate = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -278,6 +285,11 @@ public sealed class PipelineGraphExecutor(
                     }
                 }
 
+                if (await TryTuneInPlaceAsync(nid, node))
+                {
+                    continue;
+                }
+
                 if (runnerById.TryGetValue(nid, out var old))
                 {
                     runners.Remove(old);
@@ -294,6 +306,44 @@ public sealed class PipelineGraphExecutor(
                     runnerById.Remove(nid);
                 }
             }
+        }
+
+        // Hands the running node its new config. False means it could not be done and the caller must
+        // re-open the node — including when the attempt threw: a node left running with a config the
+        // engine believes it has but it does not is the one outcome worth paying a re-activation to avoid.
+        async Task<bool> TryTuneInPlaceAsync(string nodeId, PipelineNodeDefinition node)
+        {
+            if (!runnerById.TryGetValue(nodeId, out var runner)
+                || runner is not IReconfigurable { CanReconfigure: true } reconfigurable)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (!await reconfigurable.TryReconfigureAsync(node.Config, cancellationToken))
+                {
+                    return false;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add(
+                    $"Node '{nodeId}' refused a live config change ({ex.Message}); re-opening it instead.");
+                return false;
+            }
+
+            // Logged because the two paths look identical from the outside and cost wildly different
+            // things: an operator who sees a node re-open on every keystroke needs to know that is what
+            // is happening, and one whose node keeps running needs to know the edit still landed.
+            options.OnNodeLog?.Invoke(new NodeLogEvent
+            {
+                NodeId = nodeId,
+                ModuleId = node.ModuleId ?? string.Empty,
+                Level = "info",
+                Message = "config updated in place (no re-activation)"
+            });
+            return true;
         }
 
         // In-process module logging: build each node's (level, message) sink once and swap it into the

@@ -27,6 +27,14 @@ not a liveness failure, so it must not be mistaken for a hang. Absent/`true` `re
 {"type":"ready","moduleId":"py.warmup-classifier"}
 ```
 
+Child → engine, optional `features`: capabilities beyond the base protocol that the engine may use with
+this child. Absent or empty = base protocol only. Advertised per child rather than carried by the
+`protocol` number so a new capability never breaks an older module, and because the engine must not send
+a message this child would silently ignore. Currently defined: `configure` (see below).
+```json
+{"type":"hello","protocol":1,"moduleId":"py.rotary-inspect","capability":"processor","features":["configure"]}
+```
+
 Engine → child, run one node cycle:
 ```json
 {"type":"execute","id":1,"frame":{"cameraId":"cam1","sequence":42,"contentType":"image/bmp","shm":{"offset":0}}}
@@ -48,6 +56,20 @@ Child → engine, result (processor capability) — a new frame in the output sl
 ```json
 {"type":"result","id":1,"frame":{"shm":{"offset":8388608}}}
 ```
+
+Engine → child, apply the node's config to the **running** module. Sent once after `ready` (before the
+first `execute`) when the node declares a config, and again whenever an operator edits one of its
+`bindings`. The child applies it and replies `configured`:
+```json
+{"type":"configure","id":7,"config":{"acceptMinDeg":75,"acceptMaxDeg":105}}
+{"type":"configured","id":7}
+```
+Only sent to a child whose `hello` listed `configure` in `features` (see below) — the SDKs' dispatch
+loops *ignore* an unknown message type rather than refusing it, so an engine that guessed would wait for
+a reply that never comes. A child that declines answers `error`; the engine then closes and reopens the
+node, which is what it did for every edit before this message existed. Without it, a config on an
+out-of-process node went nowhere: the engine resolved it, type-checked it, stored it and offered it as a
+live tunable, and the worker never saw a byte of it.
 
 Engine → child, capture durable state at a cycle boundary (resume-after-crash). The child writes its
 serialized state into the reserved slot and replies `state`, or `{"empty":true}` when stateless:
@@ -86,4 +108,6 @@ Engine → child, shutdown (engine then closes stdin):
 - The child must `hello` before the engine sends any request.
 - If the `hello` has `"ready": false`, the child must send `ready` (or exit) before the engine's startup
   budget elapses; the engine sends no request until then. `log` lines may precede `ready`.
+- The engine only sends a message a child's `features` cover. A child must ignore an unknown message
+  type rather than exiting, and must not rely on the engine sending anything it did not advertise.
 - Flush after every line so the parent reads promptly.

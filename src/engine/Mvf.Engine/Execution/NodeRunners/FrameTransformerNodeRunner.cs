@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Mvf.Abstractions;
 using Mvf.Graph.Execution;
 
@@ -12,11 +13,20 @@ namespace Mvf.Engine.Execution.NodeRunners;
 /// Output ports: <c>frame</c> (data) — emitted only when the transformer returns a frame
 /// </summary>
 internal sealed class FrameTransformerNodeRunner(string nodeId, IFrameTransformer transformer)
-    : INodeRunner, ICheckpointable, IWorkerMetricsSource
+    : INodeRunner, ICheckpointable, IWorkerMetricsSource, IReconfigurable
 {
     public string NodeId { get; } = nodeId;
 
     public Task ActivateAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    // Surfaces a live-configurable transformer (a worker-backed one whose module advertised it), so the
+    // executor can tune it in place instead of closing and reopening the node.
+    public bool CanReconfigure => (transformer as IReconfigurable)?.CanReconfigure ?? false;
+
+    public Task<bool> TryReconfigureAsync(JsonNode? config, CancellationToken cancellationToken) =>
+        transformer is IReconfigurable reconfigurable
+            ? reconfigurable.TryReconfigureAsync(config, cancellationToken)
+            : Task.FromResult(false);
 
     // Surfaces cross-process counters when the transformer runs out-of-process; an in-process one has none.
     public WorkerMetricsSnapshot? GetWorkerMetrics() =>

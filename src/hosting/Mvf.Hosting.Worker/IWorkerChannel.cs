@@ -29,4 +29,20 @@ public interface IWorkerChannel : IAsyncDisposable
 
     /// <summary>Sends one request and returns the matching response (log lines skipped).</summary>
     Task<JsonObject> RequestAsync(JsonObject request, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Whether the child advertised the <c>configure</c> feature in its <c>hello</c>. False by default,
+    /// which is the safe answer for any channel that does not know: an unknown message type is *ignored*
+    /// by an older SDK's dispatch loop rather than refused, so sending one to a worker that never claimed
+    /// the feature would leave the engine waiting for a reply that is never coming.
+    /// </summary>
+    bool SupportsConfigure => false;
+
+    /// <summary>
+    /// Hands the running child a new config block (protocol <c>configure</c>). Only valid when
+    /// <see cref="SupportsConfigure"/> is true.
+    /// </summary>
+    Task ConfigureAsync(JsonNode? config, CancellationToken cancellationToken) =>
+        throw new NotSupportedException(
+            $"Worker '{ModuleId}' cannot be configured while running.");
 }

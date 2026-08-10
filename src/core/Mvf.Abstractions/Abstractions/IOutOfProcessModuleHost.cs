@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace Mvf.Abstractions;
 
 /// <summary>
@@ -19,12 +21,25 @@ public readonly record struct WorkerLogLine(string Level, string Message);
 /// <param name="EntryPath">Absolute path to the entry script/executable.</param>
 /// <param name="WorkingDirectory">Absolute directory the worker is launched in (the module folder).</param>
 /// <param name="OnLog">Optional sink for the worker's log/stderr lines. Null discards them (M1 behavior).</param>
+/// <param name="Config">
+/// The node's config block, delivered to the worker once it is ready and before its first frame — the
+/// same values an in-process .NET module receives at <c>OpenSession</c>/<c>Create*</c>. Null means the
+/// node declared none, and nothing is sent.
+///
+/// <para>Until this existed, a config on an out-of-process node went nowhere: the engine resolved it,
+/// type-checked it, stored it and offered it as a live tunable, and the worker never saw a byte of it.
+/// A binding declared on a Python node therefore appeared to work and changed nothing.</para>
+///
+/// <para>Only delivered to a worker that advertised the <c>configure</c> feature in its handshake; one
+/// that did not is left exactly as it was, since it would not answer the message.</para>
+/// </param>
 public sealed record OutOfProcessModuleActivation(
     string ModuleId,
     string Runtime,
     string EntryPath,
     string WorkingDirectory,
-    Action<WorkerLogLine>? OnLog = null);
+    Action<WorkerLogLine>? OnLog = null,
+    JsonNode? Config = null);
 
 /// <summary>
 /// Hosts non-.NET modules as co-located, out-of-process workers (M1). Kept behind this seam so

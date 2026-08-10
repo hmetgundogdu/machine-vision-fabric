@@ -14,12 +14,27 @@ namespace Mvf.Hosting.Worker;
 /// then owns (it holds one producer reference until routed).
 /// </summary>
 public sealed class WorkerFrameTransformer(IWorkerChannel worker, IDataPlane dataPlane)
-    : IFrameTransformer, ICheckpointable, IWorkerMetricsSource, IAsyncDisposable
+    : IFrameTransformer, ICheckpointable, IWorkerMetricsSource, IReconfigurable, IAsyncDisposable
 {
     private readonly WorkerCallMetrics _metrics = new();
     private int _requestId;
 
     public WorkerMetricsSnapshot GetWorkerMetrics() => _metrics.Snapshot(worker);
+
+    // Live config, when the module advertised it. The channel serialises this against execute calls, so
+    // the change lands between two frames and no frame is measured half-configured.
+    public bool CanReconfigure => worker.SupportsConfigure;
+
+    public async Task<bool> TryReconfigureAsync(JsonNode? config, CancellationToken cancellationToken)
+    {
+        if (!worker.SupportsConfigure)
+        {
+            return false;
+        }
+
+        await worker.ConfigureAsync(config, cancellationToken);
+        return true;
+    }
 
     // A supervised channel owns checkpoint/restore (it must hold the last state to recover with);
     // a plain channel falls back to a one-shot capture/restore.

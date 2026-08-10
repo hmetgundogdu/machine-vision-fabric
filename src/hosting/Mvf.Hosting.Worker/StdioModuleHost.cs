@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Mvf.Abstractions;
 
 namespace Mvf.Hosting.Worker;
@@ -43,7 +44,27 @@ public sealed class StdioModuleHost(IDataPlane dataPlane) : IOutOfProcessModuleH
             ? await WarmWorkerPool.StartAsync(spawn, warmSpares, cancellationToken)
             : null;
 
-        return await SupervisedWorker.StartAsync(spawn, dataPlane, cancellationToken, pool);
+        var worker = await SupervisedWorker.StartAsync(spawn, dataPlane, cancellationToken, pool);
+
+        // The node's config, delivered before the first frame — this is the out-of-process equivalent of
+        // handing an in-process module its config at OpenSession. Sent here rather than at spawn so it
+        // also lands on a worker taken from the warm pool, which was started before this node existed.
+        // Skipped silently when the module did not advertise the feature: it would not answer, and a
+        // module that reads its config from a file of its own is not broken for lacking this.
+        if (activation.Config is { } config && worker.SupportsConfigure)
+        {
+            try
+            {
+                await worker.ConfigureAsync(config, cancellationToken);
+            }
+            catch
+            {
+                await worker.DisposeAsync();
+                throw;
+            }
+        }
+
+        return worker;
     }
 
     private static int ReadWarmSpares() =>

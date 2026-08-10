@@ -1,0 +1,8 @@
+{
+  "id": "py.tunable-transformer",
+  "name": "Tunable Transformer (Python)",
+  "version": "1.0.0",
+  "kind": "processor",
+  "runtime": "python",
+  "entry": "transformer.py"
+}

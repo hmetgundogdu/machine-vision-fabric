@@ -24,8 +24,17 @@ public sealed class SharedMemoryArenaTests
 
         // A second, independent mapping of the same file — what the child does — sees a valid header at
         // the handle offset and the payload right after it.
+        //
+        // Opened through a shared FileStream rather than by path: the path overload asks for exclusive
+        // access, which on Windows is refused because the arena that created the file still holds it.
+        // A real child does not hit this (it opens the file shared), so the strict overload only ever
+        // failed the test, never the product.
+        using var backing = new FileStream(
+            arena.BackingPath, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
         using var mmf = MemoryMappedFile.CreateFromFile(
-            arena.BackingPath, FileMode.Open, mapName: null, arena.Capacity, MemoryMappedFileAccess.Read);
+            backing, mapName: null, arena.Capacity, MemoryMappedFileAccess.Read,
+            HandleInheritability.None, leaveOpen: true);
         using var accessor = mmf.CreateViewAccessor(0, arena.Capacity, MemoryMappedFileAccess.Read);
 
         var header = new byte[PayloadDescriptor.HeaderSize];
