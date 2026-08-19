@@ -61,6 +61,9 @@ switch (invocation.Command)
     case "execute-graph":
         await ExecuteGraphAsync(invocation);
         break;
+    case "watch":
+        await WatchAsync();
+        break;
     default:
         Console.Error.WriteLine($"Unknown command '{invocation.Command}'.");
         PrintHelp();
@@ -457,16 +460,25 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
             if (streams == EgressStreams.None) streams = EgressStreams.State;
         }
 
+        // Loopback unless asked otherwise: the stream is unauthenticated live production state, so putting
+        // it on the network stays an explicit choice. --egress-bind 0.0.0.0 lets `mvf watch` attach from
+        // another machine.
+        var egressBind = invocation.Options.TryGetValue("egress-bind", out var ebv) && ebv is { Length: > 0 }
+            ? ebv
+            : "127.0.0.1";
+
         int boundPort;
         string transportLabel;
+        try
+        {
         switch (transport)
         {
             case EgressTransport.WebSocket:
-                var wsSink = new WebSocketEgressSink(egressPort, streams);
+                var wsSink = new WebSocketEgressSink(egressPort, streams, egressBind);
                 egressSink = wsSink;
                 boundPort = wsSink.Port;
                 transportLabel = "ws";
-                Console.WriteLine($"Egress: ws on ws://127.0.0.1:{boundPort} (streams: {streams})");
+                Console.WriteLine($"Egress: ws on ws://{egressBind}:{boundPort} (streams: {streams})");
                 break;
             case EgressTransport.Udp:
                 var udpSink = new UdpEgressSink(egressPort);
@@ -481,12 +493,24 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
                 Console.WriteLine($"Egress: udp on {UdpEgressSink.DataGroup}:{boundPort} (streams: state)");
                 break;
             default:
-                var tcpSink = new TcpServerEgressSink(egressPort, streams);
+                var tcpSink = new TcpServerEgressSink(egressPort, streams, ParseBindAddress(egressBind));
                 egressSink = tcpSink;
                 boundPort = tcpSink.Port;
                 transportLabel = "tcp";
-                Console.WriteLine($"Egress: tcp on 127.0.0.1:{boundPort} (streams: {streams})");
+                Console.WriteLine($"Egress: tcp on {egressBind}:{boundPort} (streams: {streams})");
                 break;
+        }
+        }
+        catch (Exception ex) when (ex is System.Net.Sockets.SocketException or System.Net.HttpListenerException)
+        {
+            // A busy port or a refused reservation is a setup problem with an obvious fix, not a crash to
+            // read a stack trace out of. Egress is optional, but silently running without the stream the
+            // operator asked for would be worse than stopping.
+            Console.Error.WriteLine(
+                $"Egress could not listen on {egressBind}:{egressPort} - {ex.Message}. " +
+                "Pick another port with --egress-port, or drop --egress to run without it.");
+            Environment.ExitCode = 1;
+            return;
         }
 
         options = options with
@@ -505,6 +529,9 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
                 Port = boundPort,
                 Streams = streams.ToString().ToLowerInvariant().Replace(" ", string.Empty),
                 Status = "running",
+                // So a viewer can tell a reachable edge from a loopback-only one instead of discovering it
+                // through a connection refused.
+                Bind = egressBind,
             });
             Console.WriteLine($"Egress discovery: beacon on udp://{EgressBeacon.MulticastGroup}:{EgressBeacon.DiscoveryPort}");
         }
@@ -780,6 +807,38 @@ static string? FindRepositoryRoot(string startDirectory)
     return null;
 }
 
+/// <summary>
+/// The observer. Discovers the pipelines streaming on this network via the alive-beacon and watches one
+/// live. Read-only: it opens a consumer connection and decodes, and has no path back into any run.
+/// </summary>
+async Task WatchAsync()
+{
+    using var cts = new CancellationTokenSource();
+    ConsoleCancelEventHandler onCancel = (_, e) =>
+    {
+        e.Cancel = true; // leave the terminal in a sane state instead of dying mid-frame
+        cts.Cancel();
+    };
+
+    Console.CancelKeyPress += onCancel;
+    try
+    {
+        await new WatchDashboard().RunAsync(cts.Token);
+    }
+    finally
+    {
+        Console.CancelKeyPress -= onCancel;
+    }
+}
+
+/// <summary>Parses --egress-bind. "0.0.0.0"/"*" mean every interface; anything unparseable falls back to
+/// loopback rather than guessing an address that would silently expose the stream.</summary>
+static System.Net.IPAddress ParseBindAddress(string value) => value switch
+{
+    "0.0.0.0" or "*" or "+" => System.Net.IPAddress.Any,
+    _ => System.Net.IPAddress.TryParse(value, out var parsed) ? parsed : System.Net.IPAddress.Loopback,
+};
+
 void PrintHelp()
 {
     Console.WriteLine("Mvf.Cli");
@@ -787,6 +846,9 @@ void PrintHelp()
     Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--arena-slots <n>] [--on-source-error fail|restart] [--source-restart-limit <n>] [--source-backoff-ms <n>] [--egress tcp|ws|udp] [--egress-port <n>] [--egress-streams state|frame|state,frame] [--no-egress-discovery] [--no-tui] [--no-prompt]");
     Console.WriteLine("      --on-source-error: on a source (camera/stream) failure — restart (hard-restart the node, default) or fail (end the run at once). --source-restart-limit caps restarts (0 = forever, default).");
     Console.WriteLine("      --no-prompt never asks an operator for a value/select binding; an unresolved one fails the run.");
+    Console.WriteLine("      --egress-bind <addr>: which interface the egress server listens on (default 127.0.0.1). Use 0.0.0.0 to let `mvf watch` attach from another machine — the stream is unauthenticated, so this is opt-in.");
+    Console.WriteLine("  watch");
+    Console.WriteLine("      Discovers pipelines streaming on this network (alive-beacon) and watches one live. Read-only.");
     Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");
     Console.WriteLine("  modules [--root <path>]");
     Console.WriteLine("  packages [--root <path>]");

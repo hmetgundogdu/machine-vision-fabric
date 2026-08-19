@@ -43,6 +43,8 @@
     <ProjectReference Include="..\..\hosting\Mvf.Hosting.Worker\Mvf.Hosting.Worker.csproj" />
     <ProjectReference Include="..\..\transports\Mvf.Transport.SharedMemory\Mvf.Transport.SharedMemory.csproj" />
     <ProjectReference Include="..\..\egress\Mvf.Egress\Mvf.Egress.csproj" />
+    <!-- `mvf watch` is a consumer of the stream, not only a producer of it. -->
+    <ProjectReference Include="..\..\egress\Mvf.Egress.Client\Mvf.Egress.Client.csproj" />
   </ItemGroup>
 
 </Project>
