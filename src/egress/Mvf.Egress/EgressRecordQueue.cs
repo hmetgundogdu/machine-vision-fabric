@@ -65,6 +65,7 @@ internal sealed class EgressRecordQueue
 
     private static byte[] Encode(in Queued queued, uint seq) => queued.Kind switch
     {
+        EgressStreamKind.Topology => EgressWire.EncodeTopology(queued.Topology!, queued.Topology!.RunId, seq),
         EgressStreamKind.Cycle => EgressWire.EncodeCycle(queued.Cycle!, seq),
         _ when queued.HasPayload => EgressWire.EncodeNodeTransitionFrame(
             queued.Node!, seq, queued.Descriptor.Span, queued.Payload.Span),
@@ -79,15 +80,23 @@ internal sealed class EgressRecordQueue
             NodeExecutionEvent? node,
             bool hasPayload,
             ReadOnlyMemory<byte> descriptor,
-            ReadOnlyMemory<byte> payload)
+            ReadOnlyMemory<byte> payload,
+            EgressTopology? topology = null)
         {
             Kind = kind;
             Cycle = cycle;
             Node = node;
+            Topology = topology;
             HasPayload = hasPayload;
             Descriptor = descriptor;
             Payload = payload;
         }
+
+        /// <summary>Topology goes through the ring too, so subscribers already attached when the run starts
+        /// receive it in order with the rest of the stream; the sink separately keeps a copy to replay to
+        /// whoever attaches later.</summary>
+        public static Queued ForTopology(EgressTopology topology) =>
+            new(EgressStreamKind.Topology, null, null, false, default, default, topology);
 
         public static Queued ForCycle(PipelineExecutionProgress cycle) =>
             new(EgressStreamKind.Cycle, cycle, null, false, default, default);
@@ -103,6 +112,8 @@ internal sealed class EgressRecordQueue
         public PipelineExecutionProgress? Cycle { get; }
 
         public NodeExecutionEvent? Node { get; }
+
+        public EgressTopology? Topology { get; }
 
         public bool HasPayload { get; }
 

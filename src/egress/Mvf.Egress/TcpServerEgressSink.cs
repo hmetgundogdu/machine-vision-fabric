@@ -21,10 +21,19 @@ public sealed class TcpServerEgressSink : IEgressSink
     private readonly Task _acceptLoop;
     private readonly Task _drainLoop;
 
-    public TcpServerEgressSink(int port, EgressStreams streams = EgressStreams.State)
+    // The encoded topology record, kept outside the ring: it must not compete for ring space with the live
+    // stream (where dropping is correct), and every subscriber that attaches mid-run still needs it.
+    private volatile byte[]? _topologyFrame;
+
+    /// <param name="bindAddress">
+    /// Which interface to serve on. Defaults to loopback: the stream carries a plant's live production
+    /// state and has no authentication, so reaching the network must be a decision someone typed, not
+    /// something a default did quietly. Pass <see cref="IPAddress.Any"/> to let other machines attach.
+    /// </param>
+    public TcpServerEgressSink(int port, EgressStreams streams = EgressStreams.State, IPAddress? bindAddress = null)
     {
         _streams = streams;
-        _listener = new TcpListener(IPAddress.Loopback, port);
+        _listener = new TcpListener(bindAddress ?? IPAddress.Loopback, port);
         _listener.Start();
         Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
 
@@ -34,6 +43,19 @@ public sealed class TcpServerEgressSink : IEgressSink
 
     /// <summary>The bound port (useful when constructed with port 0 for an ephemeral port).</summary>
     public int Port { get; }
+
+    /// <summary>
+    /// Keeps the topology twice over, because the two audiences need it differently: subscribers already
+    /// attached when the run starts get it through the ring, in order with everything else, while a
+    /// subscriber that attaches later gets the retained copy as a preamble. Doing only the second would
+    /// leave a viewer that was waiting before the run began without a graph. The retained copy carries
+    /// seq 0 — it is a replay, not a position in the live sequence.
+    /// </summary>
+    public void PublishTopology(EgressTopology topology)
+    {
+        _topologyFrame = EgressWire.EncodeTopology(topology, topology.RunId, seq: 0);
+        _queue.Enqueue(EgressRecordQueue.Queued.ForTopology(topology));
+    }
 
     public void PublishCycle(PipelineExecutionProgress progress) =>
         _queue.Enqueue(EgressRecordQueue.Queued.ForCycle(progress));
@@ -68,6 +90,25 @@ public sealed class TcpServerEgressSink : IEgressSink
             {
                 var client = await _listener.AcceptTcpClientAsync(_cts.Token).ConfigureAwait(false);
                 client.NoDelay = true;
+
+                // Write the topology preamble *before* registering the client, so this write can never
+                // interleave with the drain loop's broadcast and split a frame down the middle. Records
+                // published during the write are missed by this subscriber — acceptable on a best-effort
+                // stream, and the next cycle repaints its state anyway.
+                var preamble = _topologyFrame;
+                if (preamble is not null)
+                {
+                    try
+                    {
+                        await client.GetStream().WriteAsync(preamble, _cts.Token).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException)
+                    {
+                        client.Dispose();
+                        continue;
+                    }
+                }
+
                 lock (_clientsLock)
                 {
                     _clients.Add(client);

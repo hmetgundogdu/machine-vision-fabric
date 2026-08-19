@@ -24,6 +24,14 @@ public sealed class UdpEgressSink : IEgressSink
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _drainLoop;
 
+    /// <summary>How often the topology datagram is repeated. Multicast has no connection to hang a
+    /// preamble on, so a listener that joins mid-run learns the graph only by hearing it again; once a
+    /// second matches the alive-beacon's cadence and costs a datagram per second.</summary>
+    private static readonly TimeSpan TopologyRepeat = TimeSpan.FromSeconds(1);
+
+    private byte[]? _topologyDatagram;
+    private Timer? _topologyTimer;
+
     public UdpEgressSink(int port)
     {
         Port = port;
@@ -33,6 +41,34 @@ public sealed class UdpEgressSink : IEgressSink
     }
 
     public int Port { get; }
+
+    /// <summary>Sends the topology now and keeps repeating it, so a late listener still learns the graph.</summary>
+    public void PublishTopology(EgressTopology topology)
+    {
+        var frame = EgressWire.EncodeTopology(topology, topology.RunId, seq: 0);
+        _topologyDatagram = frame.AsMemory(4).ToArray(); // datagram boundary replaces the length prefix
+
+        _topologyTimer?.Dispose();
+        _topologyTimer = new Timer(_ => TrySendTopology(), null, TimeSpan.Zero, TopologyRepeat);
+    }
+
+    private void TrySendTopology()
+    {
+        var datagram = _topologyDatagram;
+        if (datagram is null || datagram.Length > MaxDatagram)
+        {
+            return; // a graph too large for one datagram is not split; the observer falls back to the table
+        }
+
+        try
+        {
+            _udp.Send(datagram, datagram.Length, _endpoint);
+        }
+        catch
+        {
+            // best effort — a missing NIC or firewall must never fault the run
+        }
+    }
 
     public void PublishCycle(PipelineExecutionProgress progress) =>
         _queue.Enqueue(EgressRecordQueue.Queued.ForCycle(progress));
@@ -70,6 +106,7 @@ public sealed class UdpEgressSink : IEgressSink
     public void Dispose()
     {
         _cts.Cancel();
+        _topologyTimer?.Dispose();
         _queue.Complete();
 
         try

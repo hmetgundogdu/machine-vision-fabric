@@ -23,12 +23,27 @@ public sealed class WebSocketEgressSink : IEgressSink
     private readonly Task _acceptLoop;
     private readonly Task _drainLoop;
 
-    public WebSocketEgressSink(int port, EgressStreams streams = EgressStreams.State)
+    // Kept outside the ring and replayed per subscriber — see TcpServerEgressSink.
+    private volatile byte[]? _topologyFrame;
+
+    /// <param name="bindAddress">
+    /// Which interface to serve on; defaults to loopback for the same reason as
+    /// <see cref="TcpServerEgressSink"/>. "0.0.0.0" / "*" become the HttpListener wildcard prefix, which on
+    /// Windows needs an urlacl reservation or an elevated process — a failure to start here is that,
+    /// not a bug.
+    /// </param>
+    public WebSocketEgressSink(int port, EgressStreams streams = EgressStreams.State, string? bindAddress = null)
     {
         _streams = streams;
         Port = port;
         _listener = new HttpListener();
-        _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        var host = bindAddress switch
+        {
+            null or "" or "127.0.0.1" or "localhost" => "127.0.0.1",
+            "0.0.0.0" or "*" or "+" => "+",
+            var explicitHost => explicitHost,
+        };
+        _listener.Prefixes.Add($"http://{host}:{port}/");
         _listener.Start();
 
         _acceptLoop = Task.Run(AcceptLoopAsync);
@@ -36,6 +51,14 @@ public sealed class WebSocketEgressSink : IEgressSink
     }
 
     public int Port { get; }
+
+    /// <summary>Retained for late subscribers and broadcast through the ring for attached ones — see
+    /// <see cref="TcpServerEgressSink.PublishTopology"/>.</summary>
+    public void PublishTopology(EgressTopology topology)
+    {
+        _topologyFrame = EgressWire.EncodeTopology(topology, topology.RunId, seq: 0);
+        _queue.Enqueue(EgressRecordQueue.Queued.ForTopology(topology));
+    }
 
     public void PublishCycle(PipelineExecutionProgress progress) =>
         _queue.Enqueue(EgressRecordQueue.Queued.ForCycle(progress));
@@ -77,6 +100,26 @@ public sealed class WebSocketEgressSink : IEgressSink
                 }
 
                 var wsContext = await context.AcceptWebSocketAsync(subProtocol: null).ConfigureAwait(false);
+
+                // Send topology before registering, so it cannot interleave with the drain loop's sends.
+                var preamble = _topologyFrame;
+                if (preamble is not null)
+                {
+                    try
+                    {
+                        await wsContext.WebSocket.SendAsync(
+                            new ReadOnlyMemory<byte>(preamble, 4, preamble.Length - 4),
+                            WebSocketMessageType.Binary,
+                            endOfMessage: true,
+                            _cts.Token).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException)
+                    {
+                        wsContext.WebSocket.Dispose();
+                        continue;
+                    }
+                }
+
                 lock (_clientsLock)
                 {
                     _clients.Add(wsContext.WebSocket);
