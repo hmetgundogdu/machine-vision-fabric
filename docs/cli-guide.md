@@ -42,6 +42,7 @@ The commands, at a glance:
 | `sessions` | list finished runs and their output sessions |
 | `inspect-session` | print the manifest of one finished run |
 | `schemas` | export the JSON Schemas for pipeline/config authoring |
+| `watch` | discover pipelines streaming on this network and watch one live (read-only) |
 
 ---
 
@@ -244,11 +245,105 @@ execute-graph
   --arena-slots <n>           override the shared-memory arena slot count
   --no-tui                    plain output instead of the live dashboard
   --no-prompt                 never ask an operator for an unresolved binding; fail instead
+
+  --egress tcp|ws|udp         publish this run live (off by default)
+  --egress-port <n>           port to serve the stream on (default 8791)
+  --egress-bind <addr>        interface to serve on (default 127.0.0.1; 0.0.0.0 to allow other machines)
+  --egress-streams <s>        state | frame | state,frame (default state)
+  --no-egress-discovery       do not announce this stream with the alive-beacon
 ```
 
 For the design behind these, see [`loop-and-running-state-design.md`](loop-and-running-state-design.md)
 (loop + pause), [`value-and-select-design.md`](value-and-select-design.md) (live values / routing),
 and [`data-plane-design.md`](data-plane-design.md) (the shared-memory arena, checkpoint/resume).
+
+---
+
+## I · Watch a running pipeline — from here or from another machine
+
+A run can publish itself live. This is **off by default**; `--egress` turns it on, and the run then
+announces itself on the LAN once a second so a viewer can find it without being told an address.
+
+```bash
+mvf execute-graph --package packages/inspection-demo --egress tcp --egress-streams state,frame
+```
+
+Then, in another terminal — or on another machine:
+
+```bash
+mvf watch
+```
+
+`watch` opens on a **discovery list**: every pipeline currently streaming, one row each. The list is
+self-expiring, so it means "streaming right now" — a pipeline that stops drops off within a few seconds.
+Pick a row with ↑/↓ and press ENTER to attach.
+
+The watch page draws the remote pipeline as a **graph**, not a list: the run publishes its shape once, so
+the observer renders it with the same code the local dashboard uses. Under it sits a per-node table
+(name, id, port, cycles, last/avg duration, output bytes, faults). The header carries a live `rec/s` and
+`bytes/s` readout, which is also how you measure what the stream actually costs.
+
+| Key | On the watch page |
+|---|---|
+| ←/→ | walk the graph left to right. **A graph wider than the terminal scrolls with the cursor** — the viewport follows it, so nothing is unreachable |
+| ↑/↓ | move within a layer, where parallel branches sit |
+| ENTER | open the selected node's **detail** page |
+| `q` | back to discovery |
+
+Until you press an arrow the cursor follows the executing node, so the view rides along with the run;
+after that it is yours.
+
+### Node detail
+
+ENTER on a node gives its identity, its **typed ports** (name, channel, data type — the data/control split
+travels with the topology), live timing, and its **last frame**:
+
+- **JSON** payloads are shown as text.
+- A **2-D 8-bit** payload gets a coarse ASCII intensity map — enough to answer "is there a part in frame"
+  on a console that has no graphics protocol at all.
+- Anything else shows its typed header (media, element type, shape, bytes) and a hex head.
+- **`s` saves the frame** into the working directory. An image is written as a **PNG**, so it opens in
+  whatever the machine already has — mail it, attach it to a ticket, look at the defect properly. Anything
+  else is written as it came (`.json` / `.bin`): inventing a container for bytes whose meaning we do not
+  know would only produce a file that lies about itself.
+
+`esc`, `←`, `q` or backspace go back — the same keys the run dashboard's node detail uses.
+
+Frame **bytes** are retained for the node whose detail page is open, and only that one, so the observer's
+memory does not grow with the graph.
+
+To see this on a real image rather than a demo blob, run the belt simulator — a hardware-free camera whose
+frames are actual 320x240 8-bit pixels:
+
+```bash
+mvf execute-graph --package packages/belt-sim-demo --egress tcp --egress-streams state,frame
+```
+
+Watch it, walk to **Belt Camera**, press ENTER, and the detail page draws the scene: a bright part crossing
+a dark belt, with a darker defect on every third one.
+
+Watching is **read-only by construction**: the observer opens a consumer connection and decodes. There is
+no path from the viewer back into the run.
+
+### Reaching a run on another machine
+
+By default the stream listens on loopback only — it is unauthenticated live production state, so putting
+it on the network is a decision you type, not a default:
+
+```bash
+mvf execute-graph --package packages/inspection-demo --egress tcp --egress-bind 0.0.0.0
+```
+
+Without it, a loopback-only run still *appears* in another machine's discovery list (the beacon is
+multicast) but cannot be attached to — `watch` says so, and names the flag, instead of failing with a
+connection error.
+
+### What travels, and what does not
+
+The stream carries execution state, the graph's **structure**, and — only when you ask for
+`--egress-streams frame` and someone is actually watching — frame bytes. Node **config never travels**:
+camera credentials, PLC addresses and paths stay on the edge. See
+[`realtime-egress-design.md`](realtime-egress-design.md).
 
 ---
 

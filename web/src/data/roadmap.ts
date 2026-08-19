@@ -55,24 +55,6 @@ export const statusMeta: Record<
 /** The milestone spine (docs/roadmap.md) — one line each. */
 export const milestones: Milestone[] = [
   {
-    id: "M1",
-    title: "Out-of-process module host · Python",
-    status: "done",
-    summary: "Modules run out-of-process over local stdio (JSON); a Python node auto-wires from its manifest runtime.",
-  },
-  {
-    id: "M2",
-    title: "Shared-memory zero-copy data plane",
-    status: "done",
-    summary: "Our graph-aware arena: typed payloads read/written in place — zero-copy, no base64.",
-  },
-  {
-    id: "M2.5",
-    title: "Snapshot + module-state recovery",
-    status: "done",
-    summary: "Checkpoint/restore state; a crashed worker is restarted, restored and retried; sources resume too.",
-  },
-  {
     id: "M3",
     title: "Hardening",
     status: "done",

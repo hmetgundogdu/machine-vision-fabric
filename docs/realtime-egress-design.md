@@ -29,9 +29,17 @@ record whose payload is the emitted frame bytes, described by the arena's own `P
 
 ```
 [u32 recordLen]                          // bytes that follow
-[u16 magic 'EG' 0x4745][u8 version=1][u8 streamKind]   // 0=Cycle 1=NodeTransition
+[u16 magic 'EG' 0x4745][u8 version=2][u8 streamKind]   // 0=Cycle 1=NodeTransition 2=Topology
 [runId: 16 bytes]
 [u32 cycleIndex][u32 seq]
+--- Topology only (v2+) ---
+[u16 nameLen][name utf8]
+[u32 nodeCount]
+  per node: [id][displayName][kind][category][moduleId][primitiveType][builtinType]   // u16-prefixed utf8
+            [u32 inputCount] per port: [name][channel][dataType]
+            [u32 outputCount] per port: [name][channel][dataType]
+[u32 edgeCount]
+  per edge: [id][kind][fromNode][fromPort][toNode][toPort]
 --- NodeTransition only ---
 [u16 nodeIdLen][nodeId utf8][u16 portLen][port utf8]
 [i64 durationMicros][u8 flags: bit0 hasOutput, bit1 faulted]
@@ -41,6 +49,29 @@ record whose payload is the emitted frame bytes, described by the arena's own `P
 --- Cycle only ---
 [u32 totalCycles][u32 acceptedCycles][u8 accepted][i64 elapsedMillis]
 ```
+
+### Topology (v2)
+
+State records alone tell an observer that `invert` ran for 482us; they never say what `invert` is wired
+to. The topology record carries the graph's shape once per run, which is what lets a remote viewer draw
+the pipeline instead of listing whatever nodes it happened to catch.
+
+It is a **projection, not the `PipelineDefinition`**: identity, kind, category, ports and edges — and
+deliberately **no node config**. This stream is announced on the LAN and served to whoever attaches,
+while a node's config routinely holds camera credentials, PLC addresses and filesystem paths. Adding a
+field here is a decision that it is safe to broadcast.
+
+Delivery differs per transport because the audiences differ:
+
+| transport | how topology reaches a subscriber |
+|---|---|
+| tcp / ws | through the ring for subscribers already attached; a **retained copy** is replayed as a preamble to each subscriber that attaches later |
+| udp | repeated once a second — multicast has no connection to hang a preamble on |
+
+**Versioning.** Adding a stream kind is not backwards compatible in the direction that matters: a v1
+decoder reads an unknown kind as a `Cycle` record and reports confident nonsense. So the version moved to
+2 and an old consumer now fails loudly on the first record. Decoders accept `1..2`, so a *new* consumer
+still reads an old engine — it simply never receives topology and falls back to the node table.
 
 The `PayloadDescriptor` (`Mvf.Abstractions.PayloadDescriptor`, `HeaderSize = 192`) is **reused
 verbatim** — it already carries dtype + shape + mediaType + length in fixed little-endian binary,
@@ -84,6 +115,18 @@ well-known group/port:
 A viewer listens on the group and keeps a **live, self-expiring** list of streaming edges (an entry
 disappears when its beacons lapse — the "alive" semantics), then connects to a chosen edge's TCP/WS
 server or joins its UDP state stream. Hand-rolled minimal beacon (build-our-own ethos), not mDNS.
+
+Two details decide whether a discovered edge is actually reachable:
+
+- **The address comes from the datagram, not the payload.** A host cannot reliably name its own reachable
+  address — with several NICs, a container bridge or NAT in between, whatever it picks is a guess, and a
+  wrong guess sends viewers somewhere that answers for someone else. The receiver fills
+  `EgressBeaconInfo.Address` from the datagram's source, which demonstrably carried the packet.
+- **The beacon announces its `bind`.** The stream listens on loopback by default, but the beacon leaves
+  over a real interface and so arrives carrying a LAN source address. Following that address would get a
+  connection refused that reads like a bug rather than a configuration choice.
+  `EgressEndpointResolver.TryResolveHost` uses `bind` to pick `127.0.0.1` for a same-host loopback edge
+  and to say, for a remote one, that it needs `--egress-bind 0.0.0.0`.
 **Browser caveat:** a browser can't receive UDP multicast, so a browser viewer discovers via a known WS
 URL or a small Node-side relay; native/Node viewers get full auto-discovery.
 
@@ -113,3 +156,8 @@ A **consumer** SDK, distinct from the module-author SDKs under `src/sdk/{dotnet,
 5. ✅ UDP state transport (`UdpEgressSink`, multicast, state-only) + .NET consumer SDK (`Mvf.Egress.Client`:
    TCP / UDP / discovery clients + `EgressEdgeRegistry`) + a **separate-page** TUI egress view (open with
    `e`: transport, endpoint, streams, discovery, live subscribers / published / dropped).
+6. ✅ **Observer** — `mvf watch`: a two-page read-only TUI (discovery list → live watch). Brought with it
+   the topology record (wire v2), so a watched run draws with the *same* `GraphRenderer` as a local one;
+   `--egress-bind` for reaching an edge from another machine; the beacon's `bind` + source address so an
+   unreachable edge says what to change; and a consumer-side `rec/s` + `bytes/s` readout, which is also
+   the measurement side of egress throughput.
