@@ -32,6 +32,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The TUI and the PNG encoder are internal, but they carry logic worth pinning in tests. -->
+    <InternalsVisibleTo Include="Mvf.Engine.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\core\Mvf.Graph\Mvf.Graph.csproj" />
     <ProjectReference Include="..\..\core\Mvf.Abstractions\Mvf.Abstractions.csproj" />
     <ProjectReference Include="..\..\engine\Mvf.Engine\Mvf.Engine.csproj" />
