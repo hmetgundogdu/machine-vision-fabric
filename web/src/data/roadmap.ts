@@ -75,8 +75,8 @@ export const milestones: Milestone[] = [
   {
     id: "M3",
     title: "Hardening",
-    status: "progress",
-    summary: "Backpressure · cross-process observability · source-failure honesty. What's left of M3 is the L-track.",
+    status: "done",
+    summary: "Backpressure · cross-process observability · source-failure honesty. Engine hardening complete.",
     items: [
       { label: "backpressure (Stall / Drop)", status: "done" },
       { label: "cross-process observability", status: "done" },
@@ -99,9 +99,16 @@ export const milestones: Milestone[] = [
   },
   {
     id: "EG",
-    title: "Realtime egress · async publish",
-    status: "planned",
-    summary: "Async frame-data + frame-state publish to a studio/observer, off the hot path. Concept only — not yet designed.",
+    title: "Realtime egress · live publish",
+    status: "done",
+    summary:
+      "Publish a running pipeline's frame-state + frame-data live to a studio/observer, off the hot path. One framed binary stream; the arena's own descriptor makes frame-data near-zero-copy.",
+    items: [
+      { label: "TCP / WebSocket / UDP", status: "done" },
+      { label: "alive-beacon discovery", status: "done" },
+      { label: "TS + .NET consumer SDKs", status: "done" },
+      { label: "TUI egress view", status: "done" },
+    ],
   },
   {
     id: "M4",
