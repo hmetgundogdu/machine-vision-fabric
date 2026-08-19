@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Runtime.CompilerServices;
 
 namespace Mvf.Egress.Client;
@@ -34,6 +35,58 @@ public static class EgressClient
             if (record is null)
             {
                 yield break;
+            }
+
+            yield return record;
+        }
+    }
+
+    /// <summary>
+    /// Connects to a WebSocket egress server and yields records until the socket closes or cancellation.
+    /// Each binary message is exactly one record body — the WebSocket message boundary replaces the length
+    /// prefix, so the frame is reassembled before decoding.
+    /// </summary>
+    public static async IAsyncEnumerable<DecodedEgressRecord> StreamWebSocketAsync(
+        string host, int port, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(new Uri($"ws://{host}:{port}/"), cancellationToken).ConfigureAwait(false);
+
+        var buffer = new byte[64 * 1024];
+        var message = new MemoryStream();
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            message.SetLength(0);
+            WebSocketReceiveResult result;
+            do
+            {
+                try
+                {
+                    result = await socket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException)
+                {
+                    yield break;
+                }
+
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    yield break;
+                }
+
+                message.Write(buffer, 0, result.Count);
+            }
+            while (!result.EndOfMessage);
+
+            DecodedEgressRecord? record;
+            try
+            {
+                record = EgressWire.Decode(message.GetBuffer().AsSpan(0, (int)message.Length));
+            }
+            catch (InvalidDataException)
+            {
+                continue; // a record this build cannot read must not end the stream
             }
 
             yield return record;
@@ -101,7 +154,8 @@ public static class EgressClient
 
             if (EgressBeacon.TryParse(datagram.Buffer, out var info))
             {
-                yield return info;
+                // The sender cannot name its own reachable address; the datagram's source can.
+                yield return info with { Address = datagram.RemoteEndPoint.Address.ToString() };
             }
         }
     }

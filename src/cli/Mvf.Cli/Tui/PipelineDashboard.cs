@@ -451,81 +451,8 @@ public sealed class PipelineDashboard
         PaintInPlace(BuildLayout());
     }
 
-    /// <summary>
-    /// Draws a renderable at the top-left without a full clear (which flashes), then blanks the rest of the
-    /// window so the previous, possibly taller, frame does not bleed through. Shared by the dashboard and the
-    /// node detail view.
-    /// </summary>
-    private static void PaintInPlace(IRenderable renderable)
-    {
-        int cols, rows;
-        try
-        {
-            cols = Console.WindowWidth  > 0 ? Console.WindowWidth  : 120;
-            rows = Console.WindowHeight > 0 ? Console.WindowHeight : 40;
-        }
-        catch { cols = 120; rows = 40; }
-
-        // Render the frame to an ANSI string at the exact console width, then write it line by line, padding
-        // each line out to the full width with spaces. Spectre draws every line only as wide as its content,
-        // so without this a frame whose line is shorter than the previous frame's at that row leaves the old
-        // tail on screen — the overwrite corruption (a half-erased "space:pause", a log line bleeding into the
-        // next). Padding rather than an erase-escape keeps the Windows-console portability the in-place
-        // strategy was chosen for, and the last row is held back so a full-width final line can't wrap and
-        // scroll the whole view.
-        var lines = RenderToAnsi(renderable, cols).Split('\n');
-
-        try
-        {
-            var r = 0;
-            for (; r < lines.Length && r < rows - 1; r++)
-            {
-                var line = lines[r].TrimEnd('\r');
-                Console.SetCursorPosition(0, r);
-                Console.Write(line);
-                var pad = cols - VisibleLength(line);
-                if (pad > 0) Console.Write(new string(' ', pad));
-            }
-
-            // Blank any rows a previous, taller frame used.
-            var blank = new string(' ', cols);
-            for (; r < rows - 1; r++)
-            {
-                Console.SetCursorPosition(0, r);
-                Console.Write(blank);
-            }
-        }
-        catch { /* ignore on non-interactive hosts */ }
-    }
-
-    /// <summary>Renders a frame to an ANSI string at a fixed width, preserving the terminal's colour system so
-    /// the captured output is identical to a direct write — the capture only exists so each line can be padded
-    /// to full width and clear the residue of a longer previous frame.</summary>
-    private static string RenderToAnsi(IRenderable renderable, int width)
-    {
-        var buffer  = new StringWriter();
-        var console = AnsiConsole.Create(new AnsiConsoleSettings
-        {
-            Ansi        = AnsiSupport.Yes,
-            ColorSystem = MapColorSystem(AnsiConsole.Profile.Capabilities.ColorSystem),
-            Interactive = InteractionSupport.No,
-            Out         = new AnsiConsoleOutput(buffer)
-        });
-        console.Profile.Width  = width;
-        console.Profile.Height = 10_000;   // large, so nothing is clipped
-        console.Write(renderable);
-        return buffer.ToString();
-    }
-
-    private static ColorSystemSupport MapColorSystem(ColorSystem system) => system switch
-    {
-        ColorSystem.NoColors  => ColorSystemSupport.NoColors,
-        ColorSystem.Legacy    => ColorSystemSupport.Legacy,
-        ColorSystem.Standard  => ColorSystemSupport.Standard,
-        ColorSystem.EightBit  => ColorSystemSupport.EightBit,
-        ColorSystem.TrueColor => ColorSystemSupport.TrueColor,
-        _                     => ColorSystemSupport.Standard
-    };
+    /// <summary>Delegates to <see cref="TuiPainter.PaintInPlace"/> — shared with the observer view.</summary>
+    private static void PaintInPlace(IRenderable renderable) => TuiPainter.PaintInPlace(renderable);
 
     /// <summary>Visible column count of an ANSI line. Every glyph is ASCII width-1 (enforced by GlyphsAsciiTests),
     /// so this is the char count minus the CSI escape sequences — exactly how much padding fills the rest of the row.</summary>

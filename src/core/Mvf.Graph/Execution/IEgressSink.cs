@@ -12,6 +12,16 @@ namespace Mvf.Graph.Execution;
 /// </summary>
 public interface IEgressSink : IDisposable
 {
+    /// <summary>
+    /// Publish the shape of the graph about to run. Called <b>once</b>, before the first cycle, so an
+    /// observer that attaches later can still draw the pipeline — a sink is expected to retain this record
+    /// and replay it to each new subscriber rather than let it expire in the ring.
+    ///
+    /// <para>Defaulted to a no-op: topology arrived after the first egress sinks shipped, and a sink that
+    /// only carries state stays valid without it.</para>
+    /// </summary>
+    void PublishTopology(EgressTopology topology) { }
+
     /// <summary>Publish end-of-cycle state. Non-blocking; drops when the ring is full.</summary>
     void PublishCycle(PipelineExecutionProgress progress);
 

@@ -34,6 +34,10 @@
       let controller = null;
 
       function line(record) {
+        if (record.kind === EgressStreamKind.Topology) {
+          const nodes = record.nodes.map((n) => n.id).join(', ');
+          return `<span class="cycle">graph "${record.name}" nodes=${record.nodes.length} edges=${record.edges.length} [${nodes}]</span>`;
+        }
         if (record.kind === EgressStreamKind.Cycle) {
           return `<span class="cycle">cycle #${record.cycleIndex} accepted=${record.acceptedCycles} elapsed=${record.elapsedMillis}ms</span>`;
         }

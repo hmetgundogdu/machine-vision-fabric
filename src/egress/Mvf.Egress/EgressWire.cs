@@ -11,6 +11,9 @@ public enum EgressStreamKind : byte
 {
     Cycle = 0,
     NodeTransition = 1,
+
+    /// <summary>The graph's shape, sent once per run and replayed to each new subscriber (wire v2+).</summary>
+    Topology = 2,
 }
 
 /// <summary>
@@ -24,9 +27,69 @@ public static class EgressWire
     /// <summary>'EG' — the record magic (little-endian u16).</summary>
     public const ushort Magic = 0x4745;
 
-    public const byte Version = 1;
+    /// <summary>
+    /// The version this encoder emits. v2 added <see cref="EgressStreamKind.Topology"/>.
+    ///
+    /// <para>Adding a stream kind is not backwards compatible in the direction that matters: a v1 decoder
+    /// reads any kind it does not know as a <see cref="EgressStreamKind.Cycle"/> record and would report
+    /// confident nonsense. Bumping the version instead makes an old consumer fail loudly on the first
+    /// record. <see cref="MinSupportedVersion"/> keeps the reverse direction working — a new consumer
+    /// still reads a v1 producer, it just never receives topology and falls back to the node table.</para>
+    /// </summary>
+    public const byte Version = 2;
+
+    /// <summary>The oldest producer version this decoder accepts.</summary>
+    public const byte MinSupportedVersion = 1;
 
     // ---- encode ---------------------------------------------------------------------------------
+
+    /// <summary>Encodes the graph's shape. Cycle index is 0 — topology precedes the first cycle.</summary>
+    public static byte[] EncodeTopology(EgressTopology topology, string runId, uint seq)
+    {
+        ArgumentNullException.ThrowIfNull(topology);
+
+        var body = new ArrayBufferWriter<byte>(1024);
+        WriteHeader(body, EgressStreamKind.Topology, runId, 0, seq);
+        WriteString(body, topology.Name);
+
+        WriteU32(body, (uint)topology.Nodes.Count);
+        foreach (var n in topology.Nodes)
+        {
+            WriteString(body, n.Id);
+            WriteString(body, n.DisplayName);
+            WriteString(body, n.Kind);
+            WriteString(body, n.Category);
+            WriteString(body, n.ModuleId ?? string.Empty);
+            WriteString(body, n.PrimitiveType ?? string.Empty);
+            WriteString(body, n.BuiltinType ?? string.Empty);
+            WritePorts(body, n.Inputs);
+            WritePorts(body, n.Outputs);
+        }
+
+        WriteU32(body, (uint)topology.Edges.Count);
+        foreach (var e in topology.Edges)
+        {
+            WriteString(body, e.Id);
+            WriteString(body, e.Kind);
+            WriteString(body, e.FromNode);
+            WriteString(body, e.FromPort);
+            WriteString(body, e.ToNode);
+            WriteString(body, e.ToPort);
+        }
+
+        return Frame(body.WrittenSpan);
+    }
+
+    private static void WritePorts(IBufferWriter<byte> w, IReadOnlyList<EgressTopologyPort> ports)
+    {
+        WriteU32(w, (uint)ports.Count);
+        foreach (var p in ports)
+        {
+            WriteString(w, p.Name);
+            WriteString(w, p.Channel);
+            WriteString(w, p.DataType);
+        }
+    }
 
     public static byte[] EncodeCycle(PipelineExecutionProgress p, uint seq)
     {
@@ -86,9 +149,10 @@ public static class EgressWire
         }
 
         var version = body[o++];
-        if (version != Version)
+        if (version < MinSupportedVersion || version > Version)
         {
-            throw new InvalidDataException($"Unsupported egress version {version} (expected {Version}).");
+            throw new InvalidDataException(
+                $"Unsupported egress version {version} (this build reads {MinSupportedVersion}..{Version}).");
         }
 
         var kind = (EgressStreamKind)body[o++];
@@ -103,9 +167,18 @@ public static class EgressWire
             RunId = runId,
             CycleIndex = cycleIndex,
             Seq = seq,
+            // Body plus the 4-byte length prefix — what this record cost on the wire. Exposed because any
+            // consumer measuring whether it can keep up needs bytes, and only the decoder knows them.
+            WireBytes = body.Length + 4,
         };
 
-        if (kind == EgressStreamKind.NodeTransition)
+        if (kind == EgressStreamKind.Topology)
+        {
+            // The run id lives in the record header, not the body — restore it so a decoded topology is
+            // self-describing on its own, the way the producer built it.
+            record.Topology = DecodeTopology(body, ref o) with { RunId = runId.ToString("N") };
+        }
+        else if (kind == EgressStreamKind.NodeTransition)
         {
             record.NodeId = ReadString(body, ref o);
             record.Port = ReadString(body, ref o);
@@ -141,6 +214,76 @@ public static class EgressWire
 
         return record;
     }
+
+    private static EgressTopology DecodeTopology(ReadOnlySpan<byte> body, ref int o)
+    {
+        var name = ReadString(body, ref o);
+
+        var nodeCount = (int)ReadU32(body, ref o);
+        var nodes = new List<EgressTopologyNode>(nodeCount);
+        for (var i = 0; i < nodeCount; i++)
+        {
+            var id = ReadString(body, ref o);
+            var displayName = ReadString(body, ref o);
+            var kind = ReadString(body, ref o);
+            var category = ReadString(body, ref o);
+            var moduleId = ReadString(body, ref o);
+            var primitiveType = ReadString(body, ref o);
+            var builtinType = ReadString(body, ref o);
+            var inputs = ReadPorts(body, ref o);
+            var outputs = ReadPorts(body, ref o);
+
+            nodes.Add(new EgressTopologyNode
+            {
+                Id = id,
+                DisplayName = displayName,
+                Kind = kind,
+                Category = category,
+                // The three type slots are mutually exclusive; empty means "not this kind", not "".
+                ModuleId = NullIfEmpty(moduleId),
+                PrimitiveType = NullIfEmpty(primitiveType),
+                BuiltinType = NullIfEmpty(builtinType),
+                Inputs = inputs,
+                Outputs = outputs,
+            });
+        }
+
+        var edgeCount = (int)ReadU32(body, ref o);
+        var edges = new List<EgressTopologyEdge>(edgeCount);
+        for (var i = 0; i < edgeCount; i++)
+        {
+            edges.Add(new EgressTopologyEdge
+            {
+                Id = ReadString(body, ref o),
+                Kind = ReadString(body, ref o),
+                FromNode = ReadString(body, ref o),
+                FromPort = ReadString(body, ref o),
+                ToNode = ReadString(body, ref o),
+                ToPort = ReadString(body, ref o),
+            });
+        }
+
+        return new EgressTopology { Name = name, Nodes = nodes, Edges = edges };
+    }
+
+    private static IReadOnlyList<EgressTopologyPort> ReadPorts(ReadOnlySpan<byte> b, ref int o)
+    {
+        var count = (int)ReadU32(b, ref o);
+        var ports = new List<EgressTopologyPort>(count);
+        for (var i = 0; i < count; i++)
+        {
+            ports.Add(new EgressTopologyPort
+            {
+                Name = ReadString(b, ref o),
+                Channel = ReadString(b, ref o),
+                DataType = ReadString(b, ref o),
+            });
+        }
+
+        return ports;
+    }
+
+    private static string? NullIfEmpty(string s) => s.Length == 0 ? null : s;
 
     // ---- primitives -----------------------------------------------------------------------------
 
@@ -252,6 +395,9 @@ public sealed class DecodedEgressRecord
 
     public uint Seq { get; init; }
 
+    /// <summary>This record's size on the wire, including the 4-byte length prefix.</summary>
+    public int WireBytes { get; init; }
+
     // NodeTransition
     public string NodeId { get; set; } = string.Empty;
 
@@ -278,6 +424,11 @@ public sealed class DecodedEgressRecord
     public PayloadElementType? ElementType { get; set; }
 
     public long[]? PayloadShape { get; set; }
+
+    // Topology
+    /// <summary>The graph's shape when <see cref="Kind"/> is <see cref="EgressStreamKind.Topology"/>, else
+    /// null. A v1 producer never sends one.</summary>
+    public EgressTopology? Topology { get; set; }
 
     // Cycle
     public uint TotalCycles { get; set; }

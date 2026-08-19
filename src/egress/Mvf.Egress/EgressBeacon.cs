@@ -31,6 +31,38 @@ public sealed record EgressBeaconInfo
 
     [JsonPropertyName("status")]
     public string Status { get; init; } = "running";
+
+    /// <summary>
+    /// The interface the stream is actually served on ("127.0.0.1" by default, "0.0.0.0" when opened up).
+    ///
+    /// <para>Without this a consumer cannot tell a reachable edge from an unreachable one. The beacon
+    /// travels by multicast, so it leaves over a real interface and arrives carrying that LAN source
+    /// address even when the stream itself only listens on loopback — following the source address then
+    /// gets a connection refused, and the failure looks like a bug rather than a configuration choice.</para>
+    /// </summary>
+    [JsonPropertyName("bind")]
+    public string Bind { get; init; } = "127.0.0.1";
+
+    /// <summary>
+    /// Where the beacon came from, filled in by the receiver — deliberately <b>not</b> on the wire.
+    ///
+    /// <para>A host cannot reliably name its own reachable address: with several NICs, a container bridge
+    /// or NAT in between, whatever it picks is a guess, and a wrong guess sends viewers to an address that
+    /// answers for someone else. The datagram's source address is the one that demonstrably carried this
+    /// packet to us, so the receiver is the only party that knows it.</para>
+    ///
+    /// <para>Null when the beacon was parsed without a source (e.g. straight from bytes in a test).</para>
+    /// </summary>
+    [JsonIgnore]
+    public string? Address { get; init; }
+
+    /// <summary>True when the stream listens on loopback only — reachable from its own host, nobody else.</summary>
+    [JsonIgnore]
+    public bool IsLoopbackOnly =>
+        Bind is "127.0.0.1" or "localhost" or "::1" || Bind.Length == 0;
+
+    /// <summary>The endpoint a consumer connects to, once <see cref="Address"/> is known.</summary>
+    public string Endpoint => IsLoopbackOnly ? $"127.0.0.1:{Port}" : $"{Address ?? "127.0.0.1"}:{Port}";
 }
 
 /// <summary>

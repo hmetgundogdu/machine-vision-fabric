@@ -32,12 +32,19 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The TUI and the PNG encoder are internal, but they carry logic worth pinning in tests. -->
+    <InternalsVisibleTo Include="Mvf.Engine.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\core\Mvf.Graph\Mvf.Graph.csproj" />
     <ProjectReference Include="..\..\core\Mvf.Abstractions\Mvf.Abstractions.csproj" />
     <ProjectReference Include="..\..\engine\Mvf.Engine\Mvf.Engine.csproj" />
     <ProjectReference Include="..\..\hosting\Mvf.Hosting.Worker\Mvf.Hosting.Worker.csproj" />
     <ProjectReference Include="..\..\transports\Mvf.Transport.SharedMemory\Mvf.Transport.SharedMemory.csproj" />
     <ProjectReference Include="..\..\egress\Mvf.Egress\Mvf.Egress.csproj" />
+    <!-- `mvf watch` is a consumer of the stream, not only a producer of it. -->
+    <ProjectReference Include="..\..\egress\Mvf.Egress.Client\Mvf.Egress.Client.csproj" />
   </ItemGroup>
 
 </Project>

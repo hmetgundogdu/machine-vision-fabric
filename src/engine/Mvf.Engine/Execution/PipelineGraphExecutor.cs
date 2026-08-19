@@ -64,6 +64,11 @@ public sealed class PipelineGraphExecutor(
             return Failure(ex.Message, startedAt);
         }
 
+        // Announce the graph's shape once, after it is known to be sortable, so an observer that attaches
+        // at any point can draw the pipeline rather than infer it from the transitions it happens to catch.
+        // Structure only — never config (see EgressTopology).
+        options.EgressSink?.PublishTopology(EgressTopology.FromDefinition(definition, runId));
+
         // The `loop` primitive is the graph's iteration authority: it owns the termination policy and
         // carries the run's pause state. Every node still runs every cycle, in topological order — the loop
         // is not a region, it is the cycle's owner. A graph with no loop runs until its source exhausts and

@@ -67,6 +67,9 @@ public sealed class PipelinedGraphExecutor(
             return Failure(ex.Message, startedAt);
         }
 
+        // Same as the serial executor: announce the graph's shape once, structure only (see EgressTopology).
+        options.EgressSink?.PublishTopology(EgressTopology.FromDefinition(definition, runId));
+
         var loadedCatalog = moduleCatalog?.Load(options.IntegrationsRoot);
 
         if (DescribeUnsupported(definition, executionOrder, options, loadedCatalog) is { } unsupported)

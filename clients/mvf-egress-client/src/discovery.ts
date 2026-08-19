@@ -15,6 +15,13 @@ export interface EdgeBeacon {
   port: number;
   streams: string;
   status: string;
+  /**
+   * The interface the stream is served on ("127.0.0.1" by default, "0.0.0.0" when opened up).
+   * A beacon travels by multicast and so arrives carrying a real LAN source address even when the stream
+   * itself only listens on loopback; without this a consumer cannot tell a reachable edge from one that
+   * will simply refuse the connection.
+   */
+  bind: string;
 }
 
 /** Parses a beacon datagram; returns null for anything that is not one of ours. Isomorphic (pure JSON). */
@@ -32,6 +39,8 @@ export function parseBeacon(data: Uint8Array): EdgeBeacon | null {
       port: Number(obj.port ?? 0),
       streams: String(obj.streams ?? 'state'),
       status: String(obj.status ?? 'running'),
+      // Older engines do not send it; loopback is what they did.
+      bind: String(obj.bind ?? '127.0.0.1'),
     };
   } catch {
     return null;

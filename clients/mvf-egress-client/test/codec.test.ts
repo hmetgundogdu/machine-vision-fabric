@@ -9,9 +9,11 @@ import {
   encodeCycle,
   encodeNodeTransition,
   encodeNodeTransitionFrame,
+  encodeTopology,
   toTypedArray,
   type CycleRecord,
   type NodeTransitionRecord,
+  type TopologyRecord,
 } from '../src/codec.ts';
 import { FrameSplitter } from '../src/framing.ts';
 
@@ -121,4 +123,83 @@ test('FrameSplitter reassembles records split across chunks', () => {
   assert.equal(second.kind, EgressStreamKind.NodeTransition);
   assert.equal(second.faulted, true);
   assert.equal(second.outputFrameBytes, -1);
+});
+
+test('topology record round-trips with ports and control edges', () => {
+  const frame = encodeTopology({
+    runId: '0123456789abcdef0123456789abcdef',
+    cycleIndex: 0,
+    seq: 0,
+    name: 'inspection-demo',
+    nodes: [
+      {
+        id: 'cam',
+        displayName: 'Camera',
+        kind: 'integration-module',
+        category: 'source',
+        moduleId: 'mvf.folder-source',
+        inputs: [],
+        outputs: [{ name: 'frame', channel: 'data', dataType: 'frame' }],
+      },
+      {
+        id: 'route',
+        displayName: 'Route',
+        kind: 'embedded-primitive',
+        category: 'flow',
+        primitiveType: 'switch',
+        inputs: [{ name: 'class', channel: 'control', dataType: 'class' }],
+        outputs: [],
+      },
+    ],
+    edges: [
+      { id: 'e1', kind: 'control', fromNode: 'cam', fromPort: 'frame', toNode: 'route', toPort: 'class' },
+    ],
+  });
+
+  const decoded = decodeRecord(body(frame));
+  assert.equal(decoded.kind, EgressStreamKind.Topology);
+
+  const topology = decoded as TopologyRecord;
+  assert.equal(topology.name, 'inspection-demo');
+  assert.equal(topology.nodes.length, 2);
+
+  const cam = topology.nodes[0]!;
+  assert.equal(cam.moduleId, 'mvf.folder-source');
+  // The mutually exclusive type slots come back as absent, not as empty strings.
+  assert.equal(cam.primitiveType, undefined);
+  assert.equal(cam.outputs[0]!.channel, 'data');
+
+  // The data/control split is structure and has to survive the wire.
+  assert.equal(topology.nodes[1]!.inputs[0]!.channel, 'control');
+  assert.equal(topology.edges[0]!.kind, 'control');
+});
+
+test('a v1 producer still decodes (it just never sends topology)', () => {
+  const frame = encodeCycle({
+    runId: '0123456789abcdef0123456789abcdef',
+    cycleIndex: 1,
+    seq: 0,
+    totalCycles: 1,
+    acceptedCycles: 1,
+    accepted: true,
+    elapsedMillis: 10,
+  });
+  frame[6] = 1; // version byte: u32 length prefix + u16 magic
+
+  assert.equal(decodeRecord(body(frame)).kind, EgressStreamKind.Cycle);
+});
+
+test('a future version is rejected rather than misread', () => {
+  const frame = encodeCycle({
+    runId: '0123456789abcdef0123456789abcdef',
+    cycleIndex: 0,
+    seq: 0,
+    totalCycles: 0,
+    acceptedCycles: 0,
+    accepted: false,
+    elapsedMillis: 0,
+  });
+  frame[6] = 99;
+
+  assert.throws(() => decodeRecord(body(frame)), /Unsupported egress version 99/);
 });
