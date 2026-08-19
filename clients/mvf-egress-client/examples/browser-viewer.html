@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MVF Egress — browser viewer</title>
+    <style>
+      body { font: 13px/1.5 ui-monospace, monospace; margin: 1.5rem; background: #0b0e14; color: #cdd6f4; }
+      h1 { font-size: 1.1rem; }
+      input, button { font: inherit; padding: 0.3rem 0.5rem; }
+      input { width: 22rem; }
+      #log { margin-top: 1rem; white-space: pre-wrap; }
+      .cycle { color: #89b4fa; }
+      .node { color: #a6e3a1; }
+      .frame { color: #f9e2af; }
+    </style>
+  </head>
+  <body>
+    <h1>MachineVisionFabric — realtime egress (browser)</h1>
+    <p>
+      Start an edge with a WebSocket egress:
+      <code>mvf execute-graph --package packages/loop-demo --egress ws --egress-port 8791</code>
+    </p>
+    <label>ws url <input id="url" value="ws://127.0.0.1:8791/" /></label>
+    <button id="connect">Connect</button>
+    <button id="stop">Stop</button>
+    <div id="log"></div>
+
+    <!-- Needs `npm run build` first (compiles src/ to dist/). Browsers can't run .ts directly. -->
+    <script type="module">
+      import { streamRecordsWs, EgressStreamKind, PayloadMediaType } from '../dist/browser.js';
+
+      const log = document.getElementById('log');
+      let controller = null;
+
+      function line(record) {
+        if (record.kind === EgressStreamKind.Cycle) {
+          return `<span class="cycle">cycle #${record.cycleIndex} accepted=${record.acceptedCycles} elapsed=${record.elapsedMillis}ms</span>`;
+        }
+        const frame = record.hasPayload
+          ? `<span class="frame"> payload=${record.payload?.length ?? 0}B media=${record.payloadInfo?.mediaType ?? '?'} shape=[${record.payloadInfo?.shape.join('x') ?? ''}]</span>`
+          : '';
+        return `<span class="node">node ${record.nodeId}.${record.port} out=${record.hasOutput} bytes=${record.outputFrameBytes}</span>${frame}`;
+      }
+
+      async function connect(url) {
+        controller = new AbortController();
+        log.textContent = '';
+        try {
+          for await (const record of streamRecordsWs(url, { signal: controller.signal })) {
+            log.innerHTML = line(record) + '\n' + log.innerHTML;
+          }
+        } catch (error) {
+          log.innerHTML = `error: ${error}\n` + log.innerHTML;
+        }
+      }
+
+      document.getElementById('connect').onclick = () => connect(document.getElementById('url').value);
+      document.getElementById('stop').onclick = () => controller?.abort();
+    </script>
+  </body>
+</html>

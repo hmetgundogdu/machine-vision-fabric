@@ -37,6 +37,7 @@
     <ProjectReference Include="..\..\engine\Mvf.Engine\Mvf.Engine.csproj" />
     <ProjectReference Include="..\..\hosting\Mvf.Hosting.Worker\Mvf.Hosting.Worker.csproj" />
     <ProjectReference Include="..\..\transports\Mvf.Transport.SharedMemory\Mvf.Transport.SharedMemory.csproj" />
+    <ProjectReference Include="..\..\egress\Mvf.Egress\Mvf.Egress.csproj" />
   </ItemGroup>
 
 </Project>

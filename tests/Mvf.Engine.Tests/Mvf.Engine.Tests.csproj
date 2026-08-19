@@ -25,6 +25,8 @@
     <ProjectReference Include="..\..\src\hosting\Mvf.Hosting.Worker\Mvf.Hosting.Worker.csproj" />
     <ProjectReference Include="..\..\src\transports\Mvf.Transport.SharedMemory\Mvf.Transport.SharedMemory.csproj" />
     <ProjectReference Include="..\..\src\sdk\dotnet\Mvf.Sdk\Mvf.Sdk.csproj" />
+    <ProjectReference Include="..\..\src\egress\Mvf.Egress\Mvf.Egress.csproj" />
+    <ProjectReference Include="..\..\src\egress\Mvf.Egress.Client\Mvf.Egress.Client.csproj" />
   </ItemGroup>
 
 </Project>

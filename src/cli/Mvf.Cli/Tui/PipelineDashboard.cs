@@ -4,6 +4,7 @@ using Mvf.Graph.Execution;
 using Mvf.Graph.Pipelines;
 using Mvf.Graph.Values;
 using Mvf.Abstractions;
+using Mvf.Egress;
 using Spectre.Console;
 using Spectre.Console.Rendering;
 
@@ -66,6 +67,15 @@ public sealed class PipelineDashboard
     private long _hostWorkingSet;
     private double _hostCpuPercent;
 
+    // Realtime egress: the sink + config the run was started with (from PipelineExecutionOptions), read live
+    // for the egress page. Null when --egress is off. The dashboard only reads Stats; it never publishes.
+    private IEgressSink? _egressSink;
+    private EgressOptions? _egressConfig;
+
+    /// <summary>Discovery endpoint (group:port) shown on the egress page, or null when the alive-beacon is off.
+    /// Set by the composition layer since the beacon itself lives outside the dashboard.</summary>
+    public string? EgressDiscovery { get; set; }
+
     public PipelineDashboard(
         IPipelineExecutionHost host,
         PipelineDefinition definition,
@@ -91,6 +101,9 @@ public sealed class PipelineDashboard
         PipelineExecutionOptions options,
         CancellationToken cancellationToken = default)
     {
+        _egressSink = options.EgressSink;
+        _egressConfig = options.Egress;
+
         // The dashboard only adds observation callbacks; `with` carries every other run option through.
         var enriched = options with
         {
@@ -174,6 +187,10 @@ public sealed class PipelineDashboard
 
                 case ConsoleKey.Enter:
                     if (SelectedNodeId is { } nodeId) OpenNodeDetail(nodeId);
+                    break;
+
+                case ConsoleKey.E when _egressSink is not null:
+                    OpenEgressView();
                     break;
             }
 
@@ -415,7 +432,8 @@ public sealed class PipelineDashboard
             $"[aquamarine1]{b}[/][grey46]value[/]";
 
         var pause = _hasLoop ? $" [grey42]{Glyphs.Separator} space:pause[/]" : string.Empty;
-        var controls = $"[grey42]{Glyphs.MoveHint} move {Glyphs.Separator} enter details[/]{pause}";
+        var egress = _egressSink is not null ? $" [grey42]{Glyphs.Separator} e:egress[/]" : string.Empty;
+        var controls = $"[grey42]{Glyphs.MoveHint} move {Glyphs.Separator} enter details[/]{pause}{egress}";
 
         var line = $"{selected}    {legend}    {controls}";
 
@@ -842,6 +860,81 @@ public sealed class PipelineDashboard
                     break;
             }
         }
+    }
+
+    // ── Egress view ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A separate page (like the node detail) for the realtime-egress stream: transport, endpoint, streams,
+    /// discovery and live counters. Read-only — the run keeps going the whole time; the page repaints every
+    /// refresh so the counters stay live. Esc / q / e / left returns to the graph.
+    /// </summary>
+    private void OpenEgressView()
+    {
+        try { Console.CursorVisible = false; } catch { }
+        Console.Clear();
+
+        while (true)
+        {
+            PaintInPlace(BuildEgressView());
+
+            if (!WaitForKey(RefreshMs, out var key)) continue;
+
+            switch (key.Key)
+            {
+                case ConsoleKey.Escape:
+                case ConsoleKey.Q:
+                case ConsoleKey.E:
+                case ConsoleKey.LeftArrow:
+                case ConsoleKey.Backspace:
+                    Console.Clear();
+                    return;
+
+                case ConsoleKey.Spacebar when _hasLoop && _liveValues is not null:
+                    _liveValues.RunControl.Toggle();
+                    break;
+            }
+        }
+    }
+
+    private IRenderable BuildEgressView()
+    {
+        var stats = _egressSink?.Stats ?? default;
+        var cfg = _egressConfig;
+
+        var (transport, endpoint) = cfg?.Transport switch
+        {
+            EgressTransport.WebSocket => ("websocket", $"ws://127.0.0.1:{cfg.Port}/"),
+            EgressTransport.Udp       => ("udp (multicast)", $"{UdpEgressSink.DataGroup}:{cfg.Port}"),
+            _                         => ("tcp", $"127.0.0.1:{cfg?.Port}"),
+        };
+        var streams = cfg is null ? "state" : cfg.Streams.ToString().ToLowerInvariant().Replace(" ", string.Empty);
+        var discovery = EgressDiscovery is { } d ? $"udp://{d}" : "off";
+        var dropped = stats.Dropped > 0 ? $"[gold1]{stats.Dropped}[/]" : "0";
+        var subscribers = cfg?.Transport == EgressTransport.Udp
+            ? "[grey](multicast; no subscriber tracking)[/]"
+            : $"[mediumspringgreen]{stats.Subscribers}[/]";
+
+        var body = new Rows(
+            new Markup($"[grey]transport  [/] [deepskyblue1]{Markup.Escape(transport)}[/]"),
+            new Markup($"[grey]endpoint   [/] {Markup.Escape(endpoint)}"),
+            new Markup($"[grey]streams    [/] {Markup.Escape(streams)}"),
+            new Markup($"[grey]discovery  [/] {Markup.Escape(discovery)}"),
+            new Markup(" "),
+            new Markup($"[grey]subscribers[/] {subscribers}"),
+            new Markup($"[grey]published  [/] {stats.Published}"),
+            new Markup($"[grey]dropped    [/] {dropped}"),
+            new Markup(" "),
+            new Markup($"[grey42]best-effort: a slow or absent consumer drops, it never blocks the run[/]"),
+            new Markup($"[grey42]{Glyphs.Separator} esc back[/]"));
+
+        return new Panel(body)
+        {
+            Header = new PanelHeader("[deepskyblue1] realtime egress [/]"),
+            Border = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("deepskyblue1"),
+            Expand = true,
+        };
     }
 
     /// <summary>Blocks up to <paramref name="withinMs"/> for a keypress. False means the window elapsed.</summary>

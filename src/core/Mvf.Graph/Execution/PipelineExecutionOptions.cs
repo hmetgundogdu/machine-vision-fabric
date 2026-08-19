@@ -97,4 +97,19 @@ public sealed record PipelineExecutionOptions
     /// (dashboard / stderr) instead of being swallowed.
     /// </summary>
     public Action<NodeLogEvent>? OnNodeLog { get; init; }
+
+    /// <summary>
+    /// Declarative realtime-egress config carried on the run (transport / port / streams). Lives here so
+    /// the enable/toggle is part of the run contract in core, not a CLI detail — a future host reads the
+    /// same shape. The engine does not consume this directly; a composition root turns it into
+    /// <see cref="EgressSink"/>. Null = egress off.
+    /// </summary>
+    public EgressOptions? Egress { get; init; }
+
+    /// <summary>
+    /// Optional realtime-egress sink. When set, the executors publish each cycle and node-transition to it
+    /// (beside the observation callbacks), so an external observer can watch the run live. Best-effort and
+    /// off the hot path — the sink never blocks and drops under pressure. Null = no egress.
+    /// </summary>
+    public IEgressSink? EgressSink { get; init; }
 }

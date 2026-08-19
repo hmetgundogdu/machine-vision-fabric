@@ -373,7 +373,7 @@ public sealed class PipelinedGraphExecutor(
                 acquisition = sample;
             }
 
-            options.OnNodeExecuted?.Invoke(new NodeExecutionEvent
+            var nodeEvent = new NodeExecutionEvent
             {
                 RunId = runId,
                 NodeId = node.Id,
@@ -388,7 +388,9 @@ public sealed class PipelinedGraphExecutor(
                 OutputFrameBytes = LargestFrameBytes(result),
                 OutputPortNames = result.HasOutput ? result.All.Select(kvp => kvp.Key).ToList() : [],
                 InputPortNames = inputs.All.Select(kvp => kvp.Key).ToList()
-            });
+            };
+            options.OnNodeExecuted?.Invoke(nodeEvent);
+            EgressPublisher.Publish(options.EgressSink, nodeEvent, result);
 
             return (result, faulted, message);
         }
@@ -446,7 +448,7 @@ public sealed class PipelinedGraphExecutor(
                         await CheckpointCoordinator.CaptureAsync(
                             runners, statelessRunners, lastStates, checkpointStore, Warn, runToken);
                     }
-                    options.OnCycleCompleted?.Invoke(new PipelineExecutionProgress
+                    var cycleProgress = new PipelineExecutionProgress
                     {
                         RunId = runId,
                         CycleIndex = (int)Math.Min(int.MaxValue, cycle - 1),
@@ -454,7 +456,9 @@ public sealed class PipelinedGraphExecutor(
                         AcceptedCycles = Volatile.Read(ref acceptedCycles),
                         CycleAccepted = true,
                         Elapsed = DateTime.UtcNow - startedAt
-                    });
+                    };
+                    options.OnCycleCompleted?.Invoke(cycleProgress);
+                    options.EgressSink?.PublishCycle(cycleProgress);
                 }
             }
             finally

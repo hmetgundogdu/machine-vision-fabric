@@ -1,0 +1,31 @@
+{
+  "name": "mvf-egress-client",
+  "version": "0.1.0",
+  "description": "Consumer SDK for MachineVisionFabric realtime egress — decode a live pipeline's frame-state / frame-data stream in Node or the browser.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "keywords": ["machine-vision", "edge", "pipeline", "egress", "observability"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
+    }
+  },
+  "files": ["dist", "src", "README.md"],
+  "engines": { "node": ">=22.6" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test 'test/*.test.ts'",
+    "viewer": "node --experimental-strip-types bin/viewer.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

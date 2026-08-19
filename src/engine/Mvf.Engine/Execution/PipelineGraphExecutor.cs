@@ -489,7 +489,7 @@ public sealed class PipelineGraphExecutor(
                     }
 
                     var workerSnap = workerMetricsByNode.GetValueOrDefault(node.Id);
-                    options.OnNodeExecuted?.Invoke(new NodeExecutionEvent
+                    var nodeEvent = new NodeExecutionEvent
                     {
                         RunId = runId,
                         NodeId = node.Id,
@@ -506,7 +506,9 @@ public sealed class PipelineGraphExecutor(
                             ? result.All.Select(kvp => kvp.Key).ToList()
                             : [],
                         InputPortNames = inputs.All.Select(kvp => kvp.Key).ToList()
-                    });
+                    };
+                    options.OnNodeExecuted?.Invoke(nodeEvent);
+                    EgressPublisher.Publish(options.EgressSink, nodeEvent, result);
 
                     if (IsSourceNode(node))
                     {
@@ -588,7 +590,7 @@ public sealed class PipelineGraphExecutor(
                     break;
                 }
 
-                options.OnCycleCompleted?.Invoke(new PipelineExecutionProgress
+                var cycleProgress = new PipelineExecutionProgress
                 {
                     RunId = runId,
                     CycleIndex = totalCycles - 1,
@@ -596,7 +598,9 @@ public sealed class PipelineGraphExecutor(
                     AcceptedCycles = acceptedCycles,
                     CycleAccepted = cycleHadSinkOutput,
                     Elapsed = DateTime.UtcNow - startedAt
-                });
+                };
+                options.OnCycleCompleted?.Invoke(cycleProgress);
+                options.EgressSink?.PublishCycle(cycleProgress);
 
                 // Cycle boundary: the engine is quiesced, so this is a torn-free point to snapshot
                 // stateful workers. A supervised worker caches the capture to recover with on a crash.

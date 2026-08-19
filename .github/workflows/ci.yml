@@ -37,6 +37,18 @@ jobs:
       - run: python -m pip install --upgrade pip build
       - run: python -m build src/sdk/python
 
+  egress-client-ts:
+    name: Egress client (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Codec/framing tests run via Node's built-in test runner + type stripping — no install needed.
+      - run: npm test
+        working-directory: clients/mvf-egress-client
+
   cpp-sdk:
     name: C++ SDK (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -1,0 +1,108 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Runtime.CompilerServices;
+
+namespace Mvf.Egress.Client;
+
+/// <summary>
+/// The .NET consumer side of realtime egress: connect to an edge over TCP or UDP and decode the live
+/// stream, and discover streaming edges via the alive-beacon. The wire codec is shared with the producer
+/// (<c>Mvf.Egress</c>), so this never re-implements the format.
+/// </summary>
+public static class EgressClient
+{
+    /// <summary>Connects to a TCP egress server and yields records until the server closes or cancellation.</summary>
+    public static async IAsyncEnumerable<DecodedEgressRecord> StreamTcpAsync(
+        string host, int port, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        using var client = new TcpClient();
+        await client.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
+        var reader = new EgressStreamReader(client.GetStream());
+
+        while (true)
+        {
+            DecodedEgressRecord? record;
+            try
+            {
+                record = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException or SocketException)
+            {
+                yield break;
+            }
+
+            if (record is null)
+            {
+                yield break;
+            }
+
+            yield return record;
+        }
+    }
+
+    /// <summary>Joins the UDP state multicast group and yields each datagram's record (state-only stream).</summary>
+    public static async IAsyncEnumerable<DecodedEgressRecord> StreamUdpAsync(
+        int port, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        using var udp = new UdpClient();
+        udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        udp.Client.Bind(new IPEndPoint(IPAddress.Any, port));
+        udp.JoinMulticastGroup(IPAddress.Parse(UdpEgressSink.DataGroup));
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            UdpReceiveResult datagram;
+            try
+            {
+                datagram = await udp.ReceiveAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or SocketException or ObjectDisposedException)
+            {
+                yield break;
+            }
+
+            DecodedEgressRecord? record = null;
+            try
+            {
+                record = EgressWire.Decode(datagram.Buffer);
+            }
+            catch (InvalidDataException)
+            {
+                // not one of our datagrams — skip
+            }
+
+            if (record is not null)
+            {
+                yield return record;
+            }
+        }
+    }
+
+    /// <summary>Listens on the discovery multicast group and yields alive-beacons as they arrive.</summary>
+    public static async IAsyncEnumerable<EgressBeaconInfo> DiscoverAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        using var udp = new UdpClient();
+        udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        udp.Client.Bind(new IPEndPoint(IPAddress.Any, EgressBeacon.DiscoveryPort));
+        udp.JoinMulticastGroup(IPAddress.Parse(EgressBeacon.MulticastGroup));
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            UdpReceiveResult datagram;
+            try
+            {
+                datagram = await udp.ReceiveAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or SocketException or ObjectDisposedException)
+            {
+                yield break;
+            }
+
+            if (EgressBeacon.TryParse(datagram.Buffer, out var info))
+            {
+                yield return info;
+            }
+        }
+    }
+}

@@ -12,6 +12,10 @@
   <Folder Name="/src/transports/">
     <Project Path="src/transports/Mvf.Transport.SharedMemory/Mvf.Transport.SharedMemory.csproj" />
   </Folder>
+  <Folder Name="/src/egress/">
+    <Project Path="src/egress/Mvf.Egress/Mvf.Egress.csproj" />
+    <Project Path="src/egress/Mvf.Egress.Client/Mvf.Egress.Client.csproj" />
+  </Folder>
   <Folder Name="/src/sdk/">
     <Project Path="src/sdk/dotnet/Mvf.Sdk/Mvf.Sdk.csproj" />
   </Folder>

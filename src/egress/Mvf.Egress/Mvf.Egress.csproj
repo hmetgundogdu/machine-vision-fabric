@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- The realtime-egress adapter: wire codec + transports (TCP now; UDP/WebSocket + discovery later).
+       Lives behind the IEgressSink seam in Mvf.Graph; the core/engine never reference this project. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\core\Mvf.Abstractions\Mvf.Abstractions.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Mvf.Engine.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

@@ -21,6 +21,7 @@ using Mvf.Engine.Modules;
 using Mvf.Engine.Pipelines;
 using Mvf.Engine.Plugins;
 using Mvf.Transport.SharedMemory;
+using Mvf.Egress;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -424,6 +425,94 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
         Console.WriteLine($"Saved {bindingResult.PromptedCount} binding(s) to {bindingsPath}");
     }
 
+    // Realtime egress (optional, best-effort, off the hot path — the Telemetry Rule). --egress turns it
+    // on; the sink is composed here in the CLI layer and handed to the engine through the IEgressSink seam,
+    // so the core/engine never reference a socket. When on, an alive-beacon also announces the stream on
+    // the LAN so a viewer can auto-discover it (--no-egress-discovery opts out).
+    IEgressSink? egressSink = null;
+    EgressBeacon? egressBeacon = null;
+    if (invocation.Options.TryGetValue("egress", out var egressTransportArg))
+    {
+        var transport = egressTransportArg?.ToLowerInvariant() switch
+        {
+            "ws" or "websocket" => EgressTransport.WebSocket,
+            "udp" => EgressTransport.Udp,
+            _ => EgressTransport.Tcp,
+        };
+
+        var egressPort = invocation.Options.TryGetValue("egress-port", out var epv) && int.TryParse(epv, out var ep)
+            ? ep
+            : EgressOptions.DefaultPort;
+
+        var streams = EgressStreams.State;
+        if (invocation.Options.TryGetValue("egress-streams", out var esv) && esv is { Length: > 0 })
+        {
+            streams = EgressStreams.None;
+            foreach (var part in esv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (part.Equals("state", StringComparison.OrdinalIgnoreCase)) streams |= EgressStreams.State;
+                else if (part.Equals("frame", StringComparison.OrdinalIgnoreCase)) streams |= EgressStreams.Frame;
+            }
+
+            if (streams == EgressStreams.None) streams = EgressStreams.State;
+        }
+
+        int boundPort;
+        string transportLabel;
+        switch (transport)
+        {
+            case EgressTransport.WebSocket:
+                var wsSink = new WebSocketEgressSink(egressPort, streams);
+                egressSink = wsSink;
+                boundPort = wsSink.Port;
+                transportLabel = "ws";
+                Console.WriteLine($"Egress: ws on ws://127.0.0.1:{boundPort} (streams: {streams})");
+                break;
+            case EgressTransport.Udp:
+                var udpSink = new UdpEgressSink(egressPort);
+                egressSink = udpSink;
+                boundPort = udpSink.Port;
+                transportLabel = "udp";
+                if ((streams & EgressStreams.Frame) != 0)
+                {
+                    Console.Error.WriteLine("Egress udp is state-only (frame-data exceeds MTU); streaming state.");
+                }
+
+                Console.WriteLine($"Egress: udp on {UdpEgressSink.DataGroup}:{boundPort} (streams: state)");
+                break;
+            default:
+                var tcpSink = new TcpServerEgressSink(egressPort, streams);
+                egressSink = tcpSink;
+                boundPort = tcpSink.Port;
+                transportLabel = "tcp";
+                Console.WriteLine($"Egress: tcp on 127.0.0.1:{boundPort} (streams: {streams})");
+                break;
+        }
+
+        options = options with
+        {
+            Egress = new EgressOptions { Enabled = true, Transport = transport, Port = boundPort, Streams = streams },
+            EgressSink = egressSink,
+        };
+
+        if (!invocation.Options.ContainsKey("no-egress-discovery"))
+        {
+            egressBeacon = new EgressBeacon(new EgressBeaconInfo
+            {
+                EdgeId = Environment.MachineName,
+                Pipeline = definition.Name,
+                Transport = transportLabel,
+                Port = boundPort,
+                Streams = streams.ToString().ToLowerInvariant().Replace(" ", string.Empty),
+                Status = "running",
+            });
+            Console.WriteLine($"Egress discovery: beacon on udp://{EgressBeacon.MulticastGroup}:{EgressBeacon.DiscoveryPort}");
+        }
+    }
+
+    using var egressSinkScope = egressSink;
+    using var egressBeaconScope = egressBeacon;
+
     var noTui = invocation.Options.ContainsKey("no-tui") || !AnsiConsole.Profile.Capabilities.Ansi;
 
     if (noTui)
@@ -457,7 +546,12 @@ async Task ExecuteGraphAsync(CliInvocation invocation)
 
     var tuiHost = host.Services.GetRequiredService<IPipelineExecutionHost>();
     await using var _2 = tuiHost;
-    var dashboard = new PipelineDashboard(tuiHost, definition, liveValues);
+    var dashboard = new PipelineDashboard(tuiHost, definition, liveValues)
+    {
+        EgressDiscovery = egressBeacon is not null
+            ? $"{EgressBeacon.MulticastGroup}:{EgressBeacon.DiscoveryPort}"
+            : null,
+    };
     var dashReport = await dashboard.RunAsync(options);
 
     // The dashboard is transient (it repaints in place); print the summary so the run leaves a record
@@ -690,7 +784,7 @@ void PrintHelp()
 {
     Console.WriteLine("Mvf.Cli");
     Console.WriteLine("Commands:");
-    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--arena-slots <n>] [--on-source-error fail|restart] [--source-restart-limit <n>] [--source-backoff-ms <n>] [--no-tui] [--no-prompt]");
+    Console.WriteLine("  execute-graph [--path <pipeline.json>] [--package <path>] [--integrations-root <path>] [--max-cycles <n>] [--checkpoint-every <n>] [--resume-dir <path>] [--backpressure stall|drop] [--mode serial|pipelined] [--queue <n>] [--arena-slots <n>] [--on-source-error fail|restart] [--source-restart-limit <n>] [--source-backoff-ms <n>] [--egress tcp|ws|udp] [--egress-port <n>] [--egress-streams state|frame|state,frame] [--no-egress-discovery] [--no-tui] [--no-prompt]");
     Console.WriteLine("      --on-source-error: on a source (camera/stream) failure — restart (hard-restart the node, default) or fail (end the run at once). --source-restart-limit caps restarts (0 = forever, default).");
     Console.WriteLine("      --no-prompt never asks an operator for a value/select binding; an unresolved one fails the run.");
     Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");

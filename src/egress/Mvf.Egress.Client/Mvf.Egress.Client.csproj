@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- .NET consumer SDK for realtime egress: connect to an edge (TCP / UDP), decode the stream, and
+       discover streaming edges via the alive-beacon. Shares the wire codec with the producer (Mvf.Egress). -->
+  <ItemGroup>
+    <ProjectReference Include="..\Mvf.Egress\Mvf.Egress.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Mvf.Engine.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>
