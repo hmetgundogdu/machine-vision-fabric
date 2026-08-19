@@ -3,7 +3,17 @@
 // Pure DataView / TypedArray: no Node built-ins, so this file runs unchanged in a browser.
 
 export const EGRESS_MAGIC = 0x4745; // 'EG'
-export const EGRESS_VERSION = 1;
+
+/**
+ * The version this codec emits. v2 added the topology record.
+ *
+ * Adding a stream kind is not backwards compatible in the direction that matters: a v1 decoder reads an
+ * unknown kind as a Cycle record and reports confident nonsense, so the version moves with it.
+ */
+export const EGRESS_VERSION = 2;
+
+/** The oldest producer this decoder accepts — a v1 engine simply never sends topology. */
+export const EGRESS_MIN_VERSION = 1;
 
 // PayloadDescriptor header (mirrors Mvf.Abstractions.PayloadDescriptor): fixed 192-byte little-endian.
 const DESCRIPTOR_SIZE = 192;
@@ -37,6 +47,8 @@ export interface PayloadInfo {
 export const EgressStreamKind = {
   Cycle: 0,
   NodeTransition: 1,
+  /** The graph's shape, sent once per run and replayed to each new subscriber (wire v2+). */
+  Topology: 2,
 } as const;
 
 export type EgressStreamKind = (typeof EgressStreamKind)[keyof typeof EgressStreamKind];
@@ -71,7 +83,53 @@ export interface NodeTransitionRecord {
   payload?: Uint8Array;
 }
 
-export type EgressRecord = CycleRecord | NodeTransitionRecord;
+/** A port on a topology node; the data/control split is structure, so it travels with it. */
+export interface TopologyPort {
+  name: string;
+  /** 'data' | 'control'. */
+  channel: string;
+  dataType: string;
+}
+
+export interface TopologyNode {
+  id: string;
+  displayName: string;
+  /** integration-module | embedded-primitive | runtime-builtin. */
+  kind: string;
+  /** source | compute | classify | flow | sink | value. */
+  category: string;
+  moduleId?: string;
+  primitiveType?: string;
+  builtinType?: string;
+  inputs: TopologyPort[];
+  outputs: TopologyPort[];
+}
+
+export interface TopologyEdge {
+  id: string;
+  /** 'data' | 'control'. */
+  kind: string;
+  fromNode: string;
+  fromPort: string;
+  toNode: string;
+  toPort: string;
+}
+
+/**
+ * The running graph's shape. Structure only — node config never travels, because this stream is announced
+ * on the LAN and served to whoever attaches.
+ */
+export interface TopologyRecord {
+  kind: typeof EgressStreamKind.Topology;
+  runId: string;
+  cycleIndex: number;
+  seq: number;
+  name: string;
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
+}
+
+export type EgressRecord = CycleRecord | NodeTransitionRecord | TopologyRecord;
 
 const textDecoder = new TextDecoder();
 const textEncoder = new TextEncoder();
@@ -89,8 +147,10 @@ export function decodeRecord(body: Uint8Array): EgressRecord {
 
   const version = view.getUint8(o);
   o += 1;
-  if (version !== EGRESS_VERSION) {
-    throw new Error(`Unsupported egress version ${version} (expected ${EGRESS_VERSION}).`);
+  if (version < EGRESS_MIN_VERSION || version > EGRESS_VERSION) {
+    throw new Error(
+      `Unsupported egress version ${version} (this build reads ${EGRESS_MIN_VERSION}..${EGRESS_VERSION}).`,
+    );
   }
 
   const kind = view.getUint8(o) as EgressStreamKind;
@@ -101,6 +161,51 @@ export function decodeRecord(body: Uint8Array): EgressRecord {
   o += 4;
   const seq = view.getUint32(o, true);
   o += 4;
+
+  if (kind === EgressStreamKind.Topology) {
+    const name = readString();
+
+    const nodeCount = view.getUint32(o, true);
+    o += 4;
+    const nodes: TopologyNode[] = [];
+    for (let i = 0; i < nodeCount; i++) {
+      const id = readString();
+      const displayName = readString();
+      const nodeKind = readString();
+      const category = readString();
+      const moduleId = readString();
+      const primitiveType = readString();
+      const builtinType = readString();
+      nodes.push({
+        id,
+        displayName,
+        kind: nodeKind,
+        category,
+        // The three type slots are mutually exclusive; empty means "not this kind", not "".
+        moduleId: moduleId || undefined,
+        primitiveType: primitiveType || undefined,
+        builtinType: builtinType || undefined,
+        inputs: readPorts(),
+        outputs: readPorts(),
+      });
+    }
+
+    const edgeCount = view.getUint32(o, true);
+    o += 4;
+    const edges: TopologyEdge[] = [];
+    for (let i = 0; i < edgeCount; i++) {
+      edges.push({
+        id: readString(),
+        kind: readString(),
+        fromNode: readString(),
+        fromPort: readString(),
+        toNode: readString(),
+        toPort: readString(),
+      });
+    }
+
+    return { kind: EgressStreamKind.Topology, runId, cycleIndex, seq, name, nodes, edges };
+  }
 
   if (kind === EgressStreamKind.NodeTransition) {
     const nodeId = readString();
@@ -167,6 +272,16 @@ export function decodeRecord(body: Uint8Array): EgressRecord {
     o += length;
     return textDecoder.decode(slice);
   }
+
+  function readPorts(): TopologyPort[] {
+    const count = view.getUint32(o, true);
+    o += 4;
+    const ports: TopologyPort[] = [];
+    for (let i = 0; i < count; i++) {
+      ports.push({ name: readString(), channel: readString(), dataType: readString() });
+    }
+    return ports;
+  }
 }
 
 // ---- encoding (symmetry + tests; the browser SDK only ever decodes) ----------------------------
@@ -179,6 +294,47 @@ export function encodeCycle(record: Omit<CycleRecord, 'kind'>): Uint8Array {
   w.u8(record.accepted ? 1 : 0);
   w.i64(BigInt(Math.trunc(record.elapsedMillis)));
   return w.frame();
+}
+
+/** Encoder for the topology record — symmetry with the decoder, and what the round-trip test drives. */
+export function encodeTopology(record: Omit<TopologyRecord, 'kind'>): Uint8Array {
+  const w = new Writer();
+  writeHeader(w, EgressStreamKind.Topology, record.runId, record.cycleIndex, record.seq);
+  w.str(record.name);
+
+  w.u32(record.nodes.length);
+  for (const n of record.nodes) {
+    w.str(n.id);
+    w.str(n.displayName);
+    w.str(n.kind);
+    w.str(n.category);
+    w.str(n.moduleId ?? '');
+    w.str(n.primitiveType ?? '');
+    w.str(n.builtinType ?? '');
+    writePorts(w, n.inputs);
+    writePorts(w, n.outputs);
+  }
+
+  w.u32(record.edges.length);
+  for (const e of record.edges) {
+    w.str(e.id);
+    w.str(e.kind);
+    w.str(e.fromNode);
+    w.str(e.fromPort);
+    w.str(e.toNode);
+    w.str(e.toPort);
+  }
+
+  return w.frame();
+}
+
+function writePorts(w: Writer, ports: TopologyPort[]): void {
+  w.u32(ports.length);
+  for (const p of ports) {
+    w.str(p.name);
+    w.str(p.channel);
+    w.str(p.dataType);
+  }
 }
 
 export function encodeNodeTransition(record: Omit<NodeTransitionRecord, 'kind'>): Uint8Array {
