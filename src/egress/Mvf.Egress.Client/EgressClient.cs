@@ -98,7 +98,7 @@ public static class EgressClient
         int port, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         using var udp = new UdpClient();
-        udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        ShareThePort(udp);
         udp.Client.Bind(new IPEndPoint(IPAddress.Any, port));
         udp.JoinMulticastGroup(IPAddress.Parse(UdpEgressSink.DataGroup));
 
@@ -131,12 +131,35 @@ public static class EgressClient
         }
     }
 
+    /// <summary>
+    /// Lets several consumers share one multicast port — two viewers on a machine, or a viewer beside a
+    /// browser relay, is the normal case, not a conflict.
+    ///
+    /// <para><c>ReuseAddress</c> alone is not enough on Windows: .NET sets <c>ExclusiveAddressUse</c> on a
+    /// <see cref="UdpClient"/> there, and a port already held exclusively fails the second bind with
+    /// WSAEACCES — reported as <b>access denied</b>, which sends everyone looking for a permissions problem
+    /// that elevation cannot fix. Both flags must be cleared, and before the bind.</para>
+    /// </summary>
+    private static void ShareThePort(UdpClient udp)
+    {
+        try
+        {
+            udp.ExclusiveAddressUse = false;
+        }
+        catch (SocketException)
+        {
+            // Not supported on this platform/socket state — ReuseAddress below still covers the common case.
+        }
+
+        udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+    }
+
     /// <summary>Listens on the discovery multicast group and yields alive-beacons as they arrive.</summary>
     public static async IAsyncEnumerable<EgressBeaconInfo> DiscoverAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         using var udp = new UdpClient();
-        udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        ShareThePort(udp);
         udp.Client.Bind(new IPEndPoint(IPAddress.Any, EgressBeacon.DiscoveryPort));
         udp.JoinMulticastGroup(IPAddress.Parse(EgressBeacon.MulticastGroup));
 

@@ -1,3 +1,4 @@
+using System.Net.Sockets;
 using Mvf.Abstractions;
 using Mvf.Cli.Imaging;
 using Mvf.Egress;
@@ -40,6 +41,9 @@ internal sealed class WatchDashboard
     private IReadOnlyList<EgressBeaconInfo> _edges = [];
     private int _cursor;
     private string? _unreachable;
+
+    /// <summary>Why discovery is not running, when it failed to start. Null while it is healthy.</summary>
+    private volatile string? _discoveryError;
 
     /// <summary>
     /// The watch page's node cursor: an index into the graph's traversal order (or into the observed rows
@@ -196,6 +200,16 @@ internal sealed class WatchDashboard
             }
         }
         catch (OperationCanceledException) { }
+        catch (SocketException ex)
+        {
+            // Losing the beacon listener used to be silent: the task faulted, nobody observed it until
+            // shutdown, and the page sat on "listening..." forever while the real reason (a port this
+            // machine will not hand out) went unsaid. It belongs on screen.
+            _discoveryError =
+                $"cannot listen for beacons on udp {EgressBeacon.DiscoveryPort} - {ex.Message}. " +
+                "Another viewer may already hold it, or the port may be reserved on this machine " +
+                "(on Windows: netsh int ipv4 show excludedportrange protocol=udp).";
+        }
     }
 
     private static ConsoleKey? ReadKeyCore()
@@ -250,9 +264,12 @@ internal sealed class WatchDashboard
                 StatusMarkup(e.Status));
         }
 
-        var hint = _unreachable is { Length: > 0 } u
-            ? $"[gold1]{Glyphs.Invalid} {Markup.Escape(u)}[/]"
-            : $"[grey42]{Glyphs.FieldUpDown} select {Glyphs.Separator} enter watch {Glyphs.Separator} q quit[/]";
+        var hint = (_discoveryError, _unreachable) switch
+        {
+            ({ Length: > 0 } failure, _) => $"[red1]{Glyphs.Invalid} {Markup.Escape(failure)}[/]",
+            (_, { Length: > 0 } unreachable) => $"[gold1]{Glyphs.Invalid} {Markup.Escape(unreachable)}[/]",
+            _ => $"[grey42]{Glyphs.FieldUpDown} select {Glyphs.Separator} enter watch {Glyphs.Separator} q quit[/]",
+        };
         var header = $"[deepskyblue1]mvf watch[/] [grey42]{Glyphs.Separator}[/] discovery " +
                      $"[grey42]{Glyphs.Separator} beacon {EgressBeacon.MulticastGroup}:{EgressBeacon.DiscoveryPort} " +
                      $"{Glyphs.Separator} {edges.Count} live[/]";
