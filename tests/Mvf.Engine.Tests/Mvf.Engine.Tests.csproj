@@ -29,6 +29,8 @@
     <ProjectReference Include="..\..\src\egress\Mvf.Egress.Client\Mvf.Egress.Client.csproj" />
     <!-- The CLI carries hand-rolled logic worth pinning (the PNG encoder); referencing it keeps that testable. -->
     <ProjectReference Include="..\..\src\cli\Mvf.Cli\Mvf.Cli.csproj" />
+    <!-- The synthetic camera is a test fixture as much as a module: the only source producing real pixels. -->
+    <ProjectReference Include="..\..\modules\MachineVisionFabric.Integrations.SyntheticCamera\MachineVisionFabric.Integrations.SyntheticCamera.csproj" />
   </ItemGroup>
 
 </Project>

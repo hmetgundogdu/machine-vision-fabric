@@ -97,12 +97,56 @@ internal static class EgressPublisher
             }
         }
 
+        // A frame that knows its own shape (a synthetic camera, a source that produces real images) is
+        // taken at its word — but only when the shape actually accounts for the bytes, so a stale or wrong
+        // descriptor cannot make a consumer read past the payload.
+        if (frame.Descriptor is { } declared && DescribesExactly(declared, length))
+        {
+            return declared;
+        }
+
         // Otherwise synthesize a byte-blob (or image) descriptor so the consumer still gets typed metadata.
         var media = frame.ContentType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true
             ? PayloadMediaType.Image
             : PayloadMediaType.Blob;
         return new PayloadDescriptor(media, PayloadElementType.UInt8, new long[] { length });
     }
+
+    /// <summary>True when the descriptor's element count x element size is exactly the payload size.</summary>
+    private static bool DescribesExactly(PayloadDescriptor descriptor, int length)
+    {
+        if (descriptor.Shape is not { Length: > 0 } shape)
+        {
+            return false;
+        }
+
+        var elements = 1L;
+        foreach (var dimension in shape)
+        {
+            if (dimension <= 0)
+            {
+                return false;
+            }
+
+            elements *= dimension;
+            if (elements > length)
+            {
+                return false; // overflow-safe: bail the moment it cannot fit
+            }
+        }
+
+        return elements * ElementSize(descriptor.ElementType) == length;
+    }
+
+    private static int ElementSize(PayloadElementType type) => type switch
+    {
+        PayloadElementType.UInt8 or PayloadElementType.Int8 => 1,
+        PayloadElementType.UInt16 or PayloadElementType.Int16
+            or PayloadElementType.Float16 or PayloadElementType.BFloat16 => 2,
+        PayloadElementType.UInt32 or PayloadElementType.Int32 or PayloadElementType.Float32 => 4,
+        PayloadElementType.UInt64 or PayloadElementType.Int64 or PayloadElementType.Float64 => 8,
+        _ => 0,
+    };
 
     private static void ReadExact(Stream stream, byte[] buffer)
     {

@@ -1,0 +1,41 @@
+{
+  "name": "belt-sim-demo",
+  "version": "1.0.0",
+  "description": "A hardware-free camera that produces real 8-bit grayscale images: parts crossing a conveyor belt, every third one defective. Unlike the file-replay simulators, its frames carry a typed 2-D shape, so consumers see pixels rather than an opaque blob — run it with --egress to inspect a real image in `mvf watch`.",
+  "nodes": [
+    {
+      "id": "cycle",
+      "primitive": "loop",
+      "displayName": "Loop",
+      "config": { "mode": "forever" }
+    },
+    {
+      "id": "cam",
+      "module": "mvf.synthetic-camera",
+      "displayName": "Belt Camera",
+      "config": {
+        "width": 320,
+        "height": 240,
+        "frameIntervalMs": 200,
+        "framesPerPart": 12,
+        "defectEveryNthPart": 3
+      },
+      "bindings": {
+        "frameIntervalMs": {
+          "type": "int",
+          "binding": "cam.interval",
+          "schema": { "type": "integer", "minimum": 0, "maximum": 5000 }
+        }
+      }
+    },
+    {
+      "id": "save",
+      "module": "mvf.dataset-writer",
+      "displayName": "Save Frames",
+      "config": { "outputRoot": "out/frames", "sessionPrefix": "belt" }
+    }
+  ],
+  "edges": [
+    { "from": "cam.frame", "to": "save.frame" }
+  ]
+}

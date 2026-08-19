@@ -95,6 +95,7 @@ $integrations = @(
     @{ Project = "modules/MachineVisionFabric.Integrations.BlackScreenCheck/MachineVisionFabric.Integrations.BlackScreenCheck.csproj"; Id = "mvf.black-screen-check" },
     @{ Project = "modules/MachineVisionFabric.Integrations.DatasetWriter/MachineVisionFabric.Integrations.DatasetWriter.csproj";       Id = "mvf.dataset-writer" },
     @{ Project = "modules/MachineVisionFabric.Integrations.FolderSource/MachineVisionFabric.Integrations.FolderSource.csproj";         Id = "mvf.folder-source" },
+    @{ Project = "modules/MachineVisionFabric.Integrations.SyntheticCamera/MachineVisionFabric.Integrations.SyntheticCamera.csproj";   Id = "mvf.synthetic-camera" },
     @{ Project = "modules/dotnet-brightness-gate/Mvf.Example.BrightnessGate.csproj";                                                  Id = "mvf.example-brightness-gate" }
 )
 
