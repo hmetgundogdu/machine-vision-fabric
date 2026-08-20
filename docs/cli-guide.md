@@ -338,6 +338,26 @@ Without it, a loopback-only run still *appears* in another machine's discovery l
 multicast) but cannot be attached to — `watch` says so, and names the flag, instead of failing with a
 connection error.
 
+### Reaching a run discovery cannot see
+
+The alive-beacon is UDP multicast, and plenty of networks route unicast between two segments while never
+routing multicast between them at all — a VLAN boundary commonly does exactly this. The data port itself
+being reachable is a separate fact from the beacon crossing that boundary, and in that shape of network the
+first is true while the second is not: `execute-graph --egress-bind 0.0.0.0` makes the stream reachable, but
+the discovery list on the other side stays empty regardless.
+
+`--host` skips discovery entirely and attaches straight to a known address:
+
+```bash
+mvf watch --host 10.0.4.12 --port 8090
+```
+
+`--port` defaults to 8791 (matching `--egress-port`'s own default), `--transport` to `ws`. Set `--transport`
+to match whatever `--egress` the run was started with (`tcp`, `ws`, or `udp`) — there is no beacon here to
+read it from, so it has to be told. Everything past that point — the graph, the node table, node detail,
+`s` to save a frame — is identical to attaching from the discovery list; only how the address was found
+differs.
+
 ### What travels, and what does not
 
 The stream carries execution state, the graph's **structure**, and — only when you ask for

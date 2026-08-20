@@ -62,7 +62,7 @@ switch (invocation.Command)
         await ExecuteGraphAsync(invocation);
         break;
     case "watch":
-        await WatchAsync();
+        await WatchAsync(invocation);
         break;
     default:
         Console.Error.WriteLine($"Unknown command '{invocation.Command}'.");
@@ -808,10 +808,16 @@ static string? FindRepositoryRoot(string startDirectory)
 }
 
 /// <summary>
-/// The observer. Discovers the pipelines streaming on this network via the alive-beacon and watches one
-/// live. Read-only: it opens a consumer connection and decodes, and has no path back into any run.
+/// The observer. By default, discovers the pipelines streaming on this network via the alive-beacon and
+/// watches one live. Read-only: it opens a consumer connection and decodes, and has no path back into any
+/// run.
+///
+/// <para><c>--host</c> bypasses discovery entirely and attaches straight to a known address — for when the
+/// alive-beacon's UDP multicast does not reach here even though the data port does (a VLAN/subnet boundary
+/// commonly routes unicast but not multicast, so this is not a rare case), or simply when the operator
+/// already knows where to look.</para>
 /// </summary>
-async Task WatchAsync()
+async Task WatchAsync(CliInvocation invocation)
 {
     using var cts = new CancellationTokenSource();
     ConsoleCancelEventHandler onCancel = (_, e) =>
@@ -823,7 +829,25 @@ async Task WatchAsync()
     Console.CancelKeyPress += onCancel;
     try
     {
-        await new WatchDashboard().RunAsync(cts.Token);
+        WatchDashboard.DirectTarget? direct = null;
+        if (invocation.Options.TryGetValue("host", out var host) && host is { Length: > 0 })
+        {
+            var port = invocation.Options.TryGetValue("port", out var portArg) && int.TryParse(portArg, out var p)
+                ? p
+                : EgressOptions.DefaultPort;
+            var transport = invocation.Options.TryGetValue("transport", out var transportArg) && transportArg is { Length: > 0 }
+                ? transportArg
+                : "ws";
+            direct = new WatchDashboard.DirectTarget(host, port, transport);
+        }
+        else if (invocation.Options.ContainsKey("port") || invocation.Options.ContainsKey("transport"))
+        {
+            Console.Error.WriteLine("watch: --port/--transport only apply together with --host.");
+            Environment.ExitCode = 1;
+            return;
+        }
+
+        await new WatchDashboard().RunAsync(cts.Token, direct);
     }
     finally
     {
@@ -847,8 +871,9 @@ void PrintHelp()
     Console.WriteLine("      --on-source-error: on a source (camera/stream) failure — restart (hard-restart the node, default) or fail (end the run at once). --source-restart-limit caps restarts (0 = forever, default).");
     Console.WriteLine("      --no-prompt never asks an operator for a value/select binding; an unresolved one fails the run.");
     Console.WriteLine("      --egress-bind <addr>: which interface the egress server listens on (default 127.0.0.1). Use 0.0.0.0 to let `mvf watch` attach from another machine — the stream is unauthenticated, so this is opt-in.");
-    Console.WriteLine("  watch");
+    Console.WriteLine("  watch [--host <address> [--port <n>] [--transport tcp|ws|udp]]");
     Console.WriteLine("      Discovers pipelines streaming on this network (alive-beacon) and watches one live. Read-only.");
+    Console.WriteLine("      --host attaches straight to a known address instead, skipping discovery entirely - for when the alive-beacon's multicast does not cross a VLAN/subnet boundary that the data port itself does. --port defaults to " + EgressOptions.DefaultPort + ", --transport to ws.");
     Console.WriteLine("  validate-pipeline --path <pipeline.json> [--integrations-root <path>]");
     Console.WriteLine("  modules [--root <path>]");
     Console.WriteLine("  packages [--root <path>]");

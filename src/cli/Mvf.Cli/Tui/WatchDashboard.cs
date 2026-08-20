@@ -21,6 +21,14 @@ namespace Mvf.Cli.Tui;
 /// </summary>
 internal sealed class WatchDashboard
 {
+    /// <summary>A known host:port to attach to directly, bypassing the discovery page entirely.</summary>
+    /// <param name="Host">Address or hostname to connect to — used as given, no resolution or reachability
+    /// check (that machinery is for beacons, which this path has none of).</param>
+    /// <param name="Port">The egress data port on <paramref name="Host"/>.</param>
+    /// <param name="Transport">"tcp" | "ws"/"websocket" | "udp" — must match how the run's `--egress` was
+    /// started; there is no beacon here to read it from.</param>
+    public sealed record DirectTarget(string Host, int Port, string Transport);
+
     private const int RefreshMs = 120;
 
     /// <summary>How long an edge stays listed after its last beacon. Three beacons at the 1s cadence: long
@@ -44,8 +52,14 @@ internal sealed class WatchDashboard
     /// <summary>True once the operator has taken the node cursor over with an arrow key.</summary>
     private bool _nodeNavigated;
 
-    public async Task RunAsync(CancellationToken cancellationToken)
+    public async Task RunAsync(CancellationToken cancellationToken, DirectTarget? direct = null)
     {
+        if (direct is not null)
+        {
+            await RunDirectAsync(direct, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var discovery = Task.Run(() => DiscoverLoopAsync(cts.Token), cts.Token);
 
@@ -95,6 +109,38 @@ internal sealed class WatchDashboard
         {
             await cts.CancelAsync().ConfigureAwait(false);
             try { await discovery.ConfigureAwait(false); } catch { /* shutting down */ }
+            try { Console.CursorVisible = true; } catch { }
+            Console.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Attaches straight to <paramref name="direct"/>, no discovery page, no beacon listener. The host is
+    /// used exactly as given — <see cref="EgressEndpointResolver"/> exists to turn a beacon's source address
+    /// into a reachable one, and there is no beacon here for it to work from; an operator who typed a host
+    /// has already answered the question that machinery exists to answer.
+    /// </summary>
+    private async Task RunDirectAsync(DirectTarget direct, CancellationToken cancellationToken)
+    {
+        var edge = new EgressBeaconInfo
+        {
+            EdgeId = $"{direct.Host}:{direct.Port}",
+            Pipeline = $"{direct.Host}:{direct.Port}",
+            Transport = direct.Transport,
+            Port = direct.Port,
+            Streams = "state,frame",
+            Status = "running",
+        };
+
+        try { Console.CursorVisible = false; } catch { /* not supported on all hosts */ }
+        Console.Clear();
+        try
+        {
+            await WatchEdgeAsync(edge, direct.Host, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { /* clean shutdown */ }
+        finally
+        {
             try { Console.CursorVisible = true; } catch { }
             Console.Clear();
         }
