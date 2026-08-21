@@ -53,10 +53,12 @@ Most of this is a **move/regroup**, not new code. New: `protocol/`, `transports/
 
 ## Baseline (already done — Faz 1–4)
 - Typed graph engine: `execute-graph` runs a `pipeline.json` end to end.
-- Node runners: source / processor / sink / gate / fork / if / switch / **classifier**.
+- Node runners: source / processor / sink / gate / fork / if / switch / **classifier** / **analyzer**.
 - Legacy manifest+profile runner, Host and Storage projects removed (graph is the only path).
 - Manifests use readable string `kind`; `inspect-session` reads the module's real session.json.
 - First-class **frame→control classifier** (perception→control) + `ControlSignal.Measurement`.
+- First-class **frame→(frame + control + JSON)** analyzer for ML inference outputs without collapsing
+  data and control into one payload.
 
 ## Authoring: lean pipeline format (done)
 Authors write only what is not derivable; a `PipelineExpander` fills in the rich model
@@ -68,7 +70,8 @@ Authors write only what is not derivable; a `PipelineExpander` fills in the rich
 
 Ports + category come from the module's `kind` via a metadata-only `ModuleCatalog` (reads
 `module.json`, **no DLL load**): source→source, processor→compute, classifier→classify,
-gate→control, sink→output. Rich nodes/edges still pass through unchanged (mixed files work).
+analyzer→analyze, gate→control, sink→output. Rich nodes/edges still pass through unchanged
+(mixed files work).
 Wired into CLI `validate-pipeline` + `execute-graph`; `packages/inspection-demo/pipeline.json`
 is lean. Tests 39/39.
 

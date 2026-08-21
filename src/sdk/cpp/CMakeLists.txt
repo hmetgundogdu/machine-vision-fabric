@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(mvf_sdk_cpp LANGUAGES CXX VERSION 0.1.0)
+project(mvf_sdk_cpp LANGUAGES CXX VERSION 1.0.0)
 
 # Package version — defaults to the project() version, overridable from CI with the
 # release tag: cmake -DMVF_SDK_VERSION=1.2.3

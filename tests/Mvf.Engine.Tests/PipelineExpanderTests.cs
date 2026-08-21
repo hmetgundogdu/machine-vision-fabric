@@ -11,6 +11,7 @@ public sealed class PipelineExpanderTests
         ["mvf.cam"] = Entry("mvf.cam", IntegrationCapabilityKind.Source),
         ["mvf.filter"] = Entry("mvf.filter", IntegrationCapabilityKind.Processor),
         ["mvf.classify"] = Entry("mvf.classify", IntegrationCapabilityKind.Classifier),
+        ["mvf.analyze"] = Entry("mvf.analyze", IntegrationCapabilityKind.Analyzer),
         ["mvf.gate"] = Entry("mvf.gate", IntegrationCapabilityKind.Gate),
         ["mvf.sink"] = Entry("mvf.sink", IntegrationCapabilityKind.Sink)
     };
@@ -50,6 +51,22 @@ public sealed class PipelineExpanderTests
 
         Assert.Equal("Saver", node.DisplayName);
         Assert.Equal("out", node.Config["outputRoot"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Expand_AnalyzerModule_DerivesStandardMultiOutputPorts()
+    {
+        const string json = """
+        { "nodes": [ { "id": "inspect1", "module": "mvf.analyze" } ], "edges": [] }
+        """;
+
+        var node = Assert.Single(Expander.Expand(json, Catalog).Nodes);
+
+        Assert.Equal("analyze", node.Category);
+        Assert.Equal(["frame"], node.Inputs.Select(p => p.Name));
+        Assert.Equal(["frame", "class", "result"], node.Outputs.Select(p => p.Name));
+        Assert.All(node.Outputs, p => Assert.False(p.Required));
+        Assert.Equal("control/value:json", node.Outputs.Single(p => p.Name == "result").DataType);
     }
 
     [Fact]

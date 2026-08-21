@@ -315,6 +315,15 @@ public sealed class PipelineExpander
         IntegrationCapabilityKind.Classifier =>
             ("classify", [DataPort("frame")], [ControlPort("class", ClassificationSignalType)]),
 
+        IntegrationCapabilityKind.Analyzer =>
+            ("analyze",
+                [DataPort("frame")],
+                [
+                    DataPort("frame", required: false),
+                    ControlPort("class", ClassificationSignalType, required: false),
+                    ControlPort("result", ControlPortTypes.ValuePrefix + "json", required: false)
+                ]),
+
         IntegrationCapabilityKind.Gate =>
             ("control", [], [ControlPort("productPresent", BooleanGateSignalType)]),
 
@@ -323,7 +332,7 @@ public sealed class PipelineExpander
 
         _ => throw new PipelineExpansionException(
             $"Node '{nodeId}' uses module kind '{kind}', which has no lean port mapping. " +
-            "Supported kinds: source, processor, classifier, gate, sink.")
+            "Supported kinds: source, processor, classifier, analyzer, gate, sink.")
     };
 
     private static ParsedEdge ParseEdge(JsonNode? edgeNode, int index)
@@ -390,8 +399,8 @@ public sealed class PipelineExpander
     private static JsonObject CloneBindings(JsonObject nodeObj) =>
         nodeObj["bindings"] is JsonObject bindings ? (JsonObject)bindings.DeepClone() : [];
 
-    private static PipelinePortDefinition DataPort(string name, bool allowMultipleEdges = false) =>
-        new() { Name = name, Channel = "data", DataType = DataFrameType, AllowMultipleEdges = allowMultipleEdges };
+    private static PipelinePortDefinition DataPort(string name, bool allowMultipleEdges = false, bool required = true) =>
+        new() { Name = name, Channel = "data", DataType = DataFrameType, Required = required, AllowMultipleEdges = allowMultipleEdges };
 
     private static PipelinePortDefinition ControlPort(string name, string dataType, bool required = true) =>
         new() { Name = name, Channel = "control", DataType = dataType, Required = required };

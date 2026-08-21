@@ -9,8 +9,9 @@
 //
 // A classifier is a function `Classification classify(const Payload&, const json& meta)`.
 // A processor is a function `std::optional<Output> transform(const Payload&, const json& meta)`
-// returning a new frame, or std::nullopt to drop it. The SDK owns the stdio loop and the
-// descriptor decoding. See ../../../../protocol/README.md. Local only — no network.
+// returning a new frame, or std::nullopt to drop it. An analyzer may emit a derived frame,
+// a classification, and structured inference metadata from one input. The SDK owns the stdio
+// loop and the descriptor decoding. See ../../../../protocol/README.md. Local only — no network.
 //
 // This SDK mirrors the reference Python SDK (src/sdk/python/mvf_sdk/__init__.py) and speaks
 // the exact same wire protocol, so a C++ module is interchangeable with a Python or .NET one.
@@ -100,9 +101,17 @@ struct Classification {
     std::optional<std::string> details;
 };
 
+// The multi-output result of an analyzer.
+struct AnalysisResult {
+    std::optional<Output> frame;
+    std::optional<Classification> classification;
+    std::optional<json> value;
+};
+
 // ---- module callbacks ----
 using ClassifyFn = std::function<Classification(const Payload&, const json& meta)>;
 using TransformFn = std::function<std::optional<Output>(const Payload&, const json& meta)>;
+using AnalyzeFn = std::function<AnalysisResult(const Payload&, const json& meta)>;
 
 // Optional lifecycle hooks. Provide default-constructed (empty) std::function to skip.
 struct ModuleHooks {
@@ -127,6 +136,9 @@ int run_classifier(const std::string& module_id, ClassifyFn classify, ModuleHook
 
 // Run the stdio loop for a processor (transformer) module: frame in -> new frame out.
 int run_processor(const std::string& module_id, TransformFn transform, ModuleHooks hooks = {});
+
+// Run the stdio loop for an analyzer module: frame in -> optional frame + classification + JSON value.
+int run_analyzer(const std::string& module_id, AnalyzeFn analyze, ModuleHooks hooks = {});
 
 } // namespace mvf
 

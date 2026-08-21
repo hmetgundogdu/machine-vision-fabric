@@ -80,7 +80,7 @@ are also supported via `Mvf.Sdk` base classes. See
 Work nodes come from SDK modules; **flow-control primitives are owned by the engine** (they
 define execution semantics, not device behaviour):
 
-- Module categories: `source`, `compute` (processor), `classify`, `control`/`gate`, `sink`.
+- Module categories: `source`, `compute` (processor), `classify`, `analyze`, `control`/`gate`, `sink`.
 - Engine primitives: `if`, `switch`, `fork`, `loop`, plus typed `value` / `select`.
 
 `loop` is the graph's **iteration authority** (see

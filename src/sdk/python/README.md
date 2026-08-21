@@ -34,6 +34,26 @@ def transform(payload, meta):
 run_processor("py.invert-transformer", transform)
 ```
 
+An analyzer returns a standard multi-output result:
+
+```python
+from mvf_sdk import analysis, blob, run_analyzer
+
+def analyze(payload, meta):
+    frame = bytes(payload.memory)
+    mean = sum(frame) / len(frame) if frame else 0.0
+    label = "black" if mean < 10 else "ok"
+    return analysis(
+        frame=blob(frame),
+        label=label,
+        measurement=mean,
+        unit="mean-byte",
+        value={"mean": mean, "label": label},
+    )
+
+run_analyzer("py.brightness-analyzer", analyze)
+```
+
 Optional `on_start` (warmup / readiness), `on_checkpoint` and `on_restore`
 (durable state across restarts) are supported — see the docstrings.
 

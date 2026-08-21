@@ -67,5 +67,26 @@ public sealed class IntegrationModuleDescriptorBuilderTests
         Assert.Equal("frame", output.DataType);
     }
 
+    [Fact]
+    public void CreateAnalyzer_EmitsOptionalVisualAndInferencePorts()
+    {
+        var descriptor = IntegrationModuleDescriptorBuilder.CreateAnalyzer<FakeOptions>(
+            "mvf.fake-analyzer",
+            "Fake Analyzer",
+            "0.1.0",
+            "frame-analyzer",
+            "Test analyzer");
+
+        var capability = Assert.Single(descriptor.Capabilities);
+
+        Assert.Equal(IntegrationCapabilityKind.Analyzer, capability.Kind);
+        Assert.Equal("frame", Assert.Single(capability.Inputs).Name);
+
+        Assert.Equal(3, capability.Outputs.Count);
+        Assert.Equal(["frame", "class", "result"], capability.Outputs.Select(p => p.Name));
+        Assert.All(capability.Outputs, p => Assert.False(p.Required));
+        Assert.Equal("value:json", capability.Outputs.Single(p => p.Name == "result").DataType);
+    }
+
     private sealed class FakeOptions;
 }

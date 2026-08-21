@@ -182,6 +182,9 @@ public sealed class PipelineNodeActivator(
             "classify" when module is IFrameClassifierModule classifierModule =>
                 new FrameClassifierNodeRunner(node.Id, classifierModule.CreateClassifier(config)),
 
+            "analyze" when module is IFrameAnalyzerModule analyzerModule =>
+                new FrameAnalyzerNodeRunner(node.Id, analyzerModule.CreateAnalyzer(config)),
+
             "output" or "sink" when module is IFrameSinkModule sinkModule =>
                 new FrameSinkNodeRunner(node.Id, sinkModule.OpenSink(config, options.PackageRoot)),
 
@@ -238,9 +241,13 @@ public sealed class PipelineNodeActivator(
                 node.Id,
                 await outOfProcessModuleHost.CreateTransformerAsync(activation, cancellationToken)),
 
+            "analyze" => new FrameAnalyzerNodeRunner(
+                node.Id,
+                await outOfProcessModuleHost.CreateAnalyzerAsync(activation, cancellationToken)),
+
             _ => throw new InvalidOperationException(
-                $"Out-of-process module '{entry.Manifest.Id}' (node '{node.Id}') supports the 'classify' and " +
-                $"'compute' categories, not '{node.Category}'. Other capabilities arrive in later slices.")
+                $"Out-of-process module '{entry.Manifest.Id}' (node '{node.Id}') supports the 'classify', " +
+                $"'compute', and 'analyze' categories, not '{node.Category}'. Other capabilities arrive in later slices.")
         };
     }
 

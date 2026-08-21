@@ -14,6 +14,7 @@ Base classes to implement the node contract without wiring the plumbing yourself
 - `FrameSourceModuleBase` — camera / stream / folder sources
 - `FrameProcessorModuleBase` — frame → frame transforms
 - `FrameClassifierModuleBase` — frame → typed classification
+- `FrameAnalyzerModuleBase` — frame → optional frame + classification + JSON inference result
 - `FrameSinkModuleBase` — sinks (dataset writers, PLC/control outputs)
 - `ProductPresenceGateModuleBase` — control-flow gating
 - Helpers: `FrameEnvelopeFactory`, `IntegrationModuleDescriptorBuilder`,

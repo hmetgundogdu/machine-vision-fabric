@@ -7,8 +7,10 @@ self-describing — media type, dtype and shape come from the header — so a mo
 knows exactly what an edge carries. There is **no base64**; payloads never travel inline.
 
 A classifier module is a function ``classify(payload: Payload, meta: dict) -> tuple``
-returning ``(label, measurement, unit, details)``. The SDK owns the stdio loop and the
-descriptor decoding. See ``../../../protocol/README.md``. Local only — no network.
+returning ``(label, measurement, unit, details)``. An analyzer module may also return a
+derived frame plus structured inference metadata from the same input. The SDK owns the
+stdio loop and the descriptor decoding. See ``../../../protocol/README.md``. Local only
+— no network.
 """
 import sys
 import os
@@ -16,7 +18,10 @@ import json
 import mmap
 import struct
 
-__all__ = ["run_classifier", "run_processor", "log", "Payload", "Output", "blob", "tensor", "MediaType", "ElementType"]
+__all__ = [
+    "run_classifier", "run_processor", "run_analyzer", "log", "Payload", "Output",
+    "AnalysisOutput", "analysis", "blob", "tensor", "MediaType", "ElementType"
+]
 
 # ---- typed-payload descriptor (must match Mvf.Abstractions.PayloadDescriptor) ----
 
@@ -151,6 +156,20 @@ class Output:
         self.shape = tuple(shape)
 
 
+class AnalysisOutput:
+    """The multi-output result of analyzing one payload."""
+
+    __slots__ = ("frame", "label", "measurement", "unit", "details", "value")
+
+    def __init__(self, frame=None, label=None, measurement=None, unit=None, details=None, value=None):
+        self.frame = frame
+        self.label = label
+        self.measurement = measurement
+        self.unit = unit
+        self.details = details
+        self.value = value
+
+
 def _as_bytes(data):
     if isinstance(data, (bytes, bytearray)):
         return bytes(data)
@@ -166,6 +185,11 @@ def blob(data):
 def tensor(data, element_type, shape, media_type=MediaType.TENSOR):
     """A typed tensor: bytes-like ``data`` with an ``element_type`` and ``shape``."""
     return Output(_as_bytes(data), media_type, element_type, tuple(shape))
+
+
+def analysis(frame=None, label=None, measurement=None, unit=None, details=None, value=None):
+    """Build a multi-output analyzer result."""
+    return AnalysisOutput(frame=frame, label=label, measurement=measurement, unit=unit, details=details, value=value)
 
 
 # ---- stdio control loop ----
@@ -356,4 +380,55 @@ def run_processor(module_id, transform, on_checkpoint=None, on_restore=None, on_
         _send({"type": "result", "id": request_id, "frame": {"shm": {"offset": int(out["offset"])}}})
 
     _serve(module_id, "processor", True, on_execute, on_checkpoint, on_restore, on_start,
+           on_configure)
+
+
+def run_analyzer(module_id, analyze, on_checkpoint=None, on_restore=None, on_start=None,
+                 on_configure=None):
+    """Run the stdio loop for an analyzer module (frame in -> multi-output result).
+
+    ``analyze(payload, meta)`` returns an :class:`AnalysisOutput` via :func:`analysis`. Its ``frame``
+    must be an :class:`Output` or ``None``; ``label``/``measurement``/``unit``/``details`` produce the
+    optional classification output; ``value`` carries structured inference metadata as JSON.
+    Optional ``on_checkpoint``/``on_restore`` persist module state. Optional ``on_start()`` runs warmup
+    after the handshake; the module signals ``ready`` when it returns. Optional
+    ``on_configure(config: dict)`` accepts the node's config — once before the first frame, and again
+    whenever an operator edits a bound field, without the module being restarted.
+    """
+    def on_execute(msg, request_id, arena_view):
+        frame = msg.get("frame") or {}
+        media_type, element_type, shape, cell = _read_input(arena_view, frame)
+        try:
+            output = analyze(Payload(media_type, element_type, shape, cell), frame)
+        finally:
+            cell.release()
+
+        if output is None:
+            output = AnalysisOutput()
+        if not isinstance(output, AnalysisOutput):
+            raise TypeError("analyzer must return AnalysisOutput or None")
+
+        result = {"type": "result", "id": request_id}
+        if output.frame is not None:
+            out = msg["out"]
+            _write_descriptor(
+                arena_view, int(out["offset"]), output.frame.media_type, output.frame.element_type,
+                output.frame.shape, _as_bytes(output.frame.data), int(out["capacity"]))
+            result["frame"] = {"shm": {"offset": int(out["offset"])}}
+        else:
+            result["frame"] = None
+
+        if output.label is not None:
+            result["classification"] = {
+                "label": output.label,
+                "measurement": output.measurement,
+                "unit": output.unit,
+                "details": output.details,
+            }
+        if output.value is not None:
+            result["value"] = output.value
+
+        _send(result)
+
+    _serve(module_id, "analyzer", True, on_execute, on_checkpoint, on_restore, on_start,
            on_configure)

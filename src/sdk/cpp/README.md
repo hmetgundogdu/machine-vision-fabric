@@ -35,6 +35,12 @@ Classifiers use `run_classifier(id, fn)` where `fn` returns a `Classification`
 `on_start` (warmup / readiness), `on_checkpoint`, `on_restore` — are passed via
 `ModuleHooks`.
 
+Analyzers use `run_analyzer(id, fn)` where `fn` returns an `AnalysisResult` with any
+combination of:
+- `frame` — a derived visual payload written back to the shared-memory arena
+- `classification` — the optional routing decision
+- `value` — structured inference metadata as JSON
+
 ## Build
 
 ```bash

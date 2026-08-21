@@ -26,7 +26,10 @@ run_processor("py.invert-transformer", transform)
 ```
 
 Classifiers use `run_classifier(id, fn)` returning `(label, measurement, unit, details)`.
-Full example: [`modules/py-invert-transformer/`](../modules/py-invert-transformer).
+Analyzers use `run_analyzer(id, fn)` returning `analysis(frame=..., label=..., value=...)` so one
+node can emit a derived frame, a routing decision, and structured inference metadata together.
+Full examples: [`modules/py-invert-transformer/`](../modules/py-invert-transformer) and
+[`modules/py-brightness-analyzer/`](../modules/py-brightness-analyzer).
 
 ## C++ — link `libmvf_sdk`
 
@@ -54,6 +57,7 @@ In-process .NET modules derive from a base class and describe their typed ports:
 | `FrameSourceModuleBase<TOptions>` | camera / stream / folder source |
 | `FrameProcessorModuleBase<TOptions>` | processor / filter |
 | `FrameClassifierModuleBase<TOptions>` | classifier |
+| `FrameAnalyzerModuleBase<TOptions>` | analyzer |
 | `FrameSinkModuleBase<TOptions>` | sink (dataset writer, PLC output) |
 | `ProductPresenceGateModuleBase<TOptions>` | control-flow gate |
 

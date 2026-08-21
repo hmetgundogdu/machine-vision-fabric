@@ -101,6 +101,29 @@ public static class IntegrationModuleDescriptorBuilder
             [ControlPort("class", "classification", "Classification control signal for switch/if routing.")]);
     }
 
+    public static IntegrationModuleDescriptor CreateAnalyzer<TOptions>(
+        string moduleId,
+        string displayName,
+        string version,
+        string capabilityName,
+        string description)
+    {
+        return Create(
+            moduleId,
+            displayName,
+            version,
+            capabilityName,
+            IntegrationCapabilityKind.Analyzer,
+            typeof(TOptions).FullName ?? typeof(TOptions).Name,
+            description,
+            [DataPort("frame", "frame whose content is analyzed.")],
+            [
+                DataPort("frame", "Derived frame emitted by the analyzer when it produces a visual artifact.", required: false),
+                ControlPort("class", "classification", "Optional classification control signal for switch/if routing.", required: false),
+                ControlPort("result", "value:json", "Optional structured inference metadata emitted on the control channel.", required: false)
+            ]);
+    }
+
     private static IntegrationModuleDescriptor Create(
         string moduleId,
         string displayName,
@@ -132,24 +155,26 @@ public static class IntegrationModuleDescriptorBuilder
         };
     }
 
-    private static ModulePortDescriptor DataPort(string name, string description)
+    private static ModulePortDescriptor DataPort(string name, string description, bool required = true)
     {
         return new ModulePortDescriptor
         {
             Name = name,
             Channel = "data",
             DataType = "frame",
+            Required = required,
             Description = description
         };
     }
 
-    private static ModulePortDescriptor ControlPort(string name, string dataType, string description)
+    private static ModulePortDescriptor ControlPort(string name, string dataType, string description, bool required = true)
     {
         return new ModulePortDescriptor
         {
             Name = name,
             Channel = "control",
             DataType = dataType,
+            Required = required,
             Description = description
         };
     }

@@ -123,7 +123,8 @@ driving a run live (pause, node navigation, live edits) — is in the [**CLI gui
 ## Write a module (Python · .NET · C++)
 
 A node is a small program that receives a typed payload and returns a result — a **processor**
-(new payload out), a **classifier** (a label/signal for `if`/`switch` routing), a **source**, or a
+(new payload out), a **classifier** (a label/signal for `if`/`switch` routing), an **analyzer**
+(optional visual output + control decision + structured inference metadata), a **source**, or a
 **sink**. All three SDKs speak the [same protocol](protocol/README.md), so the language is your
 choice and nodes interoperate in one graph. The steps below are the same shape in every language.
 
@@ -147,6 +148,26 @@ def transform(payload, meta):
     return blob(bytes(255 - b for b in payload.memory))   # any transform over the payload
 
 run_processor("py.invert", transform)
+```
+
+An analyzer can emit both a derived frame and structured inference outputs in the same cycle:
+
+```python
+from mvf_sdk import analysis, blob, run_analyzer
+
+def analyze(payload, meta):
+    frame = bytes(payload.memory)
+    mean = sum(frame) / len(frame) if frame else 0.0
+    label = "black" if mean < 10 else "ok"
+    return analysis(
+        frame=blob(frame),
+        label=label,
+        measurement=mean,
+        unit="mean-byte",
+        value={"mean": mean, "label": label},
+    )
+
+run_analyzer("py.brightness-analyzer", analyze)
 ```
 
 ```cpp

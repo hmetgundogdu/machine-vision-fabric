@@ -10,5 +10,11 @@ public enum IntegrationCapabilityKind
     Sink = 5,
 
     /// <summary>Turns frame content into a control signal (perception → control).</summary>
-    Classifier = 6
+    Classifier = 6,
+
+    /// <summary>
+    /// Consumes one frame and may emit a derived frame, a routing decision, and structured inference
+    /// metadata in the same cycle.
+    /// </summary>
+    Analyzer = 7
 }

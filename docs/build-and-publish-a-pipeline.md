@@ -24,7 +24,7 @@ NODE(typed output) -> NODE(typed input) -> NODE(typed output)
 
 - **Nodes** are either engine **primitives** (`loop`, `fork`, `switch`, `value`, `select` —
   owned by the runtime) or **integration modules** you author with the SDK (camera, filter,
-  classifier, sink).
+  classifier, analyzer, sink).
 - **Edges** are typed and split into **data** (frame/tensor transfer) and **control** (a PLC
   presence decision, a branch selection). See
   [`pipeline-graph-foundation.md`](pipeline-graph-foundation.md).
@@ -44,9 +44,10 @@ same protocol, so a module is interchangeable across languages.
   - `FrameSourceModuleBase<TOptions>` — camera / stream / folder source
   - `FrameProcessorModuleBase<TOptions>` — transform / filter
   - `FrameClassifierModuleBase<TOptions>` — classification → control signal
+  - `FrameAnalyzerModuleBase<TOptions>` — optional frame + classification + JSON inference output
   - `FrameSinkModuleBase<TOptions>` — dataset writer / output
   - `ProductPresenceGateModuleBase<TOptions>` — control-flow gate
-- **Python** — `pip install mvf-sdk`, then `run_processor(...)` / `run_classifier(...)`.
+- **Python** — `pip install mvf-sdk`, then `run_processor(...)` / `run_classifier(...)` / `run_analyzer(...)`.
 - **C++** — link `libmvf_sdk` (`src/sdk/cpp/include/mvf/sdk.hpp`).
 
 Nodes stay **fully typed**: typed options, typed capability kind, typed input/output ports. The

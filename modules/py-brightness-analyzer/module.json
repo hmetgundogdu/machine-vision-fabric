@@ -1,0 +1,8 @@
+{
+  "id": "py.brightness-analyzer",
+  "name": "Brightness Analyzer (Python)",
+  "version": "1.0.0",
+  "kind": "analyzer",
+  "runtime": "python",
+  "entry": "analyzer.py"
+}

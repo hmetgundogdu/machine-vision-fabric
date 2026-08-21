@@ -296,4 +296,37 @@ int run_processor(const std::string& module_id, TransformFn transform, ModuleHoo
     return serve(module_id, "processor", /*writable=*/true, on_execute, hooks);
 }
 
+int run_analyzer(const std::string& module_id, AnalyzeFn analyze, ModuleHooks hooks) {
+    ExecuteFn on_execute = [analyze = std::move(analyze)](const json& msg, const json& id,
+                                                         uint8_t* base) {
+        const json frame = msg.contains("frame") ? msg["frame"] : json::object();
+        Payload p = read_input(base, frame);
+        AnalysisResult out = analyze(p, frame);
+
+        json result = {{"type", "result"}, {"id", id}, {"frame", nullptr}};
+        if (out.frame) {
+            const json& slot = msg.at("out");
+            const int64_t offset = slot["offset"].get<int64_t>();
+            write_descriptor(base, offset, *out.frame, slot["capacity"].get<int64_t>());
+            result["frame"] = {{"shm", {{"offset", offset}}}};
+        }
+
+        if (out.classification) {
+            result["classification"] = {
+                {"label", out.classification->label},
+                {"measurement", optional_json(out.classification->measurement)},
+                {"unit", optional_json(out.classification->unit)},
+                {"details", optional_json(out.classification->details)},
+            };
+        }
+
+        if (out.value) {
+            result["value"] = *out.value;
+        }
+
+        send(result);
+    };
+    return serve(module_id, "analyzer", /*writable=*/true, on_execute, hooks);
+}
+
 } // namespace mvf

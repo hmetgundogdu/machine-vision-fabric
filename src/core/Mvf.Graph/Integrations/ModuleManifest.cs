@@ -13,7 +13,7 @@ public sealed class ModuleManifest
 
     public required string Version { get; init; }
 
-    /// <summary>source | processor | classifier | gate | sink — determines the port contract.</summary>
+    /// <summary>source | processor | classifier | analyzer | gate | sink — determines the port contract.</summary>
     public required IntegrationCapabilityKind Kind { get; init; }
 
     /// <summary>dotnet | python | node.</summary>

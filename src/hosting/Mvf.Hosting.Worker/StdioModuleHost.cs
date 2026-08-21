@@ -31,6 +31,14 @@ public sealed class StdioModuleHost(IDataPlane dataPlane) : IOutOfProcessModuleH
         return new WorkerFrameTransformer(worker, dataPlane);
     }
 
+    public async Task<IFrameAnalyzer> CreateAnalyzerAsync(
+        OutOfProcessModuleActivation activation,
+        CancellationToken cancellationToken)
+    {
+        var worker = await StartSupervisedAsync(activation, cancellationToken);
+        return new WorkerFrameAnalyzer(worker, dataPlane);
+    }
+
     // Starts the supervised worker, backed by a warm pool when MVF_WARM_SPARES > 0 so a restart swaps in a
     // pre-warmed spare instead of paying the cold-start (process spawn + model/device warmup). Default 0
     // keeps the original cold-restart behavior.

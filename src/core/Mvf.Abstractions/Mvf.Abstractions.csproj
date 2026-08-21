@@ -14,9 +14,9 @@
        and so MachineVisionFabric.Sdk's dependency on it resolves from NuGet. -->
   <PropertyGroup>
     <PackageId>MachineVisionFabric.Abstractions</PackageId>
-    <Version>0.1.0</Version>
+    <Version>1.0.0</Version>
     <Authors>MachineVisionFabric contributors</Authors>
-    <Description>MachineVisionFabric module contract: the frame/source/processor/classifier/sink abstractions and out-of-process activation types shared by the runtime and integration modules.</Description>
+    <Description>MachineVisionFabric module contract: the frame/source/processor/classifier/analyzer/sink abstractions and out-of-process activation types shared by the runtime and integration modules.</Description>
     <PackageTags>machine-vision;edge;pipeline;industrial</PackageTags>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/hmetgundogdu/machine-vision-fabric</RepositoryUrl>

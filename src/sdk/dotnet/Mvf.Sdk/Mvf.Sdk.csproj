@@ -7,9 +7,9 @@
 
   <PropertyGroup>
     <PackageId>MachineVisionFabric.Sdk</PackageId>
-    <Version>0.1.0</Version>
+    <Version>1.0.0</Version>
     <Authors>MachineVisionFabric contributors</Authors>
-    <Description>SDK for authoring MachineVisionFabric integration modules (typed graph nodes: sources, processors, classifiers, sinks) on the local edge runtime.</Description>
+    <Description>SDK for authoring MachineVisionFabric integration modules (typed graph nodes: sources, processors, classifiers, analyzers, sinks) on the local edge runtime.</Description>
     <PackageTags>machine-vision;edge;pipeline;onnx;industrial</PackageTags>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/hmetgundogdu/machine-vision-fabric</RepositoryUrl>
