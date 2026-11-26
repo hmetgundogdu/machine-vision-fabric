@@ -1,0 +1,526 @@
+//! # mvf-container — daemonless OCI execution backend
+//!
+//! Runs an OCI image from the MVF content store (#17) through a **low-level OCI runtime** (`runc`
+//! or `crun`, found on `PATH` or via `MVF_OCI_RUNTIME`) — no Docker Engine, no containerd, no
+//! daemon. The container's stdio *is* the MVF worker protocol, and the engine arena is bind-mounted,
+//! so a containerised node is supervised, typed and zero-copy exactly like a local worker: this
+//! crate only supplies a [`mvf_worker::Launcher`].
+//!
+//! Linux only (OCI images need a Linux kernel). On other hosts [`OciRuntime::detect`] returns
+//! `None`, the backend is not registered, and contracts that need it are rejected by negotiation.
+//! The sandbox policy is documented in [`spec`].
+
+pub mod package;
+pub mod spec;
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use mvf_contract::{
+    Artifact, BackendCapabilities, BackendKind, Cancellation, GrantSupport, IsolationLevel,
+    MemoryDomain, NetworkPolicy, NodeContract, Replacement, Target,
+};
+use mvf_engine::{ExecutionBackend, InstantiateRequest, NodeError, NodeErrorKind, NodeHandle};
+use mvf_oci::{ContentStore, ImageRecord};
+use mvf_worker::process::LaunchSpec;
+use mvf_worker::{Launcher, worker_node};
+
+use crate::spec::{DeviceNode, IdMapping, SpecInput, runtime_spec};
+
+/// A detected low-level OCI runtime and what this host lets it enforce.
+#[derive(Debug, Clone)]
+pub struct OciRuntime {
+    /// Runtime binary.
+    pub path: PathBuf,
+    /// `--version` output (first line).
+    pub version: String,
+    /// Running as root (rootful containers, cgroup limits, user-namespace remapping).
+    pub root: bool,
+    /// cgroup v2 controllers available for limits.
+    pub controllers: Vec<String>,
+    /// The runtime was built with seccomp support.
+    pub seccomp: bool,
+}
+
+fn first_on_path(names: &[&str]) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
+        .find(|p| p.is_file())
+}
+
+impl OciRuntime {
+    /// Detects a runtime on this host. `None` on non-Linux hosts or when no runtime is installed.
+    pub fn detect() -> Option<Self> {
+        if !cfg!(target_os = "linux") {
+            return None;
+        }
+        let path = std::env::var_os("MVF_OCI_RUNTIME")
+            .map(PathBuf::from)
+            .or_else(|| first_on_path(&["runc", "crun"]))?;
+        let out = Command::new(&path).arg("--version").output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let root = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("Uid:"))
+                    .and_then(|l| l.split_whitespace().nth(2).map(|e| e == "0"))
+            })
+            .unwrap_or(false);
+        let controllers = std::fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
+            .map(|s| s.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default();
+        Some(Self {
+            version: text.lines().next().unwrap_or_default().to_string(),
+            seccomp: text.to_lowercase().contains("seccomp"),
+            path,
+            root,
+            controllers,
+        })
+    }
+
+    fn enforces(&self, controller: &str) -> bool {
+        self.root && self.controllers.iter().any(|c| c == controller)
+    }
+}
+
+/// Host device paths that can be granted (character/block devices under `/dev` and `/dev/dri`).
+fn grantable_devices() -> Vec<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        let mut out = Vec::new();
+        for dir in ["/dev", "/dev/dri"] {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for e in entries.flatten() {
+                    if let Ok(t) = e.file_type()
+                        && (t.is_char_device() || t.is_block_device())
+                    {
+                        out.push(e.path().display().to_string());
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+    #[cfg(not(unix))]
+    Vec::new()
+}
+
+/// The OCI backend.
+#[derive(Debug, Clone)]
+pub struct OciBackend {
+    runtime: OciRuntime,
+    store: ContentStore,
+    state_dir: PathBuf,
+}
+
+impl OciBackend {
+    /// A backend using `runtime`, images from `store` and scratch state (rootfs cache, bundles,
+    /// runtime state) under `state_dir`.
+    pub fn new(runtime: OciRuntime, store: ContentStore, state_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            runtime,
+            store,
+            state_dir: state_dir.into(),
+        }
+    }
+
+    /// Detects a runtime and returns a backend, or `None` when this host cannot run OCI images.
+    pub fn detect(store: ContentStore, state_dir: impl Into<PathBuf>) -> Option<Self> {
+        OciRuntime::detect().map(|r| Self::new(r, store, state_dir))
+    }
+
+    /// The runtime in use.
+    pub fn runtime(&self) -> &OciRuntime {
+        &self.runtime
+    }
+
+    fn find(&self, digest: &str) -> Result<ImageRecord, NodeError> {
+        self.store
+            .records()
+            .map_err(|e| NodeError::new(NodeErrorKind::StartFailed, e.to_string()))?
+            .into_iter()
+            .find(|r| r.manifest.digest.as_str() == digest)
+            .ok_or_else(|| {
+                NodeError::new(
+                    NodeErrorKind::StartFailed,
+                    format!(
+                        "image {digest} is not in the store (import it with `mvf-rs image import`)"
+                    ),
+                )
+            })
+    }
+}
+
+impl ExecutionBackend for OciBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            kind: BackendKind::Oci,
+            // Namespaces + dropped capabilities + no-new-privs + seccomp make a security sandbox;
+            // without seccomp support the runtime only gives a process-level boundary.
+            isolation: if self.runtime.seccomp {
+                IsolationLevel::Sandbox
+            } else {
+                IsolationLevel::Process
+            },
+            targets: vec![Target::Cpu],
+            zero_copy_domains: vec![MemoryDomain::Host],
+            cancellation: Cancellation::Enforceable,
+            enforceable_termination: true,
+            enforces_memory_limit: self.runtime.enforces("memory"),
+            enforces_cpu_limit: self.runtime.enforces("cpu"),
+            enforces_pids_limit: self.runtime.enforces("pids"),
+            replacement: vec![Replacement::Stateless],
+            grants: GrantSupport {
+                network: vec![NetworkPolicy::None],
+                devices: grantable_devices(),
+                // CDI injection is not implemented: no CDI device is ever offered.
+                cdi_devices: vec![],
+            },
+        }
+    }
+
+    fn instantiate(
+        &self,
+        request: &InstantiateRequest<'_>,
+        artifact: &Artifact,
+    ) -> Result<Box<dyn NodeHandle>, NodeError> {
+        let Artifact::Oci { digest, .. } = artifact else {
+            return Err(NodeError::new(
+                NodeErrorKind::Unsupported,
+                "OCI backend received a non-OCI artifact",
+            ));
+        };
+        let record = self.find(digest)?;
+        let launcher = OciLauncher {
+            backend: self.clone(),
+            record,
+            contract: request.contract.clone(),
+            name: format!("{}-g{}", request.node_id, request.generation),
+            args: None,
+            container: None,
+        };
+        worker_node(request, Box::new(launcher), false)
+    }
+}
+
+static IDS: AtomicU64 = AtomicU64::new(0);
+
+/// Unpacks (once per manifest digest and id mapping) and returns the read-only rootfs. Mount points
+/// the sandbox needs are created here, while the cache is still writable, and with a user namespace
+/// the tree is owned by the mapped container root (as Docker's userns-remap does).
+fn ensure_rootfs(
+    backend: &OciBackend,
+    record: &ImageRecord,
+    userns: Option<IdMapping>,
+) -> Result<PathBuf, NodeError> {
+    let fail = |m: String| NodeError::new(NodeErrorKind::StartFailed, m);
+    let dir = backend.state_dir.join("rootfs");
+    std::fs::create_dir_all(&dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
+    let key = match userns {
+        Some(m) => format!("{}-u{}", record.manifest.digest.hex(), m.host_id),
+        None => record.manifest.digest.hex().to_string(),
+    };
+    let rootfs = dir.join(&key);
+    if rootfs.is_dir() {
+        return Ok(rootfs);
+    }
+    let tmp = dir.join(format!(
+        "{key}.tmp-{}-{}",
+        std::process::id(),
+        IDS.fetch_add(1, Ordering::Relaxed)
+    ));
+    mvf_oci::unpack(&backend.store, record, &tmp).map_err(|e| fail(format!("unpack: {e}")))?;
+    let prepared = prepare_rootfs(&tmp, userns).map_err(|e| fail(format!("prepare rootfs: {e}")));
+    if let Err(e) = prepared {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    if std::fs::rename(&tmp, &rootfs).is_err() {
+        // Another preparation won the race; theirs is identical.
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    Ok(rootfs)
+}
+
+fn prepare_rootfs(root: &Path, userns: Option<IdMapping>) -> std::io::Result<()> {
+    for d in ["proc", "sys", "dev", "tmp", "mvf"] {
+        let p = root.join(d);
+        if std::fs::symlink_metadata(&p).is_err() {
+            std::fs::create_dir_all(&p)?;
+        }
+    }
+    let arena = root.join("mvf/arena");
+    if std::fs::symlink_metadata(&arena).is_err() {
+        std::fs::write(&arena, [])?;
+    }
+    #[cfg(unix)]
+    if let Some(m) = userns {
+        fn walk(p: &Path, id: u32) -> std::io::Result<()> {
+            std::os::unix::fs::lchown(p, Some(id), Some(id))?;
+            let meta = std::fs::symlink_metadata(p)?;
+            if meta.is_dir() {
+                for e in std::fs::read_dir(p)? {
+                    walk(&e?.path(), id)?;
+                }
+            }
+            Ok(())
+        }
+        walk(root, m.host_id)?;
+    }
+    #[cfg(not(unix))]
+    let _ = userns;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn device_node(grant: &mvf_contract::DeviceGrant) -> Result<DeviceNode, String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let m = std::fs::metadata(&grant.path).map_err(|e| format!("{}: {e}", grant.path))?;
+    let kind = if m.file_type().is_char_device() {
+        'c'
+    } else if m.file_type().is_block_device() {
+        'b'
+    } else {
+        return Err(format!("{} is not a device node", grant.path));
+    };
+    let rdev = m.rdev();
+    // Linux dev_t encoding (glibc `major`/`minor`).
+    let major = ((rdev >> 8) & 0xfff) | ((rdev >> 32) & !0xfff);
+    let minor = (rdev & 0xff) | ((rdev >> 12) & !0xff);
+    Ok(DeviceNode {
+        path: grant.path.clone(),
+        kind,
+        major: major as i64,
+        minor: minor as i64,
+        access: grant.access,
+    })
+}
+
+#[cfg(not(unix))]
+fn device_node(grant: &mvf_contract::DeviceGrant) -> Result<DeviceNode, String> {
+    Err(format!("{}: device grants need Linux", grant.path))
+}
+
+/// User namespace used when the host runs as root: container 0..65536 → host 100000..165536.
+pub const USERNS: IdMapping = IdMapping {
+    host_id: 100_000,
+    size: 65_536,
+};
+
+struct OciLauncher {
+    backend: OciBackend,
+    record: ImageRecord,
+    contract: NodeContract,
+    name: String,
+    args: Option<Vec<String>>,
+    container: Option<(String, PathBuf)>,
+}
+
+impl OciLauncher {
+    fn bundle(&mut self, arena: &Path) -> Result<LaunchSpec, NodeError> {
+        let fail = |m: String| NodeError::new(NodeErrorKind::StartFailed, m);
+        let userns = (self.backend.runtime.root
+            && std::env::var_os("MVF_OCI_USERNS").is_none_or(|v| v != "0"))
+        .then_some(USERNS);
+        let rootfs = ensure_rootfs(&self.backend, &self.record, userns)?;
+        let config = mvf_oci::read_config(&self.backend.store, &self.record)
+            .map_err(|e| fail(e.to_string()))?
+            .config
+            .unwrap_or_default();
+        let devices = self
+            .contract
+            .spec
+            .permissions
+            .devices
+            .iter()
+            .map(device_node)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(fail)?;
+        #[cfg(unix)]
+        if let Some(m) = userns {
+            // Container root (host id `m.host_id`) must be able to write its output slots.
+            std::os::unix::fs::chown(arena, Some(m.host_id), Some(m.host_id))
+                .map_err(|e| fail(format!("chown arena: {e}")))?;
+        }
+        let id = format!(
+            "mvf-{}-{}-{}",
+            self.name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                })
+                .collect::<String>(),
+            std::process::id(),
+            IDS.fetch_add(1, Ordering::Relaxed)
+        );
+        let spec = runtime_spec(&SpecInput {
+            rootfs: &rootfs,
+            arena,
+            image: &config,
+            contract: &self.contract,
+            args: self.args.clone(),
+            extra_env: vec![
+                "PYTHONUNBUFFERED=1".into(),
+                "PYTHONDONTWRITEBYTECODE=1".into(),
+            ],
+            devices,
+            userns,
+            hostname: "mvf-node".into(),
+        })
+        .map_err(fail)?;
+        let bundle = self.backend.state_dir.join("bundles").join(&id);
+        std::fs::create_dir_all(&bundle).map_err(|e| fail(format!("{}: {e}", bundle.display())))?;
+        std::fs::write(bundle.join("config.json"), spec.to_string())
+            .map_err(|e| fail(format!("write config.json: {e}")))?;
+        let root = self.backend.state_dir.join("runtime");
+        self.container = Some((id.clone(), bundle.clone()));
+        Ok(LaunchSpec {
+            program: self.backend.runtime.path.clone().into_os_string(),
+            args: vec![
+                OsString::from("--root"),
+                root.into_os_string(),
+                "run".into(),
+                "--bundle".into(),
+                bundle.clone().into_os_string(),
+                id.into(),
+            ],
+            cwd: bundle,
+            env: vec![],
+        })
+    }
+}
+
+impl Launcher for OciLauncher {
+    fn prepare(&mut self, arena: &Path) -> Result<LaunchSpec, NodeError> {
+        self.bundle(arena)
+    }
+
+    fn cleanup(&mut self) {
+        if let Some((id, bundle)) = self.container.take() {
+            delete_container(&self.backend, &id);
+            let _ = std::fs::remove_dir_all(bundle);
+        }
+    }
+}
+
+fn delete_container(backend: &OciBackend, id: &str) {
+    let _ = Command::new(&backend.runtime.path)
+        .arg("--root")
+        .arg(backend.state_dir.join("runtime"))
+        .args(["delete", "--force", id])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Lists containers the runtime still knows about (for leak checks).
+pub fn list_containers(backend: &OciBackend) -> Vec<String> {
+    Command::new(&backend.runtime.path)
+        .arg("--root")
+        .arg(backend.state_dir.join("runtime"))
+        .args(["list", "-q"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_string)
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Result of a generic (non-MVF) workload run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkloadOutput {
+    /// Exit code of the container process (128+signal when killed).
+    pub exit_code: Option<i32>,
+    /// Captured stdout.
+    pub stdout: String,
+    /// Captured stderr.
+    pub stderr: String,
+    /// The run hit the timeout and was killed.
+    pub timed_out: bool,
+}
+
+/// Runs an image's entrypoint (or `args`) to completion under the same sandbox as nodes. This is
+/// the *generic workload* compatibility level: the image does not need to speak the MVF protocol.
+pub fn run_workload(
+    backend: &OciBackend,
+    record: &ImageRecord,
+    contract: &NodeContract,
+    args: Option<Vec<String>>,
+    timeout: Duration,
+) -> Result<WorkloadOutput, NodeError> {
+    let scratch = backend.state_dir.join("workload-arenas");
+    std::fs::create_dir_all(&scratch).map_err(|e| NodeError::failed(e.to_string()))?;
+    let arena = scratch.join(format!(
+        "{}-{}",
+        std::process::id(),
+        IDS.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&arena, []).map_err(|e| NodeError::failed(e.to_string()))?;
+    let mut launcher = OciLauncher {
+        backend: backend.clone(),
+        record: record.clone(),
+        contract: contract.clone(),
+        name: "workload".into(),
+        args,
+        container: None,
+    };
+    let spec = launcher.bundle(&arena)?;
+    let mut child = Command::new(&spec.program)
+        .args(&spec.args)
+        .current_dir(&spec.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| NodeError::new(NodeErrorKind::StartFailed, e.to_string()))?;
+    let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
+    let t_out = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(o) = out.as_mut() {
+            let _ = std::io::Read::read_to_string(o, &mut s);
+        }
+        s
+    });
+    let t_err = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(e) = err.as_mut() {
+            let _ = std::io::Read::read_to_string(e, &mut s);
+        }
+        s
+    });
+    let started = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        if let Ok(Some(s)) = child.try_wait() {
+            break Some(s);
+        }
+        if started.elapsed() > timeout {
+            timed_out = true;
+            launcher.cleanup();
+            let _ = child.kill();
+            break child.wait().ok();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    launcher.cleanup();
+    let _ = std::fs::remove_file(&arena);
+    Ok(WorkloadOutput {
+        exit_code: status.and_then(|s| s.code()),
+        stdout: t_out.join().unwrap_or_default(),
+        stderr: t_err.join().unwrap_or_default(),
+        timed_out,
+    })
+}

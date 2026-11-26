@@ -1,0 +1,8 @@
+# expect: contract.permissions.invalid-device
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: dev.bad, version: 1.0.0 }
+spec:
+  ports: { inputs: [ { name: frame, channel: data, type: frame } ] }
+  artifacts: [ { backend: in-process, builtin: x } ]
+  permissions: { devices: [ { path: /etc/../dev/sda } ] }

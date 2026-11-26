@@ -115,6 +115,7 @@ impl ExecutionBackend for InProcessBackend {
             enforces_cpu_limit: false,
             enforces_pids_limit: false,
             replacement: vec![Replacement::Stateless, Replacement::Stateful],
+            grants: Default::default(),
         }
     }
 

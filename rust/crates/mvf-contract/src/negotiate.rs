@@ -44,6 +44,21 @@ pub struct BackendCapabilities {
     pub enforces_pids_limit: bool,
     /// Live replacement modes the backend supports.
     pub replacement: Vec<Replacement>,
+    /// Grants a sandboxing backend can provide (ignored for backends weaker than `sandbox`).
+    #[serde(default)]
+    pub grants: GrantSupport,
+}
+
+/// Permission grants a sandboxing backend can provide on this host.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantSupport {
+    /// Network policies it can enforce.
+    pub network: Vec<NetworkPolicy>,
+    /// Host device paths present and grantable.
+    pub devices: Vec<String>,
+    /// CDI device names resolvable on this host.
+    pub cdi_devices: Vec<String>,
 }
 
 /// A non-fatal deviation from a preference, surfaced to the operator.
@@ -327,6 +342,40 @@ fn evaluate(
                 code: "placement.advisory-limits",
                 message,
             }),
+        }
+    }
+
+    if caps.isolation >= IsolationLevel::Sandbox {
+        let p = &spec.permissions;
+        if !caps.grants.network.contains(&p.network) {
+            reasons.push(reason(
+                "negotiation.permission-unsupported",
+                format!(
+                    "network policy {:?} cannot be enforced by backend `{}`",
+                    p.network,
+                    caps.kind.as_str()
+                )
+                .to_lowercase(),
+            ));
+        }
+        for d in &p.devices {
+            if !caps.grants.devices.contains(&d.path) {
+                reasons.push(reason(
+                    "negotiation.device-unavailable",
+                    format!(
+                        "device `{}` is not present or not grantable on this host",
+                        d.path
+                    ),
+                ));
+            }
+        }
+        for c in &p.cdi_devices {
+            if !caps.grants.cdi_devices.contains(c) {
+                reasons.push(reason(
+                    "negotiation.cdi-device-unavailable",
+                    format!("CDI device `{c}` is not resolvable on this host (no CDI spec)"),
+                ));
+            }
         }
     }
 

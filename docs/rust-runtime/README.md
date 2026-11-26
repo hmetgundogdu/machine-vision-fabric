@@ -21,6 +21,7 @@ mechanical change once the .NET host retires.
 | `mvf-memory` | #13–#14 | Descriptor codec (compatible with .NET/Python/C++), engine-owned file-backed arena, leases. |
 | `mvf-worker` | #13 | Supervised stdio worker backend (protocol v1): readiness, deadlines, kill, exit classification, logs. |
 | `mvf-oci` | #17 | Offline OCI layout / Docker archive import, verified content store, safe unpack, export, layer builder. |
+| `mvf-container` | #18 | Daemonless OCI backend (runc/crun), default-deny sandbox spec, packaging, generic workloads. |
 | `mvf-cli` | #12– | `mvf-rs` native CLI: `contract`, `validate`, `run`, `host`. |
 
 ## Commands

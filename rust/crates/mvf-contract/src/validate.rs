@@ -445,6 +445,36 @@ fn validate_policy(spec: &NodeSpec, issues: &mut Issues) {
         _ => {}
     }
 
+    for (i, d) in spec.permissions.devices.iter().enumerate() {
+        let ok = d.path.strip_prefix("/dev/").is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .split('/')
+                    .all(|s| !s.is_empty() && s != ".." && s != ".")
+        });
+        if !ok {
+            issues.push(
+                "contract.permissions.invalid-device",
+                format!("spec.permissions.devices[{i}].path"),
+                format!("`{}` must be a path under /dev/", d.path),
+            );
+        }
+    }
+    for (i, name) in spec.permissions.cdi_devices.iter().enumerate() {
+        let valid = name.split_once('=').is_some_and(|(kind, dev)| {
+            kind.split_once('/')
+                .is_some_and(|(vendor, class)| vendor.contains('.') && !class.is_empty())
+                && !dev.is_empty()
+        });
+        if !valid {
+            issues.push(
+                "contract.permissions.invalid-cdi-device",
+                format!("spec.permissions.cdiDevices[{i}]"),
+                format!("`{name}` is not `vendor.com/class=name`"),
+            );
+        }
+    }
+
     let resources = &spec.resources;
     for (field, value) in [
         ("memoryMib", resources.memory_mib),

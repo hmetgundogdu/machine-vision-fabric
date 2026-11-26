@@ -24,6 +24,7 @@ fn in_process() -> BackendCapabilities {
         enforces_cpu_limit: false,
         enforces_pids_limit: false,
         replacement: vec![Replacement::Stateless, Replacement::Stateful],
+        grants: Default::default(),
     }
 }
 
@@ -39,6 +40,7 @@ fn worker() -> BackendCapabilities {
         enforces_cpu_limit: false,
         enforces_pids_limit: false,
         replacement: vec![Replacement::Stateless],
+        grants: Default::default(),
     }
 }
 
@@ -54,6 +56,7 @@ fn compute() -> BackendCapabilities {
         enforces_cpu_limit: false,
         enforces_pids_limit: false,
         replacement: vec![Replacement::Stateless],
+        grants: Default::default(),
     }
 }
 
@@ -110,6 +113,11 @@ fn enforcing_sandbox_backend_is_accepted() {
         enforces_cpu_limit: true,
         enforces_pids_limit: true,
         replacement: vec![Replacement::Stateless],
+        grants: GrantSupport {
+            network: vec![NetworkPolicy::None],
+            devices: vec![],
+            cdi_devices: vec![],
+        },
     };
     let p = negotiate(&load("oci-sandboxed-detector.yaml"), &[oci]).expect("placed");
     assert_eq!(p.backend, BackendKind::Oci);
@@ -176,4 +184,67 @@ fn pinned_backend_is_never_substituted() {
             .iter()
             .all(|r| r.backend == BackendKind::Compute)
     );
+}
+
+fn sandbox(grants: GrantSupport) -> BackendCapabilities {
+    BackendCapabilities {
+        kind: BackendKind::Oci,
+        isolation: IsolationLevel::Sandbox,
+        targets: vec![Target::Cpu],
+        zero_copy_domains: vec![MemoryDomain::Host],
+        cancellation: Cancellation::Enforceable,
+        enforceable_termination: true,
+        enforces_memory_limit: true,
+        enforces_cpu_limit: true,
+        enforces_pids_limit: true,
+        replacement: vec![Replacement::Stateless],
+        grants,
+    }
+}
+
+#[test]
+fn sandbox_permissions_are_default_deny_and_unavailable_grants_fail_closed() {
+    let mut contract = load("oci-sandboxed-detector.yaml");
+    let none = GrantSupport {
+        network: vec![NetworkPolicy::None],
+        devices: vec!["/dev/video0".into()],
+        cdi_devices: vec![],
+    };
+    assert!(
+        negotiate(&contract, &[sandbox(none.clone())]).is_ok(),
+        "no grants requested"
+    );
+
+    contract.spec.permissions.network = NetworkPolicy::Loopback;
+    contract.spec.permissions.devices = vec![
+        DeviceGrant {
+            path: "/dev/video0".into(),
+            access: DeviceAccess::R,
+        },
+        DeviceGrant {
+            path: "/dev/ttyUSB0".into(),
+            access: DeviceAccess::Rw,
+        },
+    ];
+    contract.spec.permissions.cdi_devices = vec!["nvidia.com/gpu=0".into()];
+    let err = negotiate(&contract, &[sandbox(none)]).unwrap_err();
+    let codes: Vec<_> = err.rejections[0].reasons.iter().map(|r| r.code).collect();
+    assert_eq!(
+        codes,
+        [
+            "negotiation.permission-unsupported",
+            "negotiation.device-unavailable",
+            "negotiation.cdi-device-unavailable"
+        ]
+    );
+}
+
+#[test]
+fn permissions_do_not_apply_to_non_restricting_backends() {
+    let mut contract = load("python-worker-classifier.yaml");
+    contract.spec.permissions.devices = vec![DeviceGrant {
+        path: "/dev/video0".into(),
+        access: DeviceAccess::Rw,
+    }];
+    assert!(negotiate(&contract, &[worker()]).is_ok());
 }

@@ -108,6 +108,7 @@ impl ExecutionBackend for WorkerBackend {
             enforces_cpu_limit: false,
             enforces_pids_limit: false,
             replacement: vec![Replacement::Stateless],
+            grants: Default::default(),
         }
     }
 
@@ -155,24 +156,66 @@ impl ExecutionBackend for WorkerBackend {
             }
             WorkerRuntime::Executable => (entry_path.clone().into_os_string(), vec![]),
         };
-        Ok(Box::new(WorkerNode {
-            node_id: request.node_id.to_string(),
-            generation: request.generation,
-            spec: LaunchSpec {
-                program,
-                args,
-                cwd: contract_dir,
-                env,
-            },
-            config: request.config.clone(),
-            services: request.services.clone(),
-            mapping,
-            process: None,
-            capability: Capability::Classifier,
-            next_id: 1,
-            verify_inputs: self.verify_inputs,
-        }))
+        let _ = mapping;
+        worker_node(
+            request,
+            Box::new(ProcessLauncher {
+                spec: LaunchSpec {
+                    program,
+                    args,
+                    cwd: contract_dir,
+                    env,
+                },
+            }),
+            self.verify_inputs,
+        )
     }
+}
+
+/// Produces the command that starts a worker once the engine-owned arena exists, and cleans up
+/// whatever it created when the worker is gone. A plain process and an OCI container are both
+/// launchers; the protocol, supervision and data plane are identical.
+pub trait Launcher: Send {
+    /// The command to spawn. `arena` is the host path of the engine-owned arena.
+    fn prepare(&mut self, arena: &Path) -> Result<LaunchSpec, NodeError>;
+    /// Releases launcher resources (containers, bundles). Must be idempotent.
+    fn cleanup(&mut self) {}
+}
+
+/// Launches a local process with `MVF_ARENA_PATH` pointing at the arena.
+#[derive(Debug, Clone)]
+pub struct ProcessLauncher {
+    /// Base command.
+    pub spec: LaunchSpec,
+}
+
+impl Launcher for ProcessLauncher {
+    fn prepare(&mut self, arena: &Path) -> Result<LaunchSpec, NodeError> {
+        let mut spec = self.spec.clone();
+        spec.env
+            .push(("MVF_ARENA_PATH".into(), arena.as_os_str().to_owned()));
+        Ok(spec)
+    }
+}
+
+/// Builds a supervised protocol-v1 worker handle around any launcher.
+pub fn worker_node(
+    request: &InstantiateRequest<'_>,
+    launcher: Box<dyn Launcher>,
+    verify_inputs: bool,
+) -> Result<Box<dyn NodeHandle>, NodeError> {
+    Ok(Box::new(WorkerNode {
+        node_id: request.node_id.to_string(),
+        generation: request.generation,
+        launcher,
+        config: request.config.clone(),
+        services: request.services.clone(),
+        mapping: PortMapping::from_contract(request.contract)?,
+        process: None,
+        capability: Capability::Classifier,
+        next_id: 1,
+        verify_inputs,
+    }))
 }
 
 fn unsupported(message: impl Into<String>) -> NodeError {
@@ -262,7 +305,7 @@ enum Capability {
 struct WorkerNode {
     node_id: String,
     generation: u64,
-    spec: LaunchSpec,
+    launcher: Box<dyn Launcher>,
     config: serde_json::Map<String, serde_json::Value>,
     services: HostServices,
     mapping: PortMapping,
@@ -302,6 +345,7 @@ impl WorkerNode {
             }
             WaitError::Exited(info) => info.to_error(&format!("during {context}")),
         };
+        self.launcher.cleanup();
         self.log(e.message.clone());
         e
     }
@@ -322,9 +366,7 @@ impl NodeHandle for WorkerNode {
         let started = Instant::now();
         let deadline = started + ctx.budget;
         let arena = self.arena()?;
-        let mut spec = self.spec.clone();
-        spec.env
-            .push(("MVF_ARENA_PATH".into(), arena.path().as_os_str().to_owned()));
+        let spec = self.launcher.prepare(arena.path())?;
         let process =
             WorkerProcess::spawn(&spec, &self.node_id, self.generation, &self.services.logs)
                 .map_err(|e| {
@@ -593,9 +635,19 @@ impl NodeHandle for WorkerNode {
         let pid = process.pid();
         let outcome = process.shutdown(ctx.budget.max(Duration::from_millis(1)));
         let exit = process.exit();
+        drop(process);
+        self.launcher.cleanup();
         self.log(format!(
             "stopped pid={pid} outcome={outcome:?} exit={exit:?}"
         ));
         outcome
+    }
+}
+
+impl Drop for WorkerNode {
+    fn drop(&mut self) {
+        // The process (if any) is killed and reaped by its own Drop first.
+        self.process.take();
+        self.launcher.cleanup();
     }
 }

@@ -61,6 +61,64 @@ pub struct NodeSpec {
     /// Resource budget.
     #[serde(default)]
     pub resources: Resources,
+    /// What a sandboxed node is granted. Everything not granted is denied.
+    #[serde(default)]
+    pub permissions: Permissions,
+}
+
+/// Grants for sandboxed execution (`isolation.minimum: sandbox` or stronger). A backend that cannot
+/// provide a requested grant is rejected; nothing outside the grants is reachable. Backends weaker
+/// than `sandbox` do not restrict anything, so permissions do not apply to them.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Permissions {
+    /// Network access.
+    #[serde(default)]
+    pub network: NetworkPolicy,
+    /// Host device nodes made visible to the node.
+    #[serde(default)]
+    pub devices: Vec<DeviceGrant>,
+    /// Container Device Interface devices (e.g. `nvidia.com/gpu=0`).
+    #[serde(default)]
+    pub cdi_devices: Vec<String>,
+}
+
+/// Network policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NetworkPolicy {
+    /// An empty network namespace: no interfaces besides a down loopback.
+    #[default]
+    None,
+    /// Loopback only.
+    Loopback,
+}
+
+/// One device grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DeviceGrant {
+    /// Device path under `/dev/`.
+    pub path: String,
+    /// `r`, `w` or `rw`.
+    #[serde(default = "default_rw")]
+    pub access: DeviceAccess,
+}
+
+fn default_rw() -> DeviceAccess {
+    DeviceAccess::Rw
+}
+
+/// Device access mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceAccess {
+    /// Read.
+    R,
+    /// Write.
+    W,
+    /// Read and write.
+    Rw,
 }
 
 /// Input and output ports.

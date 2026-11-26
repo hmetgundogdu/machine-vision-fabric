@@ -91,6 +91,23 @@ fn add_blob<W: Write>(store: &ContentStore, b: &mut tar::Builder<W>, d: &Descrip
     Ok(())
 }
 
+/// Normalizes an image name like Docker does: `busybox:1` → `docker.io/library/busybox:1`,
+/// `mvf/app:1` → `docker.io/mvf/app:1`; names with a registry host are kept. containerd stores
+/// (and looks up) the fully qualified form.
+pub fn normalize_reference(name: &str) -> String {
+    let first = name.split('/').next().unwrap_or_default();
+    let has_domain =
+        name.contains('/') && (first.contains('.') || first.contains(':') || first == "localhost");
+    if has_domain || name.starts_with("sha256:") {
+        return name.to_string();
+    }
+    if name.contains('/') {
+        format!("docker.io/{name}")
+    } else {
+        format!("docker.io/library/{name}")
+    }
+}
+
 /// Writes `record` to `out` in `format`.
 pub fn export(
     store: &ContentStore,
@@ -116,7 +133,7 @@ pub fn export(
             "digest": record.manifest.digest,
             "size": record.manifest.size,
             "annotations": {
-                "io.containerd.image.name": record.name,
+                "io.containerd.image.name": normalize_reference(&record.name),
                 "org.opencontainers.image.ref.name": tag,
             },
         }],

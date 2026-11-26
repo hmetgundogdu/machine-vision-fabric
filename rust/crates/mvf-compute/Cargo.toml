@@ -1,0 +1,15 @@
+[package]
+name = "mvf-compute"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+pollster = "1.0.3"
+wgpu = "30.0.2"
+
+[lints]
+workspace = true

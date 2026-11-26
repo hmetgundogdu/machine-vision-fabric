@@ -56,6 +56,28 @@ pub enum ImageCommand {
     },
     /// Delete blobs no image references.
     Gc,
+    /// Package a Python module as an OCI-profile node image on top of a stored base image, and
+    /// write its node contract pinned to the new image digest.
+    Package {
+        /// Stored base image (must contain python3).
+        #[arg(long)]
+        base: String,
+        /// Name of the new image.
+        #[arg(long)]
+        name: String,
+        /// Module directory (with `node.yaml` and the entry script).
+        #[arg(long)]
+        module: PathBuf,
+        /// Entry script inside the module directory.
+        #[arg(long)]
+        entry: String,
+        /// The `mvf_sdk` package directory.
+        #[arg(long)]
+        sdk: PathBuf,
+        /// Where to write the OCI node contract.
+        #[arg(long)]
+        contract_out: PathBuf,
+    },
 }
 
 pub fn default_store() -> PathBuf {
@@ -154,6 +176,44 @@ pub fn run(store_root: &Path, command: ImageCommand) -> ExitCode {
             }
             ImageCommand::Rm { name } => store.remove(&name)?,
             ImageCommand::Gc => println!("{:?}", store.gc()?),
+            ImageCommand::Package {
+                base,
+                name,
+                module,
+                entry,
+                sdk,
+                contract_out,
+            } => {
+                let base = store.record(&base)?;
+                let text = std::fs::read_to_string(module.join("node.yaml"))
+                    .map_err(|e| mvf_oci::OciError::Malformed(format!("node.yaml: {e}")))?;
+                let module_contract = mvf_contract::parse_contract(&text)
+                    .map_err(|e| mvf_oci::OciError::Malformed(e.to_string()))?;
+                let record = mvf_container::package::python_node_image(
+                    &store,
+                    &base,
+                    &name,
+                    &sdk,
+                    &module,
+                    &entry,
+                    &mvf_container::package::contract_text(&module_contract),
+                )?;
+                let contract = mvf_container::package::oci_contract(
+                    &module_contract,
+                    &name,
+                    record.manifest.digest.as_str(),
+                );
+                std::fs::write(
+                    &contract_out,
+                    mvf_container::package::contract_text(&contract),
+                )
+                .map_err(|e| mvf_oci::OciError::Malformed(e.to_string()))?;
+                println!(
+                    "{name} {} -> {}",
+                    record.manifest.digest,
+                    contract_out.display()
+                );
+            }
         }
         Ok(())
     })();

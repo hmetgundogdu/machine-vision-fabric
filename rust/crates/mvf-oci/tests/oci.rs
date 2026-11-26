@@ -80,7 +80,10 @@ fn oci_layout_round_trip_preserves_every_digest() {
 
     let b = ContentStore::open(dir.join("b")).expect("store");
     let imported = import(&b, &tar, &linux("arm64"), None).expect("import");
-    assert_eq!(imported.name, "mvf/sample:1");
+    assert_eq!(
+        imported.name, "docker.io/mvf/sample:1",
+        "names are stored fully qualified, as Docker does"
+    );
     assert_eq!(imported.manifest.digest, original.manifest.digest);
     assert_eq!(imported.config.digest, original.config.digest);
     assert_eq!(imported.layers, original.layers);
@@ -629,4 +632,26 @@ mod unpacking {
         unpack(&store, &derived, &root).expect("unpack");
         assert!(root.join("app/main.py").is_file() && root.join("bin/app").is_file());
     }
+}
+
+#[test]
+fn references_are_normalized_like_docker() {
+    use mvf_oci::export::normalize_reference;
+    assert_eq!(
+        normalize_reference("busybox:1.37"),
+        "docker.io/library/busybox:1.37"
+    );
+    assert_eq!(
+        normalize_reference("mvf/py-invert:1"),
+        "docker.io/mvf/py-invert:1"
+    );
+    assert_eq!(
+        normalize_reference("docker.io/library/python:3"),
+        "docker.io/library/python:3"
+    );
+    assert_eq!(
+        normalize_reference("registry.local:5000/a/b:c"),
+        "registry.local:5000/a/b:c"
+    );
+    assert_eq!(normalize_reference("localhost/x:1"), "localhost/x:1");
 }
