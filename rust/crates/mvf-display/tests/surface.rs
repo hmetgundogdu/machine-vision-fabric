@@ -94,12 +94,21 @@ fn a_torn_forged_or_truncated_surface_is_never_shown() {
         .present(&frame(&pattern(64, 64, 1), 64, 64))
         .expect("present");
 
-    // Corrupt one pixel of the published buffer behind the writer's back (a torn write).
-    let mut bytes = std::fs::read(&path).expect("read");
+    // Corrupt one pixel of the published buffer behind the writer's back (a torn write). Patched
+    // in place: Windows refuses to truncate a file that is mapped.
+    let bytes = std::fs::read(&path).expect("read");
     let published = u64::from_le_bytes(bytes[256..264].try_into().expect("8 bytes"));
     let buffer = g.buffers_offset + (published & 3) as usize * g.capacity;
-    bytes[buffer + 100] ^= 0xFF;
-    std::fs::write(&path, &bytes).expect("write");
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open");
+        f.seek(SeekFrom::Start((buffer + 100) as u64))
+            .expect("seek");
+        f.write_all(&[bytes[buffer + 100] ^ 0xFF]).expect("write");
+    }
     let mut out = Vec::new();
     assert!(
         host.take_latest(&mut out).is_none(),
