@@ -468,8 +468,13 @@ fn an_ftp_source_turns_each_uploaded_image_into_a_typed_frame() {
         .chain((0..20u8).map(|i| vec![i; 256 * 1024]))
         .collect();
     let uploads = files.clone();
+    // The camera stops retrying once the run has ended, so a module that fails to start reports its
+    // own error instead of a long retry loop (a refused connect takes ~2 s on Windows).
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
     let camera = std::thread::spawn(move || {
-        for _ in 0..80 {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline && !stopped.load(std::sync::atomic::Ordering::SeqCst) {
             match ftp_upload("127.0.0.1:2181", "cognex-1", &uploads) {
                 Ok(t) => return Ok(t),
                 Err(e) if e.starts_with("connect") => {
@@ -481,7 +486,14 @@ fn an_ftp_source_turns_each_uploaded_image_into_a_typed_frame() {
         Err("server never came up".to_string())
     });
     let r = e.run(&RunOptions::default(), &mut NullObserver);
-    let timings = camera.join().expect("camera").expect("uploads");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let timings = camera.join().expect("camera").unwrap_or_else(|err| {
+        panic!(
+            "uploads: {err}; run: {:?}; logs: {:?}",
+            r.end,
+            s.logs.events()
+        )
+    });
     assert_eq!(
         r.end,
         EndReason::SourceExhausted { node: "ftp".into() },

@@ -18,10 +18,15 @@ network. Credentials are never logged.
 """
 import os
 import queue
-import resource
 import socket
 import sys
 import threading
+import time
+
+try:
+    import resource  # Unix only; peak RSS is reported where it exists
+except ImportError:  # Windows
+    resource = None
 
 from mvf_sdk import log, run_source, source_frame
 
@@ -168,10 +173,12 @@ def produce():
     _start()
     limit = int(_config["maxFiles"] or 0)
     if limit and _count["emitted"] >= limit:
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        rss_kib = usage.ru_maxrss // (1024 if sys.platform == "darwin" else 1)
+        rss_kib = "n/a"
+        if resource is not None:
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            rss_kib = usage.ru_maxrss // (1024 if sys.platform == "darwin" else 1)
         log("ftp: done files={} peak_rss_kib={} cpu_s={:.3f}".format(
-            _count["files"], rss_kib, usage.ru_utime + usage.ru_stime))
+            _count["files"], rss_kib, time.process_time()))
         return None
     camera, payload, _name = _frames.get()
     _count["emitted"] += 1
