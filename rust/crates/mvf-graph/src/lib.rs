@@ -74,6 +74,9 @@ pub struct PipelineSpec {
     /// Run bounds.
     #[serde(default)]
     pub run: RunSpec,
+    /// Volumes nodes may mount (#31): persistent, shared, host binds and pinned artifacts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<mvf_contract::VolumeDecl>,
 }
 
 /// One node instance in a pipeline.
@@ -103,6 +106,9 @@ pub struct NodeRef {
     /// Deployment-time network binding (host address, published ports, advertised address).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<mvf_contract::NetworkBinding>,
+    /// Storage binding: the contract's logical mount name -> a pipeline volume name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<BTreeMap<String, String>>,
     /// Instance configuration handed to the implementation (validated by it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Map<String, serde_json::Value>>,
@@ -351,6 +357,9 @@ pub struct GraphNode {
     /// Deployment-time network binding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<mvf_contract::NetworkBinding>,
+    /// The node's mounts, resolved against the pipeline's volumes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub storage: Vec<mvf_contract::BoundMount>,
 }
 
 impl GraphNode {
@@ -432,6 +441,9 @@ pub struct Graph {
     pub loop_spec: Option<LoopSpec>,
     /// Node-level loop edges `(from, loop)` by node index.
     pub loop_edges: Vec<(usize, usize)>,
+    /// Declared volumes (live replacement may rebind a node to another of them).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<mvf_contract::VolumeDecl>,
 }
 
 /// The graph's `loop` primitive.
@@ -555,6 +567,9 @@ pub fn build_from_document(
         );
     }
     let spec = &doc.spec;
+    for g in volume_issues(spec) {
+        issue(g.code, g.path, g.message);
+    }
     if spec.nodes.is_empty() {
         issue(
             "graph.node.none",
@@ -774,6 +789,25 @@ pub fn build_from_document(
         if let (Some((_, contract)), Some(binding)) = (&resolved, &node.network) {
             validate_binding(contract, binding, &format!("{path}.network"), &mut issue);
         }
+        let storage = match &resolved {
+            Some((_, contract)) => match bind_storage(
+                &node.id,
+                contract,
+                node.storage.as_ref().unwrap_or(&BTreeMap::new()),
+                &spec.volumes,
+                &doc.metadata.name,
+                &format!("{path}.storage"),
+            ) {
+                Ok(mounts) => mounts,
+                Err(found) => {
+                    for g in found {
+                        issue(g.code, g.path, g.message);
+                    }
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
         if let Some((origin, contract)) = resolved {
             let role_default = if primitive.is_none() && contract.spec.ports.inputs.is_empty() {
                 &spec.run.on_error.sources
@@ -798,6 +832,7 @@ pub fn build_from_document(
                 bindings,
                 parallelism: node.parallelism.unwrap_or(1),
                 network: node.network.clone(),
+                storage,
             });
         }
     }
@@ -1085,7 +1120,291 @@ pub fn build_from_document(
         checkpoint: spec.run.checkpoint.clone(),
         loop_spec,
         loop_edges,
+        volumes: spec.volumes.clone(),
     })
+}
+
+fn volume_issues(spec: &PipelineSpec) -> Vec<GraphIssue> {
+    use mvf_contract::VolumeKind as K;
+    let mut out = Vec::new();
+    let mut push = |code: &'static str, path: String, message: String| {
+        out.push(GraphIssue {
+            code,
+            path,
+            message,
+        })
+    };
+    let ids: HashSet<&str> = spec.nodes.iter().map(|n| n.id.as_str()).collect();
+    let mut names = HashSet::new();
+    for (i, v) in spec.volumes.iter().enumerate() {
+        let path = format!("spec.volumes[{i}]");
+        let valid = v
+            .name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase())
+            && v.name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && v.name.len() <= 63;
+        if !valid {
+            push(
+                "graph.storage.invalid-volume-name",
+                format!("{path}.name"),
+                format!("`{}` is not `[a-z][a-z0-9-]*` (at most 63)", v.name),
+            );
+        }
+        if !names.insert(v.name.as_str()) {
+            push(
+                "graph.storage.duplicate-volume",
+                format!("{path}.name"),
+                format!("volume `{}` is declared twice", v.name),
+            );
+        }
+        let stray = |field: &str, set: bool| set.then(|| field.to_string());
+        let extra: Vec<String> = match v.kind {
+            K::Persistent => [
+                stray("writers", !v.writers.is_empty()),
+                stray("hostPath", v.host_path.is_some()),
+                stray("access", v.access.is_some()),
+                stray("file", v.file.is_some()),
+                stray("digest", v.digest.is_some()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+            K::Shared => [
+                stray("hostPath", v.host_path.is_some()),
+                stray("access", v.access.is_some()),
+                stray("file", v.file.is_some()),
+                stray("digest", v.digest.is_some()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+            K::Bind => [
+                stray("writers", !v.writers.is_empty()),
+                stray("file", v.file.is_some()),
+                stray("digest", v.digest.is_some()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+            K::Artifact => [
+                stray("writers", !v.writers.is_empty()),
+                stray("hostPath", v.host_path.is_some()),
+                stray("access", v.access.is_some()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        };
+        if !extra.is_empty() {
+            push(
+                "graph.storage.invalid-volume",
+                path.clone(),
+                format!("a `{}` volume has no {}", v.kind.as_str(), extra.join(", ")),
+            );
+        }
+        for w in &v.writers {
+            if !ids.contains(w.as_str()) {
+                push(
+                    "graph.storage.unknown-writer",
+                    format!("{path}.writers"),
+                    format!("writer `{w}` is not a node of this pipeline"),
+                );
+            }
+        }
+        match v.kind {
+            K::Bind => match &v.host_path {
+                None => push(
+                    "graph.storage.invalid-volume",
+                    format!("{path}.hostPath"),
+                    "a `bind` volume needs `hostPath`".into(),
+                ),
+                Some(p) => {
+                    if let Some(why) = mvf_contract::host_path_issue(p) {
+                        push(
+                            "graph.storage.unsafe-host-path",
+                            format!("{path}.hostPath"),
+                            why,
+                        );
+                    }
+                }
+            },
+            K::Artifact => {
+                match &v.file {
+                    None => push(
+                        "graph.storage.invalid-volume",
+                        format!("{path}.file"),
+                        "an `artifact` volume needs `file`".into(),
+                    ),
+                    Some(f) if !mvf_contract::is_safe_relative_path(f) => push(
+                        "graph.storage.unsafe-artifact-path",
+                        format!("{path}.file"),
+                        format!("`{f}` must be a relative path inside the pipeline package"),
+                    ),
+                    _ => {}
+                }
+                if !v
+                    .digest
+                    .as_deref()
+                    .is_some_and(mvf_contract::is_valid_digest)
+                {
+                    push(
+                        "graph.storage.invalid-digest",
+                        format!("{path}.digest"),
+                        "an artifact is pinned by `digest: sha256:<64 lower-case hex>`".into(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    // A persistent volume has one owner; several nodes need a `shared` one with explicit writers.
+    for v in spec
+        .volumes
+        .iter()
+        .filter(|v| v.kind == mvf_contract::VolumeKind::Persistent)
+    {
+        let users: Vec<&str> = spec
+            .nodes
+            .iter()
+            .filter(|n| {
+                n.storage
+                    .as_ref()
+                    .is_some_and(|m| m.values().any(|x| *x == v.name))
+            })
+            .map(|n| n.id.as_str())
+            .collect();
+        if users.len() > 1 {
+            push(
+                "graph.storage.volume-not-shared",
+                "spec.volumes".into(),
+                format!(
+                    "persistent volume `{}` is mounted by {}; declare it `type: shared` with explicit `writers`",
+                    v.name,
+                    users.join(", ")
+                ),
+            );
+        }
+    }
+    out
+}
+
+/// Resolves a node's logical mounts against the pipeline's volumes, enforcing that no node gets
+/// more access than the volume allows. Used at graph build and for live-replacement rebinding.
+pub fn bind_storage(
+    node: &str,
+    contract: &NodeContract,
+    map: &BTreeMap<String, String>,
+    volumes: &[mvf_contract::VolumeDecl],
+    scope: &str,
+    path: &str,
+) -> Result<Vec<mvf_contract::BoundMount>, Vec<GraphIssue>> {
+    use mvf_contract::{MountAccess, MountKind, VolumeKind as K};
+    let mut issues = Vec::new();
+    let mut push = |code: &'static str, at: String, message: String| {
+        issues.push(GraphIssue {
+            code,
+            path: at,
+            message,
+        })
+    };
+    let mounts = &contract.spec.storage.mounts;
+    for key in map.keys() {
+        match mounts.iter().find(|m| m.name == *key) {
+            None => push(
+                "graph.storage.unknown-mount",
+                format!("{path}.{key}"),
+                format!(
+                    "contract `{}` declares no mount `{key}`",
+                    contract.metadata.id
+                ),
+            ),
+            Some(m) if m.kind == MountKind::Scratch => push(
+                "graph.storage.scratch-is-provisioned",
+                format!("{path}.{key}"),
+                format!(
+                    "`{key}` is scratch space the engine provisions; it is not bound to a volume"
+                ),
+            ),
+            _ => {}
+        }
+    }
+    let mut bound = Vec::new();
+    for m in mounts {
+        if m.kind == MountKind::Scratch {
+            bound.push(mvf_contract::BoundMount {
+                mount: m.clone(),
+                volume: None,
+                access: MountAccess::ReadWrite,
+                scope: scope.to_string(),
+            });
+            continue;
+        }
+        let at = format!("{path}.{}", m.name);
+        let Some(name) = map.get(&m.name) else {
+            if m.required {
+                push(
+                    "graph.storage.unbound-mount",
+                    at,
+                    format!(
+                        "node `{node}` needs a volume for mount `{}` ({}); bind it in `storage`",
+                        m.name, m.target
+                    ),
+                );
+            }
+            continue;
+        };
+        let Some(volume) = volumes.iter().find(|v| v.name == *name) else {
+            push(
+                "graph.storage.unknown-volume",
+                at,
+                format!("`{name}` is not declared in `spec.volumes`"),
+            );
+            continue;
+        };
+        if m.access == MountAccess::ReadWrite {
+            let denied = match volume.kind {
+                K::Artifact => Some("artifacts are immutable"),
+                K::Bind if volume.access != Some(MountAccess::ReadWrite) => {
+                    Some("the operator approved this host directory read-only")
+                }
+                K::Shared if !volume.writers.iter().any(|w| w == node) => {
+                    Some("the node is not one of the volume's `writers`")
+                }
+                _ => None,
+            };
+            if let Some(why) = denied {
+                push(
+                    if volume.kind == K::Shared {
+                        "graph.storage.not-a-writer"
+                    } else {
+                        "graph.storage.read-only-volume"
+                    },
+                    at,
+                    format!(
+                        "mount `{}` asks for read-write on `{}` volume `{name}`: {why}",
+                        m.name,
+                        volume.kind.as_str()
+                    ),
+                );
+                continue;
+            }
+        }
+        bound.push(mvf_contract::BoundMount {
+            mount: m.clone(),
+            volume: Some(volume.clone()),
+            access: m.access,
+            scope: scope.to_string(),
+        });
+    }
+    if issues.is_empty() {
+        Ok(bound)
+    } else {
+        Err(issues)
+    }
 }
 
 /// A deployment binding may only publish ports the contract declares as inbound listeners.

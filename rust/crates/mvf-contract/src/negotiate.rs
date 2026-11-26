@@ -53,6 +53,21 @@ pub struct BackendCapabilities {
     /// Presentation the backend can provide on this host (#30).
     #[serde(default)]
     pub display: DisplaySupport,
+    /// Filesystem mounts the backend can provide on this host (#31).
+    #[serde(default)]
+    pub storage: StorageSupport,
+}
+
+/// What a backend can provide for `spec.storage` on this host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageSupport {
+    /// The backend hands the node resolved paths for its mounts at all.
+    pub mounts: bool,
+    /// The node sees only its mounts, and read-only access is enforced by the kernel.
+    pub enforced: bool,
+    /// Scratch `maxSize` is a hard limit (writes beyond it fail), not an advisory one.
+    pub hard_quota: bool,
 }
 
 /// What a backend can provide for `permissions.display` on this host.
@@ -439,6 +454,7 @@ fn evaluate(
     }
 
     evaluate_display(spec, caps, &mut reasons, &mut notes);
+    evaluate_storage(spec, caps, &mut reasons, &mut notes);
 
     let replacement = spec.lifecycle.replacement;
     if replacement != Replacement::Unsupported && !caps.replacement.contains(&replacement) {
@@ -456,6 +472,50 @@ fn evaluate(
         Ok((zero_copy, notes))
     } else {
         Err(reasons)
+    }
+}
+
+fn evaluate_storage(
+    spec: &NodeSpec,
+    caps: &BackendCapabilities,
+    reasons: &mut Vec<RejectionReason>,
+    notes: &mut Vec<PlacementNote>,
+) {
+    let s = &spec.storage;
+    if s.mounts.is_empty() {
+        return;
+    }
+    let backend = caps.kind.as_str();
+    if !caps.storage.mounts {
+        reasons.push(reason(
+            "negotiation.storage-unsupported",
+            format!("backend `{backend}` cannot give a node filesystem mounts"),
+        ));
+        return;
+    }
+    let scratch = s.mounts.iter().any(|m| m.kind == MountKind::Scratch);
+    if s.isolation == StorageIsolation::Required && !caps.storage.enforced {
+        reasons.push(reason(
+            "negotiation.storage-not-enforceable",
+            format!(
+                "the node requires its filesystem to be confined; backend `{backend}` runs it with \
+                 the host filesystem of its user (read-only and the mount set are not enforced)"
+            ),
+        ));
+    } else if s.isolation == StorageIsolation::Required && scratch && !caps.storage.hard_quota {
+        reasons.push(reason(
+            "negotiation.storage-not-enforceable",
+            format!("backend `{backend}` cannot enforce scratch `maxSize`"),
+        ));
+    } else if !caps.storage.enforced {
+        notes.push(PlacementNote {
+            code: "placement.storage-not-isolated",
+            message: format!(
+                "backend `{backend}` gives the node resolved host paths; read-only access, the mount \
+                 set{} are not enforced",
+                if scratch { " and scratch `maxSize`" } else { "" }
+            ),
+        });
     }
 }
 

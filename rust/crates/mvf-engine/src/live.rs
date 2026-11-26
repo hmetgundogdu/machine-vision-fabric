@@ -325,6 +325,7 @@ impl Engine {
                 generation,
                 services: &self.services,
                 network: slot.network.as_ref(),
+                storage: &slot.storage,
             })?
         };
         let slot = &mut self.slots[i];

@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 mvf-contract = { path = "../mvf-contract" }
 mvf-display = { path = "../mvf-display" }
+mvf-storage = { path = "../mvf-storage" }
 mvf-engine = { path = "../mvf-engine" }
 mvf-graph = { path = "../mvf-graph" }
 mvf-memory = { path = "../mvf-memory" }
@@ -25,3 +26,6 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+mvf-oci = { path = "../mvf-oci" }

@@ -20,9 +20,11 @@ pub mod yaml;
 pub use model::*;
 pub use negotiate::{
     BackendCapabilities, Cancellation, DisplaySupport, GrantSupport, NegotiatedPlacement,
-    NegotiationError, PlacementNote, Rejection, RejectionReason, negotiate,
+    NegotiationError, PlacementNote, Rejection, RejectionReason, StorageSupport, negotiate,
 };
-pub use validate::{ContractIssue, validate};
+pub use validate::{
+    ContractIssue, is_safe_mount_target, is_safe_relative_path, is_valid_digest, validate,
+};
 
 /// Loading a contract failed: either the YAML was rejected or the contract is invalid.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

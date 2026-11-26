@@ -7,6 +7,7 @@
 //! stderr, so stdout stays machine-readable.
 
 mod image;
+mod volume;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -117,6 +118,14 @@ enum Command {
         #[command(subcommand)]
         command: image::ImageCommand,
     },
+    /// Retained volumes and pinned artifacts (#31): list, inspect, delete explicitly.
+    Volume {
+        /// Storage root (default: `MVF_STORAGE_DIR` or the per-user default).
+        #[arg(long, global = true)]
+        storage: Option<std::path::PathBuf>,
+        #[command(subcommand)]
+        command: volume::VolumeCommand,
+    },
 }
 
 fn main() -> ExitCode {
@@ -180,6 +189,11 @@ fn main() -> ExitCode {
         Command::Image { store, command } => {
             image::run(&store.unwrap_or_else(image::default_store), command)
         }
+        Command::Volume { storage, command } => volume::run(
+            &storage
+                .unwrap_or_else(|| mvf_storage::StorageService::from_env().root().to_path_buf()),
+            command,
+        ),
     }
 }
 

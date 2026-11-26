@@ -320,6 +320,7 @@ pub(crate) fn restart_slot(
         generation,
         services: ctx.services,
         network: slot.network.as_ref(),
+        storage: &slot.storage,
     })?;
     let start = LifecycleContext {
         node_id: &slot.id,

@@ -132,6 +132,22 @@ pub struct SpecInput<'a> {
     /// writer lock. Bind-mounted into a private tmpfs at [`CONTAINER_DISPLAY`]; nothing else of
     /// the display — no server socket, no host lock, no other node's surface — is visible.
     pub display: Vec<(String, std::path::PathBuf)>,
+    /// Storage Fabric mounts (#31): binds of provisioned host directories and size-limited tmpfs
+    /// scratch. Targets were validated by the contract and prepared in the rootfs.
+    pub volumes: Vec<VolumeMount>,
+}
+
+/// One storage mount of a sandbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeMount {
+    /// Path inside the sandbox.
+    pub target: String,
+    /// Host directory to bind; `None` for a tmpfs.
+    pub source: Option<std::path::PathBuf>,
+    /// Kernel read-only (bind).
+    pub read_only: bool,
+    /// tmpfs size limit in bytes (scratch).
+    pub tmpfs_bytes: Option<u64>,
 }
 
 /// A Linux security module profile the host provides.
@@ -338,6 +354,21 @@ pub fn runtime_spec(input: &SpecInput<'_>) -> Result<Value, String> {
         ],
         "linux": linux,
     });
+    if let Some(mounts) = spec["mounts"].as_array_mut() {
+        for v in &input.volumes {
+            match (&v.source, v.tmpfs_bytes) {
+                (Some(src), _) => mounts.push(json!({
+                    "destination": v.target, "type": "bind", "source": src,
+                    "options": ["rbind", if v.read_only { "ro" } else { "rw" }, "nosuid", "nodev", "noexec"]
+                })),
+                (None, Some(bytes)) => mounts.push(json!({
+                    "destination": v.target, "type": "tmpfs", "source": "tmpfs",
+                    "options": ["nosuid", "nodev", "noexec", "mode=1777", format!("size={bytes}")]
+                })),
+                (None, None) => {}
+            }
+        }
+    }
     if !input.display.is_empty()
         && let Some(mounts) = spec["mounts"].as_array_mut()
     {

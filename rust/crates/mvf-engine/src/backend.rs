@@ -30,6 +30,8 @@ pub struct InstantiateRequest<'a> {
     pub services: &'a HostServices,
     /// Deployment-time network binding of this node (published ports, advertised address).
     pub network: Option<&'a mvf_contract::NetworkBinding>,
+    /// The node's mounts, resolved against the pipeline's volumes (#31).
+    pub storage: &'a [mvf_contract::BoundMount],
 }
 
 /// One execution backend.
@@ -119,6 +121,7 @@ impl ExecutionBackend for InProcessBackend {
             replacement: vec![Replacement::Stateless, Replacement::Stateful],
             grants: Default::default(),
             private_arenas: false,
+            storage: Default::default(),
             display: Default::default(),
         }
     }

@@ -1,0 +1,27 @@
+# Universal Node Contract for the Rust runtime (issue #31). A model-driven inspection node that uses
+# only ordinary file I/O: it reads its model from the `model` mount (bind it to a digest-pinned
+# artifact), writes one inspection record per frame to `results` (a persistent volume) with an
+# atomic rename, and uses `tmp` scratch space. Where the mounts come from is the pipeline's choice.
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: py.model-inspector
+  version: 1.0.0
+  description: Reads a pinned ONNX model and publishes per-frame inspection records (Storage Fabric).
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: result, channel: data, type: json }
+  artifacts:
+    - { backend: worker, runtime: python, entry: inspector.py, protocol: 1 }
+  isolation:
+    minimum: process
+  lifecycle:
+    readinessTimeoutMs: 20000
+  storage:
+    mounts:
+      - { name: model, target: /models }
+      - { name: results, target: /results, access: read-write }
+      - { name: tmp, target: /scratch, kind: scratch, access: read-write, maxSize: 16MiB, required: false }

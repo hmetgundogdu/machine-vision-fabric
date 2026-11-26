@@ -227,6 +227,8 @@ pub(crate) struct NodeSlot {
     pub(crate) backpressure: mvf_graph::Backpressure,
     /// Deployment-time network binding.
     pub(crate) network: Option<mvf_contract::NetworkBinding>,
+    /// Mounts of the active generation (a replacement may rebind them).
+    pub(crate) storage: Vec<mvf_contract::BoundMount>,
     /// `resident` nodes start with the run; `on-demand` ones the first time they run.
     pub(crate) on_demand: bool,
     /// Whether the active handle has been started.
@@ -320,6 +322,7 @@ impl Engine {
                     generation: 1,
                     services,
                     network: node.network.as_ref(),
+                    storage: &node.storage,
                 })
                 .map_err(|error| BuildError {
                     node: node.id.clone(),
@@ -333,6 +336,7 @@ impl Engine {
                 on_error: node.on_error.clone(),
                 backpressure: node.backpressure,
                 network: node.network.clone(),
+                storage: node.storage.clone(),
                 on_demand: node.contract.spec.lifecycle.activation
                     == mvf_contract::Activation::OnDemand,
                 activated: false,

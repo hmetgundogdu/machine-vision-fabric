@@ -67,7 +67,247 @@ pub struct NodeSpec {
     /// Window hints for a node that presents (`permissions.display`); ignored when headless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presentation: Option<Presentation>,
+    /// Filesystem the node needs (#31): logical mounts the deployment binds to volumes.
+    #[serde(default, skip_serializing_if = "Storage::is_empty")]
+    pub storage: Storage,
 }
+
+/// `spec.storage`: what filesystem a node needs, by logical name. Where it comes from (a
+/// persistent volume, a host directory, a digest-pinned artifact) is the deployment's choice.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Storage {
+    /// Mounts, by logical name.
+    #[serde(default)]
+    pub mounts: Vec<StorageMount>,
+    /// Whether the mount set, read-only access and scratch quotas must be enforced by the backend.
+    #[serde(default)]
+    pub isolation: StorageIsolation,
+}
+
+impl Storage {
+    /// No mounts declared.
+    pub fn is_empty(&self) -> bool {
+        self.mounts.is_empty() && self.isolation == StorageIsolation::BestEffort
+    }
+}
+
+/// `spec.storage.isolation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StorageIsolation {
+    /// Run on any backend; where nothing is enforced (trusted workers) placement says so.
+    #[default]
+    BestEffort,
+    /// Only on a backend that confines the node to its mounts and enforces read-only access and
+    /// scratch quotas (a sandbox); fails closed elsewhere.
+    Required,
+}
+
+/// One logical mount.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StorageMount {
+    /// Logical name (`[a-z][a-z0-9-]*`), bound by the pipeline node's `storage` map. Workers get the
+    /// resolved path in `MVF_VOLUME_<NAME>` (upper case, `-` → `_`).
+    pub name: String,
+    /// Absolute POSIX path inside a sandbox (`/models`). Workers see the host path instead.
+    pub target: String,
+    /// Access the node needs.
+    #[serde(default)]
+    pub access: MountAccess,
+    /// `volume` (bound by the deployment) or `scratch` (fresh, bounded space per generation).
+    #[serde(default)]
+    pub kind: MountKind,
+    /// Scratch size limit, e.g. `256MiB` (required for `scratch`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_size: Option<String>,
+    /// Whether the node cannot run without it (an unbound optional mount is simply absent).
+    #[serde(default = "yes")]
+    pub required: bool,
+}
+
+/// Mount access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MountAccess {
+    /// Read only.
+    #[default]
+    ReadOnly,
+    /// Read and write.
+    ReadWrite,
+}
+
+/// What provides a mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MountKind {
+    /// A pipeline volume, bound at deployment.
+    #[default]
+    Volume,
+    /// Fresh scratch space per generation, removed when it stops (bounded by `maxSize`).
+    Scratch,
+}
+
+/// Parses a size like `256MiB`, `2GiB`, `512KiB` or a byte count.
+pub fn parse_size(text: &str) -> Option<u64> {
+    let t = text.trim();
+    let (digits, unit) = t
+        .find(|c: char| !c.is_ascii_digit())
+        .map(|i| t.split_at(i))
+        .unwrap_or((t, ""));
+    let n: u64 = digits.parse().ok()?;
+    let mul: u64 = match unit.trim() {
+        "" | "B" => 1,
+        "KiB" => 1 << 10,
+        "MiB" => 1 << 20,
+        "GiB" => 1 << 30,
+        _ => return None,
+    };
+    n.checked_mul(mul)
+}
+
+/// A pipeline volume (`spec.volumes[]`): what the deployment provides. A node never names one in
+/// its contract; the pipeline binds the node's logical mounts to volumes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct VolumeDecl {
+    /// Volume name, unique in the pipeline (`[a-z][a-z0-9-]*`).
+    pub name: String,
+    /// What it is.
+    #[serde(rename = "type")]
+    pub kind: VolumeKind,
+    /// `shared`: the nodes that may mount it read-write (every other node mounts it read-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writers: Vec<String>,
+    /// `bind`: an operator-approved host directory (absolute, no symlinks, not a system path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_path: Option<String>,
+    /// `bind`: the most access any node gets (default `read-only`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<MountAccess>,
+    /// `artifact`: a file in the pipeline package (relative path), pinned by `digest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// `artifact`: `sha256:<hex>` the file must match; verified when imported, never trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+/// Volume types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VolumeKind {
+    /// An MVF-managed directory, scoped to the pipeline, mounted by one node; retained until
+    /// explicitly deleted (survives restarts, replacement and engine stops).
+    Persistent,
+    /// Like `persistent`, mounted by several nodes; only the listed `writers` may write.
+    Shared,
+    /// An existing host directory the operator approves.
+    Bind,
+    /// An immutable, digest-pinned file (model weights, calibration), always read-only.
+    Artifact,
+}
+
+impl VolumeKind {
+    /// Stable name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Persistent => "persistent",
+            Self::Shared => "shared",
+            Self::Bind => "bind",
+            Self::Artifact => "artifact",
+        }
+    }
+}
+
+/// A node mount resolved against the deployment (what a backend provisions).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoundMount {
+    /// The contract's mount.
+    pub mount: StorageMount,
+    /// The volume it is bound to (`None` for scratch).
+    pub volume: Option<VolumeDecl>,
+    /// Effective access: the mount's, never more than the volume allows.
+    pub access: MountAccess,
+    /// Pipeline name: managed volumes are scoped to it.
+    pub scope: String,
+}
+
+/// Host paths a `bind` volume may never be (or be inside, for the system directories). Checked on
+/// the written path and again on its canonical form at provisioning.
+pub fn host_path_issue(path: &str) -> Option<String> {
+    let p = std::path::Path::new(path);
+    if !p.is_absolute() {
+        return Some(format!("`{path}` is not an absolute path"));
+    }
+    if p.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )
+    }) {
+        return Some(format!("`{path}` is not normalized (`.` or `..`)"));
+    }
+    let lower = path.replace('\\', "/").to_ascii_lowercase();
+    let lower = lower.trim_end_matches('/');
+    #[cfg(windows)]
+    let (exact, inside): (&[&str], &[&str]) = (
+        &["c:", "c:/users"],
+        &[
+            "c:/windows",
+            "c:/program files",
+            "c:/program files (x86)",
+            "c:/programdata/microsoft",
+        ],
+    );
+    #[cfg(not(windows))]
+    let (exact, inside): (&[&str], &[&str]) = (
+        &[
+            "", "/home", "/users", "/var", "/var/lib", "/opt", "/srv", "/mnt", "/media",
+        ],
+        &[
+            "/proc",
+            "/sys",
+            "/dev",
+            "/boot",
+            "/etc",
+            "/root",
+            "/run",
+            "/var/run",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib64",
+            "/usr",
+            "/var/lib/docker",
+            "/var/lib/containerd",
+            "/system",
+            "/library",
+            "/private/etc",
+            "/private/var/run",
+        ],
+    );
+    if exact.contains(&lower) {
+        return Some(format!(
+            "`{path}` would expose a whole system or users tree"
+        ));
+    }
+    if let Some(r) = inside
+        .iter()
+        .find(|r| lower == **r || lower.starts_with(&format!("{r}/")))
+    {
+        return Some(format!("`{path}` is inside the system directory `{r}`"));
+    }
+    None
+}
+
+/// Paths a sandbox mount may not cover (the sandbox's own mounts and system directories).
+pub const RESERVED_TARGETS: &[&str] = &[
+    "/proc", "/sys", "/dev", "/mvf", "/tmp", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/lib32",
+    "/usr", "/boot", "/run", "/var/run",
+];
 
 /// Grants for sandboxed execution (`isolation.minimum: sandbox` or stronger). A backend that cannot
 /// provide a requested grant is rejected; nothing outside the grants is reachable. Backends weaker

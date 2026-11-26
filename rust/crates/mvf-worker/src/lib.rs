@@ -153,6 +153,13 @@ impl ExecutionBackend for WorkerBackend {
             grants: Default::default(),
             // Each node can get an arena of its own (`memory.arena: private`).
             private_arenas: true,
+            // Resolved host paths in `MVF_VOLUME_*`; a worker runs with its user's filesystem, so
+            // neither the mount set, read-only access nor scratch quotas are enforced.
+            storage: mvf_contract::StorageSupport {
+                mounts: true,
+                enforced: false,
+                hard_quota: false,
+            },
             // A worker inherits the engine's session: native windows only in an interactive one.
             // Managed surfaces need no session at all (the host is a separate process).
             display: mvf_contract::DisplaySupport {
@@ -216,6 +223,38 @@ impl ExecutionBackend for WorkerBackend {
         let _ = mapping;
         let display = display_plan(request, &self.session)?;
         env.extend(display.env);
+        let storage = if request.storage.is_empty() {
+            None
+        } else {
+            let grant = request
+                .services
+                .storage
+                .provision(
+                    request.node_id,
+                    request.generation,
+                    request.storage,
+                    request.services.package_dir.as_deref(),
+                    mvf_storage::Scratch::HostDir,
+                    None,
+                )
+                .map_err(|e| NodeError::new(NodeErrorKind::StartFailed, e.to_string()))?;
+            env.extend(grant.host_env());
+            request.services.log(
+                request.node_id,
+                request.generation,
+                "info",
+                format!(
+                    "storage: {} (host paths in MVF_VOLUME_*; isolation `process`: read-only, the mount set and scratch sizes are not enforced)",
+                    grant
+                        .mounts
+                        .iter()
+                        .map(mvf_storage::Provisioned::describe)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            );
+            Some(grant)
+        };
         if let Some(note) = display.note {
             request
                 .services
@@ -230,7 +269,8 @@ impl ExecutionBackend for WorkerBackend {
         };
         let private = self.isolate_arenas
             || request.contract.spec.memory.arena == mvf_contract::ArenaSharing::Private;
-        let recipe = (self.warm_spares > 0).then(|| PoolRecipe {
+        // A warm spare would carry another generation's scratch paths: none for nodes with mounts.
+        let recipe = (self.warm_spares > 0 && request.storage.is_empty()).then(|| PoolRecipe {
             registry: self.pools.clone(),
             key: format!(
                 "{}|{:?}|{:?}|{}|{:?}|{private}",
@@ -251,6 +291,7 @@ impl ExecutionBackend for WorkerBackend {
             private,
             recipe,
             true,
+            storage,
         )
     }
 }
@@ -293,7 +334,7 @@ pub fn worker_node(
     launcher: Box<dyn Launcher>,
     verify_inputs: bool,
 ) -> Result<Box<dyn NodeHandle>, NodeError> {
-    build_worker_node(request, launcher, verify_inputs, false, None, false)
+    build_worker_node(request, launcher, verify_inputs, false, None, false, None)
 }
 
 fn build_worker_node(
@@ -303,6 +344,7 @@ fn build_worker_node(
     private: bool,
     recipe: Option<PoolRecipe>,
     trusted_network: bool,
+    storage: Option<mvf_storage::Grant>,
 ) -> Result<Box<dyn NodeHandle>, NodeError> {
     let recipe_marker = trusted_network;
     Ok(Box::new(WorkerNode {
@@ -340,6 +382,7 @@ fn build_worker_node(
         recipe,
         pool: None,
         produced: 0,
+        storage,
     }))
 }
 
@@ -565,6 +608,8 @@ struct WorkerNode {
     network_note: Option<String>,
     /// Frames a source produced (default sequence numbers).
     produced: u64,
+    /// This generation's mounts; scratch and artifact views go when it stops.
+    storage: Option<mvf_storage::Grant>,
 }
 
 impl WorkerNode {
@@ -1281,5 +1326,12 @@ impl Drop for WorkerNode {
         // The process (if any) is killed and reaped by its own Drop first.
         self.process.take();
         self.launcher.cleanup();
+        // Scratch and artifact views live as long as the generation (a stop/start re-open keeps
+        // them); volume data is never touched.
+        if let Some(mut grant) = self.storage.take() {
+            for note in grant.release() {
+                self.log(note);
+            }
+        }
     }
 }

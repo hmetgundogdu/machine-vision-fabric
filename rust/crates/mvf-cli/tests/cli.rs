@@ -284,3 +284,72 @@ fn killed_engine_resumes_from_its_durable_checkpoint() {
     assert!(!ckpt.exists(), "cleared after the fully consumed run");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn volumes_survive_runs_and_go_only_on_an_explicit_delete() {
+    let dir = std::env::temp_dir().join(format!("mvf-cli-volumes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("modules/t.writer")).expect("dir");
+    std::fs::write(
+        dir.join("modules/t.writer/node.py"),
+        "import os\nfrom mvf_sdk import analysis, run_analyzer\nfrom mvf_sdk.storage import volume, write_atomic\ndef analyze(p, m):\n    write_atomic(volume('out') / 'r-{}-{}.txt'.format(os.getpid(), m['sequence']), b'ok')\n    return analysis(value={})\nrun_analyzer('t.writer', analyze)\n",
+    )
+    .expect("py");
+    std::fs::write(
+        dir.join("modules/t.writer/node.yaml"),
+        "apiVersion: mvf.dev/v1alpha1\nkind: NodeContract\nmetadata: { id: t.writer, version: 1.0.0 }\nspec:\n  ports:\n    inputs: [ { name: frame, channel: data, type: frame } ]\n    outputs: [ { name: out, channel: data, type: json } ]\n  artifacts: [ { backend: worker, runtime: python, entry: node.py, protocol: 1 } ]\n  storage:\n    mounts:\n      - { name: out, target: /out, access: read-write }\n",
+    )
+    .expect("yaml");
+    std::fs::write(
+        dir.join("pipeline.yaml"),
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: { name: cli-plant }\nspec:\n  volumes:\n    - { name: results, type: persistent }\n  nodes:\n    - { id: cam, builtin: synthetic-source, config: { frames: 5 } }\n    - { id: w, module: t.writer, storage: { out: results } }\n    - { id: sink, builtin: record }\n  edges:\n    data:\n      - { from: cam.frame, to: w.frame }\n      - { from: w.out, to: sink.json }\n",
+    )
+    .expect("pipeline");
+    let storage = dir.join("storage");
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../src/sdk/python");
+    for _ in 0..2 {
+        let out = mvf()
+            .args(["run"])
+            .arg(dir.join("pipeline.yaml"))
+            .arg("--modules")
+            .arg(dir.join("modules"))
+            .env("MVF_STORAGE_DIR", &storage)
+            .env("MVF_PYTHON_SDK", &sdk)
+            .output()
+            .expect("run");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let volume = |args: &[&str]| {
+        mvf()
+            .arg("volume")
+            .arg("--storage")
+            .arg(&storage)
+            .args(args)
+            .output()
+            .expect("volume")
+    };
+    let list = volume(&["list", "--json"]);
+    let listed: serde_json::Value = serde_json::from_slice(&list.stdout).expect("json");
+    assert_eq!(listed[0]["scope"], "cli-plant");
+    assert_eq!(listed[0]["name"], "results");
+    assert_eq!(
+        listed[0]["files"], 10,
+        "two runs, five records each, all retained"
+    );
+    assert!(volume(&["inspect", "cli-plant/results"]).status.success());
+    let refused = volume(&["delete", "cli-plant/results"]);
+    assert!(!refused.status.success(), "deleting data needs --yes");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--yes"));
+    assert!(
+        volume(&["delete", "cli-plant/results", "--yes"])
+            .status
+            .success()
+    );
+    let after: serde_json::Value =
+        serde_json::from_slice(&volume(&["list", "--json"]).stdout).expect("json");
+    assert_eq!(after, serde_json::json!([]));
+}

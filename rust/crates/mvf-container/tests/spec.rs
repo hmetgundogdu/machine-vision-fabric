@@ -34,6 +34,7 @@ fn spec(
 ) -> serde_json::Value {
     runtime_spec(&SpecInput {
         display: vec![],
+        volumes: vec![],
         rootfs: Path::new("/state/rootfs/abc"),
         arena: Path::new("/tmp/mvf-arena-1.bin"),
         image: &image(),
@@ -209,6 +210,7 @@ fn unsupported_network_policy_fails_closed() {
     assert!(
         runtime_spec(&SpecInput {
             display: vec![],
+            volumes: vec![],
             rootfs: Path::new("/r"),
             arena: Path::new("/a"),
             image: &image(),
@@ -352,6 +354,7 @@ fn a_host_security_module_profile_lands_in_the_process() {
     let input_spec = |lsm| {
         runtime_spec(&SpecInput {
             display: vec![],
+            volumes: vec![],
             rootfs: Path::new("/r"),
             arena: Path::new("/a"),
             image: &image(),
@@ -396,6 +399,7 @@ fn display_surfaces_are_the_only_display_paths_a_container_sees() {
         "no display mount without a grant"
     );
     let with = runtime_spec(&SpecInput {
+        volumes: vec![],
         display: vec![
             (
                 "/mvf/display/0.surface".into(),

@@ -1,0 +1,10 @@
+# expect: contract.storage.unsafe-target
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: test.storage, version: 1.0.0 }
+spec:
+  ports:
+    inputs: [ { name: frame, channel: data, type: frame } ]
+  artifacts: [ { backend: worker, runtime: python, entry: m.py, protocol: 1 } ]
+  storage:
+    mounts: [ { name: m, target: /models/../etc } ]

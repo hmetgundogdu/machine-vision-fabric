@@ -1,0 +1,16 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: py.model-inspector
+  version: 1.0.0
+spec:
+  ports:
+    inputs: [ { name: frame, channel: data, type: frame } ]
+    outputs: [ { name: result, channel: data, type: json } ]
+  artifacts:
+    - { backend: worker, runtime: python, entry: inspector.py, protocol: 1 }
+  storage:
+    mounts:
+      - { name: model, target: /models }
+      - { name: results, target: /results, access: read-write }
+      - { name: tmp, target: /scratch, kind: scratch, access: read-write, maxSize: 64MiB }

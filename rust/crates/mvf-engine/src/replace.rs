@@ -43,6 +43,10 @@ pub struct ReplacementRequest {
     pub config: serde_json::Map<String, serde_json::Value>,
     /// Cycles the previous generation stays warm for rollback (0 = commit at cut-over).
     pub probation_cycles: u64,
+    /// Rebinds the candidate's mounts (mount -> pipeline volume), e.g. to a new model artifact;
+    /// `None` keeps the active generation's bindings. The previous generation keeps its own, so a
+    /// rollback returns to exactly the files it had.
+    pub storage: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// How a candidate implementation is referenced (as in a pipeline node).
@@ -92,7 +96,14 @@ impl ReplacementRequest {
             origin,
             config,
             probation_cycles,
+            storage: None,
         })
+    }
+
+    /// Rebinds the candidate's mounts to other pipeline volumes.
+    pub fn with_storage(mut self, storage: std::collections::BTreeMap<String, String>) -> Self {
+        self.storage = Some(storage);
+        self
     }
 }
 
@@ -270,7 +281,45 @@ pub(crate) struct Standby {
     contract: NodeContract,
     origin: ContractOrigin,
     config: serde_json::Map<String, serde_json::Value>,
+    storage: Vec<mvf_contract::BoundMount>,
     backend: String,
+}
+
+impl Engine {
+    /// The candidate's mounts: the request's rebinding, else the active generation's bindings,
+    /// validated against the candidate contract and the pipeline's volumes.
+    fn candidate_storage(
+        &self,
+        i: usize,
+        request: &ReplacementRequest,
+    ) -> Result<Vec<mvf_contract::BoundMount>, String> {
+        let slot = &self.slots[i];
+        let map = request.storage.clone().unwrap_or_else(|| {
+            slot.storage
+                .iter()
+                .filter_map(|b| {
+                    b.volume
+                        .as_ref()
+                        .map(|v| (b.mount.name.clone(), v.name.clone()))
+                })
+                .collect()
+        });
+        mvf_graph::bind_storage(
+            &slot.id,
+            &request.contract,
+            &map,
+            &self.graph.volumes,
+            &self.graph.name,
+            "storage",
+        )
+        .map_err(|issues| {
+            issues
+                .iter()
+                .map(|g| format!("{}: {}", g.code, g.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    }
 }
 
 fn label(contract: &NodeContract) -> String {
@@ -532,6 +581,8 @@ impl Engine {
                 }
             }
         }
+        self.candidate_storage(i, request)
+            .map_err(|e| ("replace.storage-invalid", e))?;
         self.backends
             .negotiate(&request.contract)
             .map(|_| ())
@@ -567,6 +618,8 @@ impl Engine {
         let req = request.clone();
         let node_id = self.slots[i].id.clone();
         let network = self.slots[i].network.clone();
+        // Validated in `validate_request`.
+        let storage = self.candidate_storage(i, &request).unwrap_or_default();
         let run_cancel = run_cancel.clone();
         let thread = std::thread::spawn(move || {
             let t0 = Instant::now();
@@ -579,6 +632,7 @@ impl Engine {
                     generation,
                     services: &services,
                     network: network.as_ref(),
+                    storage: &storage,
                 })
                 .and_then(|(mut handle, _)| {
                     let budget =
@@ -709,18 +763,21 @@ impl Engine {
             .negotiate(&request.contract)
             .map(|p| p.backend.as_str().to_string())
             .unwrap_or_default();
+        let candidate_storage = self.candidate_storage(i, &request).unwrap_or_default();
         let slot = &mut self.slots[i];
         let previous = std::mem::replace(&mut slot.handle, candidate);
         let previous_contract = std::mem::replace(&mut slot.contract, request.contract.clone());
         let previous_generation = slot.generation;
         let previous_origin = std::mem::replace(&mut slot.origin, request.origin.clone());
         let previous_config = std::mem::replace(&mut slot.config, request.config.clone());
+        let previous_storage = std::mem::replace(&mut slot.storage, candidate_storage);
         slot.standby = Some(Standby {
             handle: previous,
             generation: previous_generation,
             contract: previous_contract.clone(),
             origin: previous_origin,
             config: previous_config,
+            storage: previous_storage,
             backend: std::mem::replace(&mut slot.stats.backend, backend),
         });
         slot.generation = pending.generation;
@@ -754,6 +811,7 @@ impl Engine {
         let failed_generation = std::mem::replace(&mut slot.generation, standby.generation);
         slot.origin = standby.origin;
         slot.config = standby.config;
+        slot.storage = standby.storage;
         slot.stats.generation = standby.generation;
         slot.stats.backend = standby.backend;
         slot.probation = 0;
@@ -903,6 +961,9 @@ pub struct UpdateStep {
     /// `pause`: resume automatically after this many milliseconds.
     #[serde(default)]
     pub for_ms: Option<u64>,
+    /// `replace`: rebind the candidate's mounts (mount -> pipeline volume), e.g. a new model.
+    #[serde(default)]
+    pub storage: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// Explicit actions.
@@ -1032,16 +1093,18 @@ pub fn parse_update_plan(
             (Some(UpdateAction::Rollback), None) => PlannedCommand::Rollback(step.node.clone()),
             (Some(UpdateAction::Commit), None) => PlannedCommand::Commit(step.node.clone()),
             (None | Some(UpdateAction::Replace), Some(reference)) => {
-                PlannedCommand::Replace(Box::new(
-                    ReplacementRequest::resolve(
-                        resolver,
-                        &step.node,
-                        &reference,
-                        step.config.clone().unwrap_or_default(),
-                        step.probation_cycles.unwrap_or(10),
-                    )
-                    .map_err(|e| format!("spec.updates[{n}]: {e}"))?,
-                ))
+                let request = ReplacementRequest::resolve(
+                    resolver,
+                    &step.node,
+                    &reference,
+                    step.config.clone().unwrap_or_default(),
+                    step.probation_cycles.unwrap_or(10),
+                )
+                .map_err(|e| format!("spec.updates[{n}]: {e}"))?;
+                PlannedCommand::Replace(Box::new(match &step.storage {
+                    Some(map) => request.with_storage(map.clone()),
+                    None => request,
+                }))
             }
             _ => {
                 return Err(format!(

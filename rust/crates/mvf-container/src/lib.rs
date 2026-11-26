@@ -247,6 +247,13 @@ impl ExecutionBackend for OciBackend {
                 lsm: self.lsm.iter().map(Lsm::grant).collect(),
             },
             private_arenas: true,
+            // Each mount is a bind (kernel read-only where asked) or a size-limited tmpfs; nothing
+            // else of the host filesystem is visible.
+            storage: mvf_contract::StorageSupport {
+                mounts: true,
+                enforced: true,
+                hard_quota: true,
+            },
             // Managed surfaces are bind-mounted files; a container is never given a display
             // server socket, so native windows are not granted.
             display: mvf_contract::DisplaySupport {
@@ -280,6 +287,8 @@ impl ExecutionBackend for OciBackend {
             container: None,
             binding: request.network.cloned(),
             network: None,
+            storage: request.storage.to_vec(),
+            grant: None,
             logs: Some((
                 request.services.clone(),
                 request.node_id.to_string(),
@@ -365,6 +374,40 @@ fn ensure_rootfs(
         let _ = std::fs::remove_dir_all(&tmp);
     }
     Ok(rootfs)
+}
+
+/// Creates a mount target directory in the composed rootfs. A target must not resolve through a
+/// symlink or a file the image ships: mounting there would land somewhere else than declared.
+fn prepare_target(rootfs: &Path, target: &str, userns: Option<IdMapping>) -> Result<(), String> {
+    let mut path = rootfs.to_path_buf();
+    for part in target.trim_start_matches('/').split('/') {
+        path.push(part);
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(format!(
+                    "mount target `{target}` resolves through a symlink in the image (`/{}`)",
+                    path.strip_prefix(rootfs).unwrap_or(&path).display()
+                ));
+            }
+            Ok(m) if !m.is_dir() => {
+                return Err(format!(
+                    "mount target `{target}`: `/{}` is a file in the image",
+                    path.strip_prefix(rootfs).unwrap_or(&path).display()
+                ));
+            }
+            Ok(_) => {}
+            Err(_) => {
+                std::fs::create_dir(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                #[cfg(unix)]
+                if let Some(m) = userns {
+                    let _ = std::os::unix::fs::lchown(&path, Some(m.host_id), Some(m.host_id));
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = userns;
+    Ok(())
 }
 
 /// Creates the sandbox's mount points in a composed rootfs. Layer content already has its owner
@@ -460,6 +503,9 @@ struct OciLauncher {
     network: Option<network::NodeNetwork>,
     /// Where the effective policy and counters are reported.
     logs: Option<(mvf_engine::HostServices, String, u64)>,
+    /// Bound mounts (#31) and what was provisioned for the current container.
+    storage: Vec<mvf_contract::BoundMount>,
+    grant: Option<mvf_storage::Grant>,
 }
 
 impl OciLauncher {
@@ -467,6 +513,61 @@ impl OciLauncher {
         if let Some((services, node, generation)) = &self.logs {
             services.log(node, *generation, "supervisor", message);
         }
+    }
+
+    /// Provisions the node's mounts for this container: binds of managed volumes, operator host
+    /// directories and pinned artifact views, and size-limited tmpfs scratch. Mount targets are
+    /// created in the rootfs here, refusing any that resolves through a symlink in the image.
+    fn storage_mounts(
+        &mut self,
+        rootfs: &Path,
+        userns: Option<IdMapping>,
+    ) -> Result<Vec<crate::spec::VolumeMount>, NodeError> {
+        let fail = |m: String| NodeError::new(NodeErrorKind::StartFailed, m);
+        if self.storage.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some((services, node, generation)) = self.logs.clone() else {
+            return Ok(Vec::new());
+        };
+        for b in &self.storage {
+            prepare_target(rootfs, &b.mount.target, userns).map_err(&fail)?;
+        }
+        let grant = services
+            .storage
+            .provision(
+                &node,
+                generation,
+                &self.storage,
+                services.package_dir.as_deref(),
+                mvf_storage::Scratch::Tmpfs,
+                userns.map(|m| m.host_id),
+            )
+            .map_err(|e| fail(e.to_string()))?;
+        let mounts = grant
+            .mounts
+            .iter()
+            .map(|m| crate::spec::VolumeMount {
+                target: m.target.clone(),
+                source: m.host_path.clone(),
+                read_only: m.read_only,
+                tmpfs_bytes: match m.source {
+                    mvf_storage::Source::Scratch { max_bytes } => Some(max_bytes),
+                    _ => None,
+                },
+            })
+            .collect();
+        self.log(format!(
+            "storage: {} (kernel-enforced: only these mounts are visible, read-only binds are read-only, scratch is a size-limited tmpfs)",
+            grant
+                .mounts
+                .iter()
+                .map(mvf_storage::Provisioned::describe)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+        self.grant = Some(grant);
+        Ok(mounts)
     }
 
     /// The node's managed surfaces (allocated per pipeline node, so every generation and every
@@ -623,6 +724,9 @@ impl OciLauncher {
         let surfaces = self
             .display_surfaces(userns)
             .inspect_err(|_| self.release_network())?;
+        let volumes = self
+            .storage_mounts(&rootfs, userns)
+            .inspect_err(|_| self.release_network())?;
         let display: Vec<(String, PathBuf)> = surfaces
             .iter()
             .enumerate()
@@ -642,6 +746,9 @@ impl OciLauncher {
         ];
         if let Some(ip) = self.binding.as_ref().and_then(|b| b.advertise.clone()) {
             extra_env.push(format!("MVF_ADVERTISE_IP={ip}"));
+        }
+        for m in self.grant.iter().flat_map(|g| g.mounts.iter()) {
+            extra_env.push(format!("{}={}", m.env, m.target));
         }
         if !surfaces.is_empty() {
             let paths: Vec<String> = (0..surfaces.len())
@@ -667,6 +774,7 @@ impl OciLauncher {
             lsm: self.backend.lsm.clone(),
             netns,
             display,
+            volumes,
         })
         .map_err(|e| {
             self.release_network();
@@ -707,6 +815,11 @@ impl Launcher for OciLauncher {
             let _ = std::fs::remove_dir_all(bundle);
         }
         self.release_network();
+        if let Some(mut grant) = self.grant.take() {
+            for note in grant.release() {
+                self.log(note);
+            }
+        }
     }
 
     fn promote(&mut self) -> Result<(), NodeError> {
@@ -809,6 +922,8 @@ pub fn run_workload_with(
         binding: binding.cloned(),
         network: None,
         logs: None,
+        storage: Vec::new(),
+        grant: None,
     };
     let spec = launcher.bundle(&arena)?;
     let mut child = Command::new(&spec.program)
@@ -856,4 +971,26 @@ pub fn run_workload_with(
         stderr: t_err.join().unwrap_or_default(),
         timed_out,
     })
+}
+
+#[cfg(all(test, unix))]
+mod storage_target_tests {
+    use super::prepare_target;
+
+    #[test]
+    fn a_mount_target_that_resolves_through_the_image_is_refused() {
+        let rootfs = std::env::temp_dir().join(format!("mvf-target-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&rootfs);
+        std::fs::create_dir_all(rootfs.join("srv")).expect("rootfs");
+        // An image that ships `/models -> /etc` and a file at `/data`.
+        std::os::unix::fs::symlink("/etc", rootfs.join("models")).expect("symlink");
+        std::fs::write(rootfs.join("data"), b"x").expect("file");
+        let err = prepare_target(&rootfs, "/models", None).expect_err("symlink");
+        assert!(err.contains("symlink in the image"), "{err}");
+        let err = prepare_target(&rootfs, "/data/in", None).expect_err("file");
+        assert!(err.contains("is a file in the image"), "{err}");
+        prepare_target(&rootfs, "/srv/results/day", None).expect("plain directories are created");
+        assert!(rootfs.join("srv/results/day").is_dir());
+        let _ = std::fs::remove_dir_all(&rootfs);
+    }
 }

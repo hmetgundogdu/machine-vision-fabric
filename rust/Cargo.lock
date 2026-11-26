@@ -998,6 +998,7 @@ dependencies = [
  "mvf-engine",
  "mvf-graph",
  "mvf-oci",
+ "mvf-storage",
  "mvf-worker",
  "serde",
  "serde_json",
@@ -1025,6 +1026,7 @@ dependencies = [
  "mvf-engine",
  "mvf-graph",
  "mvf-oci",
+ "mvf-storage",
  "mvf-worker",
  "serde_json",
 ]
@@ -1078,6 +1080,7 @@ dependencies = [
  "mvf-display",
  "mvf-graph",
  "mvf-memory",
+ "mvf-storage",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -1117,6 +1120,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvf-storage"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "mvf-contract",
+ "mvf-oci",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "mvf-worker"
 version = "0.1.0"
 dependencies = [
@@ -1126,6 +1142,8 @@ dependencies = [
  "mvf-engine",
  "mvf-graph",
  "mvf-memory",
+ "mvf-oci",
+ "mvf-storage",
  "serde",
  "serde_json",
  "windows-sys 0.61.2",

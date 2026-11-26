@@ -220,6 +220,7 @@ impl Engine {
                         generation: slot.generation,
                         services: &self.services,
                         network: slot.network.as_ref(),
+                        storage: &slot.storage,
                     })
                     .map_err(|error| EndReason::StartFailed {
                         node: slot.id.clone(),
@@ -1071,6 +1072,7 @@ struct SlotMeta {
     on_error: mvf_graph::FailurePolicy,
     backpressure: mvf_graph::Backpressure,
     network: Option<mvf_contract::NetworkBinding>,
+    storage: Vec<mvf_contract::BoundMount>,
 }
 
 impl SlotMeta {
@@ -1084,6 +1086,7 @@ impl SlotMeta {
             on_error: slot.on_error.clone(),
             backpressure: slot.backpressure,
             network: slot.network.clone(),
+            storage: slot.storage.clone(),
         }
     }
 
@@ -1248,6 +1251,7 @@ impl SlotMeta {
             generation: self.generation,
             services,
             network: self.network.as_ref(),
+            storage: &self.storage,
         })?;
         let ctx = LifecycleContext {
             node_id: &self.id,

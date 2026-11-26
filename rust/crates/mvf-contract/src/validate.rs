@@ -351,6 +351,108 @@ fn check_targets(targets: Option<&[Target]>, path: &str, issues: &mut Issues) {
     }
 }
 
+/// Whether `target` is an absolute, normalized POSIX path outside the reserved sandbox paths.
+pub fn is_safe_mount_target(target: &str) -> bool {
+    target.starts_with('/')
+        && target.len() > 1
+        && !target.ends_with('/')
+        && !target.contains('\\')
+        && !target.contains('\0')
+        && target[1..]
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+        && !crate::RESERVED_TARGETS
+            .iter()
+            .any(|r| target == *r || target.starts_with(&format!("{r}/")))
+}
+
+fn validate_storage(spec: &NodeSpec, issues: &mut Issues) {
+    use crate::{MountAccess, MountKind};
+    let mut names = std::collections::HashSet::new();
+    let mounts = &spec.storage.mounts;
+    for (i, m) in mounts.iter().enumerate() {
+        let path = |f: &str| format!("spec.storage.mounts[{i}].{f}");
+        let valid_name = m
+            .name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase())
+            && m.name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && m.name.len() <= 63;
+        if !valid_name {
+            issues.push(
+                "contract.storage.invalid-name",
+                path("name"),
+                format!("`{}` is not `[a-z][a-z0-9-]*` (at most 63)", m.name),
+            );
+        }
+        if !names.insert(m.name.as_str()) {
+            issues.push(
+                "contract.storage.duplicate-mount",
+                path("name"),
+                format!("mount `{}` is declared twice", m.name),
+            );
+        }
+        if !is_safe_mount_target(&m.target) {
+            issues.push(
+                "contract.storage.unsafe-target",
+                path("target"),
+                format!(
+                    "`{}` must be an absolute, normalized path outside {}",
+                    m.target,
+                    crate::RESERVED_TARGETS.join(", ")
+                ),
+            );
+        }
+        for (j, other) in mounts.iter().enumerate() {
+            if j != i
+                && (other.target == m.target || m.target.starts_with(&format!("{}/", other.target)))
+            {
+                issues.push(
+                    "contract.storage.overlapping-target",
+                    path("target"),
+                    format!(
+                        "`{}` overlaps the target of mount `{}`",
+                        m.target, other.name
+                    ),
+                );
+            }
+        }
+        match (m.kind, &m.max_size) {
+            (MountKind::Scratch, None) => issues.push(
+                "contract.storage.scratch-without-size",
+                path("maxSize"),
+                "scratch space must be bounded: set `maxSize`, e.g. `256MiB`",
+            ),
+            (MountKind::Volume, Some(_)) => issues.push(
+                "contract.storage.size-on-volume",
+                path("maxSize"),
+                "`maxSize` bounds scratch space; a volume's size is the deployment's",
+            ),
+            (_, Some(size))
+                if !crate::parse_size(size)
+                    .is_some_and(|n| (1 << 20..=64u64 << 30).contains(&n)) =>
+            {
+                issues.push(
+                    "contract.storage.invalid-size",
+                    path("maxSize"),
+                    format!("`{size}` is not a size between 1MiB and 64GiB (KiB, MiB, GiB)"),
+                );
+            }
+            _ => {}
+        }
+        if m.kind == MountKind::Scratch && m.access == MountAccess::ReadOnly {
+            issues.push(
+                "contract.storage.read-only-scratch",
+                path("access"),
+                "scratch space is written by the node: use `access: read-write`",
+            );
+        }
+    }
+}
+
 fn validate_display(spec: &NodeSpec, issues: &mut Issues) {
     use crate::DisplayMode;
     let d = &spec.permissions.display;
@@ -647,6 +749,7 @@ fn validate_policy(spec: &NodeSpec, issues: &mut Issues) {
     }
     validate_network(spec, issues);
     validate_display(spec, issues);
+    validate_storage(spec, issues);
     for (i, name) in spec.permissions.cdi_devices.iter().enumerate() {
         let valid = name.split_once('=').is_some_and(|(kind, dev)| {
             kind.split_once('/')

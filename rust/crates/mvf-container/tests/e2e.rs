@@ -1933,3 +1933,313 @@ fn an_oci_presenter_that_crashes_restarts_into_the_same_window_and_nothing_is_le
         .unwrap_or_default();
     assert!(bundles.is_empty(), "no bundle is left: {bundles:?}");
 }
+
+// ---- Storage Fabric (#31): kernel-enforced mounts for OCI nodes ----
+
+/// A minimal ONNX `ModelProto` (Identity graph): ir_version 8, producer, opset 13.
+fn onnx(producer: &str) -> Vec<u8> {
+    fn field(out: &mut Vec<u8>, number: u8, bytes: &[u8]) {
+        out.push((number << 3) | 2);
+        out.push(bytes.len() as u8);
+        out.extend_from_slice(bytes);
+    }
+    let mut node = Vec::new();
+    field(&mut node, 1, b"x");
+    field(&mut node, 2, b"y");
+    field(&mut node, 4, b"Identity");
+    let mut graph = Vec::new();
+    field(&mut graph, 1, &node);
+    field(&mut graph, 2, b"g");
+    let mut model = vec![0x08, 0x08];
+    field(&mut model, 2, producer.as_bytes());
+    field(&mut model, 7, &graph);
+    field(&mut model, 8, &[0x10, 13]);
+    model
+}
+
+fn storage_services(e: &Env, name: &str, package: &Path) -> (HostServices, PathBuf) {
+    let root = e.work.join(format!("storage-{name}"));
+    let s = HostServices {
+        storage: std::sync::Arc::new(mvf_storage::StorageService::new(&root)),
+        package_dir: Some(package.to_path_buf()),
+        ..HostServices::default()
+    };
+    (s, root)
+}
+
+fn file_name(p: &Path) -> String {
+    p.file_name().expect("f").to_string_lossy().to_string()
+}
+
+#[test]
+fn an_oci_node_reads_a_pinned_onnx_model_read_only_and_writes_retained_results() {
+    let e = need_env!();
+    let (_, contract) = node_image(
+        e,
+        "mvf-e2e/inspector:1",
+        &repo().join("modules/py-model-inspector"),
+        "inspector.py",
+    );
+    // A 1 MiB scratch limit the node will try to exceed.
+    let mut c =
+        parse_contract(&std::fs::read_to_string(&contract).expect("contract")).expect("parse");
+    for m in &mut c.spec.storage.mounts {
+        if m.name == "tmp" {
+            m.max_size = Some("1MiB".into());
+        }
+    }
+    std::fs::write(&contract, contract_text(&c)).expect("write");
+    let package = e.work.join("storage-package");
+    std::fs::create_dir_all(package.join("models")).expect("models");
+    let model = onnx("mvf-defect-v1");
+    std::fs::write(package.join("models/defect-v1.onnx"), &model).expect("model");
+    let text = format!(
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: plant }}\nspec:\n  volumes:\n    - {{ name: model-v1, type: artifact, file: models/defect-v1.onnx, digest: \"{}\" }}\n    - {{ name: results, type: persistent }}\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ width: 64, height: 48, channels: 1, frames: 20, arena: true }} }}\n    - {{ id: insp, contract: {}, config: {{ scratchBytes: 2097152 }}, storage: {{ model: model-v1, results: results }} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: insp.frame }}\n      - {{ from: insp.result, to: sink.json }}\n",
+        mvf_oci::Digest::of(&model),
+        file_name(&contract)
+    );
+    let root = e.work.join("storage-inspector");
+    for run in 1..=2u64 {
+        let s = HostServices {
+            storage: std::sync::Arc::new(mvf_storage::StorageService::new(&root)),
+            package_dir: Some(package.clone()),
+            ..HostServices::default()
+        };
+        let mut engine = display_engine(e, &text, &s);
+        let report = engine.run(&RunOptions::default(), &mut NullObserver);
+        let logs = s.logs.events();
+        assert_eq!(
+            report.end,
+            EndReason::SourceExhausted { node: "cam".into() },
+            "{logs:?}"
+        );
+        let v = json_values(&s, "sink");
+        assert_eq!(v.len(), 20);
+        let last = v.last().expect("last");
+        eprintln!("OCI inspector run {run}: {last}");
+        assert_eq!(last["model"]["producer"], "mvf-defect-v1");
+        assert_eq!(last["model"]["irVersion"], 8);
+        assert_eq!(
+            last["results"], "/results",
+            "the node sees its mount target, not a host path"
+        );
+        assert_eq!(
+            last["modelWritable"], false,
+            "the model is a kernel read-only bind"
+        );
+        assert_eq!(
+            last["scratch"], "ENOSPC",
+            "scratch is a 1 MiB tmpfs: the 2 MiB write fails, the node goes on"
+        );
+        assert!(
+            logs.iter().any(|l| l.message.contains("kernel-enforced")),
+            "{logs:?}"
+        );
+        let runs = std::fs::read_dir(root.join("runs"))
+            .map(|d| d.count())
+            .unwrap_or(0);
+        assert!(runs <= 1);
+        assert!(
+            std::fs::read_dir(root.join("runs"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .all(|r| !r.path().join("scratch").exists()),
+            "a sandbox's scratch never touches the host"
+        );
+        drop(engine);
+        drop(s);
+        let files = std::fs::read_dir(root.join("volumes/plant/results/data"))
+            .expect("results")
+            .count() as u64;
+        assert_eq!(files, 20 * run, "records retained across runs");
+    }
+    assert!(list_containers(&e.backend).is_empty());
+}
+
+fn script_module(e: &Env, name: &str, script: &str, mounts: &str) -> PathBuf {
+    let module = e.work.join(name);
+    std::fs::create_dir_all(&module).expect("dir");
+    std::fs::write(module.join("node.py"), script).expect("py");
+    std::fs::write(
+        module.join("node.yaml"),
+        format!(
+            "apiVersion: mvf.dev/v1alpha1\nkind: NodeContract\nmetadata: {{ id: e2e.{name}, version: 1.0.0 }}\nspec:\n  ports:\n    inputs: [ {{ name: frame, channel: data, type: frame }} ]\n    outputs: [ {{ name: out, channel: data, type: json }} ]\n  artifacts: [ {{ backend: worker, runtime: python, entry: node.py, protocol: 1 }} ]\n  lifecycle: {{ readinessTimeoutMs: 20000 }}\n  storage:\n    mounts:\n{mounts}"
+        ),
+    )
+    .expect("yaml");
+    node_image(e, &format!("mvf-e2e/{name}:1"), &module, "node.py").1
+}
+
+#[test]
+fn an_oci_reader_of_a_shared_volume_cannot_write_it_and_sees_nothing_else() {
+    let e = need_env!();
+    let (s, root) = storage_services(e, "shared", &e.work);
+    let producer = script_module(
+        e,
+        "producer",
+        "from mvf_sdk import analysis, run_analyzer\nfrom mvf_sdk.storage import volume, write_atomic\ndef analyze(payload, meta):\n    write_atomic(volume('out') / 'frame-{:06d}.bin'.format(meta['sequence']), bytes(payload.memory))\n    return analysis(value={})\nrun_analyzer('e2e.producer', analyze)\n",
+        "      - { name: out, target: /handoff, access: read-write }\n",
+    );
+    let consumer = script_module(
+        e,
+        "consumer",
+        &format!(
+            "import errno, os\nfrom mvf_sdk import analysis, run_analyzer\nfrom mvf_sdk.storage import volume\ndef analyze(payload, meta):\n    d = volume('in')\n    p = d / 'frame-{{:06d}}.bin'.format(meta['sequence'])\n    intact = p.exists() and p.read_bytes() == bytes(payload.memory)\n    try:\n        (d / 'reader-was-here').write_bytes(b'x')\n        denied = None\n    except OSError as e:\n        denied = errno.errorcode.get(e.errno)\n    return analysis(value={{'intact': intact, 'writeDenied': denied, 'storageRootVisible': os.path.exists({:?}), 'path': str(d)}})\nrun_analyzer('e2e.consumer', analyze)\n",
+            root.display().to_string()
+        ),
+        "      - { name: in, target: /handoff }\n",
+    );
+    let text = format!(
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: line }}\nspec:\n  volumes:\n    - {{ name: handoff, type: shared, writers: [producer] }}\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ frames: 20, arena: true }} }}\n    - {{ id: producer, contract: {}, storage: {{ out: handoff }} }}\n    - {{ id: consumer, contract: {}, storage: {{ in: handoff }} }}\n    - {{ id: gate, builtin: record }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: producer.frame }}\n      - {{ from: cam.frame, to: consumer.frame }}\n      - {{ from: producer.out, to: gate.json }}\n      - {{ from: consumer.out, to: sink.json }}\n",
+        file_name(&producer),
+        file_name(&consumer)
+    );
+    let mut engine = display_engine(e, &text, &s);
+    let report = engine.run(&RunOptions::default(), &mut NullObserver);
+    assert_eq!(
+        report.end,
+        EndReason::SourceExhausted { node: "cam".into() },
+        "{:?}",
+        s.logs.events()
+    );
+    let v = json_values(&s, "sink");
+    eprintln!("OCI consumer sees: {}", v[0]);
+    assert_eq!(v.len(), 20);
+    assert!(v.iter().all(|x| x["intact"] == true));
+    assert!(
+        v.iter().all(|x| x["writeDenied"] == "EROFS"),
+        "the reader's bind is kernel read-only"
+    );
+    assert!(v.iter().all(|x| x["storageRootVisible"] == false));
+}
+
+#[test]
+fn host_binds_are_read_only_by_default_and_an_unwritable_read_write_bind_fails_closed() {
+    let e = need_env!();
+    let camera = e.work.join("camera-in");
+    std::fs::create_dir_all(&camera).expect("dir");
+    std::fs::write(camera.join("img-001.bmp"), b"BM-frame").expect("file");
+    let (s, _) = storage_services(e, "bind", &e.work);
+    let reader = script_module(
+        e,
+        "bind-reader",
+        "import errno\nfrom mvf_sdk import analysis, run_analyzer\nfrom mvf_sdk.storage import volume\ndef analyze(payload, meta):\n    d = volume('in')\n    try:\n        (d / 'x').write_bytes(b'x')\n        denied = None\n    except OSError as e:\n        denied = errno.errorcode.get(e.errno)\n    return analysis(value={'files': sorted(p.name for p in d.iterdir()), 'writeDenied': denied})\nrun_analyzer('e2e.bind-reader', analyze)\n",
+        "      - { name: in, target: /camera }\n",
+    );
+    let pipeline = |contract: &Path, access: &str| {
+        format!(
+            "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: binds }}\nspec:\n  volumes:\n    - {{ name: camera, type: bind, hostPath: {}, access: {access} }}\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ frames: 2, arena: true }} }}\n    - {{ id: n, contract: {}, storage: {{ in: camera }} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: n.frame }}\n      - {{ from: n.out, to: sink.json }}\n",
+            camera.display(),
+            file_name(contract)
+        )
+    };
+    let mut engine = display_engine(e, &pipeline(&reader, "read-only"), &s);
+    let report = engine.run(&RunOptions::default(), &mut NullObserver);
+    assert_eq!(
+        report.end,
+        EndReason::SourceExhausted { node: "cam".into() },
+        "{:?}",
+        s.logs.events()
+    );
+    let v = json_values(&s, "sink");
+    assert_eq!(v[0]["files"], serde_json::json!(["img-001.bmp"]));
+    assert_eq!(v[0]["writeDenied"], "EROFS");
+    drop(engine);
+
+    // Read-write on a host directory the sandbox uid does not own: refused at start, not at the
+    // first failing write.
+    let writer = script_module(
+        e,
+        "bind-writer",
+        "from mvf_sdk import analysis, run_analyzer\nrun_analyzer('e2e.bind-writer', lambda p, m: analysis(value={}))\n",
+        "      - { name: in, target: /camera, access: read-write }\n",
+    );
+    let (s, _) = storage_services(e, "bind-rw", &e.work);
+    let mut engine = display_engine(e, &pipeline(&writer, "read-write"), &s);
+    let report = engine.run(&RunOptions::default(), &mut NullObserver);
+    let msg = format!("{:?}", report.end);
+    eprintln!("read-write bind the sandbox cannot write: {msg}");
+    assert!(msg.contains("cannot write"), "{msg}");
+}
+
+#[test]
+fn storage_costs_measured_file_io_and_no_graph_regression() {
+    let e = need_env!();
+    let bench = script_module(
+        e,
+        "io-bench",
+        "import os, time\nfrom mvf_sdk import analysis, run_analyzer\nfrom mvf_sdk.storage import volume\nMIB = 64\nblock = os.urandom(1 << 20)\ndef bench(d):\n    p = d / 'bench.bin'\n    t0 = time.perf_counter()\n    with open(p, 'wb') as f:\n        for _ in range(MIB):\n            f.write(block)\n        f.flush(); os.fsync(f.fileno())\n    w = time.perf_counter() - t0\n    t0 = time.perf_counter()\n    with open(p, 'rb') as f:\n        while f.read(1 << 20):\n            pass\n    r = time.perf_counter() - t0\n    os.remove(p)\n    return {'writeMiBps': round(MIB / w, 1), 'readMiBps': round(MIB / r, 1)}\nresult = {}\ndef analyze(payload, meta):\n    if not result:\n        result['persistent'] = bench(volume('results'))\n        result['scratch'] = bench(volume('tmp'))\n    return analysis(value=result)\nrun_analyzer('e2e.io-bench', analyze)\n",
+        "      - { name: results, target: /results, access: read-write }\n      - { name: tmp, target: /scratch, kind: scratch, access: read-write, maxSize: 128MiB }\n",
+    );
+    let (s, _) = storage_services(e, "bench", &e.work);
+    let text = format!(
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: bench }}\nspec:\n  volumes:\n    - {{ name: results, type: persistent }}\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ frames: 1, arena: true }} }}\n    - {{ id: b, contract: {}, storage: {{ results: results }} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: b.frame }}\n      - {{ from: b.out, to: sink.json }}\n",
+        file_name(&bench)
+    );
+    let mut engine = display_engine(e, &text, &s);
+    let report = engine.run(&RunOptions::default(), &mut NullObserver);
+    assert_eq!(
+        report.end,
+        EndReason::SourceExhausted { node: "cam".into() },
+        "{:?}",
+        s.logs.events()
+    );
+    eprintln!(
+        "OCI file I/O, 64 MiB with fsync: {}",
+        json_values(&s, "sink")[0]
+    );
+
+    // The zero-copy graph is unaffected by mounts: the same transformer with and without a pinned
+    // artifact mount.
+    let (_, plain) = node_image(
+        e,
+        "mvf/py-invert:e2e",
+        &repo().join("modules/py-invert-transformer"),
+        "transformer.py",
+    );
+    let mut with = parse_contract(&std::fs::read_to_string(&plain).expect("c")).expect("parse");
+    with.metadata.id = format!("{}.mounted", with.metadata.id);
+    with.spec.storage.mounts.push(mvf_contract::StorageMount {
+        name: "model".into(),
+        target: "/models".into(),
+        access: mvf_contract::MountAccess::ReadOnly,
+        kind: mvf_contract::MountKind::Volume,
+        max_size: None,
+        required: true,
+    });
+    let mounted = plain.with_file_name("py-invert-mounted.yaml");
+    std::fs::write(&mounted, contract_text(&with)).expect("write");
+    let package = e.work.join("storage-package-bench");
+    std::fs::create_dir_all(&package).expect("pkg");
+    std::fs::write(package.join("m.onnx"), onnx("bench")).expect("m");
+    let mut per_frame = Vec::new();
+    for (contract, storage) in [(&plain, ""), (&mounted, ", storage: { model: m }")] {
+        let (s, _) = storage_services(e, &format!("graph-{}", per_frame.len()), &package);
+        let text = format!(
+            "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: graph }}\nspec:\n  volumes:\n    - {{ name: m, type: artifact, file: m.onnx, digest: \"{}\" }}\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ width: 640, height: 480, channels: 3, frames: 300, arena: true }} }}\n    - {{ id: proc, contract: {}{storage} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: proc.frame }}\n      - {{ from: proc.frame, to: sink.frame }}\n",
+            mvf_oci::Digest::of(&onnx("bench")),
+            file_name(contract)
+        );
+        let mut engine = display_engine(e, &text, &s);
+        let report = engine.run(&RunOptions::default(), &mut NullObserver);
+        assert_eq!(
+            report.end,
+            EndReason::SourceExhausted { node: "cam".into() },
+            "{:?}",
+            s.logs.events()
+        );
+        let arena = report.data_plane.arena.expect("arena");
+        assert_eq!(
+            (arena.copies_in, arena.copies_out),
+            (0, 0),
+            "still zero copy"
+        );
+        let proc = report.nodes.iter().find(|n| n.id == "proc").expect("proc");
+        per_frame.push(proc.total_us as f64 / proc.executed.max(1) as f64 / 1000.0);
+    }
+    eprintln!(
+        "graph cost of the OCI transformer, 640x480x3, 300 frames: {:.3} ms/frame without mounts, {:.3} ms/frame with a pinned artifact mount",
+        per_frame[0], per_frame[1]
+    );
+}

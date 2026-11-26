@@ -26,6 +26,7 @@ fn in_process() -> BackendCapabilities {
         replacement: vec![Replacement::Stateless, Replacement::Stateful],
         grants: Default::default(),
         private_arenas: false,
+        storage: Default::default(),
         display: Default::default(),
     }
 }
@@ -44,6 +45,7 @@ fn worker() -> BackendCapabilities {
         replacement: vec![Replacement::Stateless],
         grants: Default::default(),
         private_arenas: false,
+        storage: Default::default(),
         display: Default::default(),
     }
 }
@@ -62,6 +64,7 @@ fn compute() -> BackendCapabilities {
         replacement: vec![Replacement::Stateless],
         grants: Default::default(),
         private_arenas: false,
+        storage: Default::default(),
         display: Default::default(),
     }
 }
@@ -126,6 +129,7 @@ fn enforcing_sandbox_backend_is_accepted() {
             lsm: vec![],
         },
         private_arenas: false,
+        storage: Default::default(),
         display: Default::default(),
     };
     let p = negotiate(&load("oci-sandboxed-detector.yaml"), &[oci]).expect("placed");
@@ -209,6 +213,7 @@ fn sandbox(grants: GrantSupport) -> BackendCapabilities {
         replacement: vec![Replacement::Stateless],
         grants,
         private_arenas: false,
+        storage: Default::default(),
         display: Default::default(),
     }
 }
@@ -513,4 +518,67 @@ fn ungrantable_display_grants_are_rejected_even_when_the_display_is_optional() {
             .iter()
             .any(|n| n.code == "placement.display-input-unmediated")
     );
+}
+
+fn storage_contract(isolation: &str, backend: &str) -> NodeContract {
+    contract_with(
+        &format!(
+            "  storage:\n    isolation: {isolation}\n    mounts:\n      - {{ name: model, target: /models }}\n      - {{ name: tmp, target: /scratch, kind: scratch, access: read-write, maxSize: 16MiB }}\n"
+        ),
+        backend,
+    )
+    .expect("valid storage contract")
+}
+
+#[test]
+fn storage_isolation_is_enforced_where_it_can_be_and_labelled_where_it_cannot() {
+    let trusted = BackendCapabilities {
+        storage: StorageSupport {
+            mounts: true,
+            enforced: false,
+            hard_quota: false,
+        },
+        ..worker()
+    };
+    let p = negotiate(
+        &storage_contract("best-effort", "worker"),
+        std::slice::from_ref(&trusted),
+    )
+    .expect("best effort runs on a worker");
+    let note = p
+        .notes
+        .iter()
+        .find(|n| n.code == "placement.storage-not-isolated")
+        .expect("and says so");
+    assert!(note.message.contains("scratch"), "{}", note.message);
+
+    let err = negotiate(
+        &storage_contract("required", "worker"),
+        std::slice::from_ref(&trusted),
+    )
+    .expect_err("required isolation fails closed on a worker");
+    assert_eq!(codes_of(&err), ["negotiation.storage-not-enforceable"]);
+
+    let sandbox = BackendCapabilities {
+        storage: StorageSupport {
+            mounts: true,
+            enforced: true,
+            hard_quota: true,
+        },
+        ..worker()
+    };
+    let p =
+        negotiate(&storage_contract("required", "worker"), &[sandbox]).expect("enforcing backend");
+    assert!(
+        p.notes
+            .iter()
+            .all(|n| !n.code.starts_with("placement.storage"))
+    );
+
+    let err = negotiate(
+        &storage_contract("best-effort", "in-process"),
+        &[in_process()],
+    )
+    .expect_err("builtins get no mounts");
+    assert!(codes_of(&err).contains(&"negotiation.storage-unsupported"));
 }

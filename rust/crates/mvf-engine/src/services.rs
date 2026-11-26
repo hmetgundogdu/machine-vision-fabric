@@ -95,6 +95,9 @@ pub struct HostServices {
     /// Presentation surfaces of nodes that render for a display host (#30). Owned by the engine,
     /// keyed by pipeline node, removed when the engine stops.
     pub display: Arc<mvf_display::DisplayRegistry>,
+    /// Volumes, artifacts and scratch space (#31). Per-run directories go with the engine;
+    /// volume data is retained.
+    pub storage: Arc<mvf_storage::StorageService>,
 }
 
 impl HostServices {
