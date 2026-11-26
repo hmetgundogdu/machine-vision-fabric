@@ -116,6 +116,7 @@ impl ExecutionBackend for InProcessBackend {
             enforces_pids_limit: false,
             replacement: vec![Replacement::Stateless, Replacement::Stateful],
             grants: Default::default(),
+            private_arenas: false,
         }
     }
 

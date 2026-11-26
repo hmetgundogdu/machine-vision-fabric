@@ -490,6 +490,22 @@ pub struct Memory {
     /// Whether payload hand-off must avoid copies.
     #[serde(default)]
     pub zero_copy: ZeroCopy,
+    /// `shared`: the engine-wide arena (zero-copy between workers, but every worker can read and
+    /// write every slot). `private`: an arena only this node's process maps; inputs from elsewhere
+    /// are copied in (one counted copy), so no other node's payload is ever visible to it.
+    #[serde(default)]
+    pub arena: ArenaSharing,
+}
+
+/// Which shared-memory arena an out-of-process node maps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArenaSharing {
+    /// The engine-wide arena.
+    #[default]
+    Shared,
+    /// An arena of its own.
+    Private,
 }
 
 /// Memory domains.

@@ -55,7 +55,9 @@ Updated by every slice; the stage reports carry the details.
 | Graph-derived arena sizing | `DataPlaneSizing` | `pipelined::arena_slots_for` | ported (#25) |
 | Shared-memory arena, refcounts, fan-out | `SharedMemoryArenaTests`, `PipelineGraphExecutorDataPlaneTests` | `mvf_memory::Arena` + `Payload::Arena` | ported — plus generation-checked handles and copy accounting |
 | Backpressure stall/drop | `PipelineGraphExecutorBackpressureTests` | `mvf_engine::recovery`, `mvf_engine::pipelined` | ported (#24, #25) — pipelined `stall` waits for a release |
-| Supervised worker, readiness, warm pool | `SupervisedWorkerTests`, `WorkerReadinessTests`, `WarmWorkerPoolTests` | `mvf-worker` | partial — readiness, deadlines, kill, reaping; no warm pool, no restart |
+| Supervised worker, readiness, warm pool | `SupervisedWorkerTests`, `WorkerReadinessTests`, `WarmWorkerPoolTests` | `mvf-worker` (`MVF_WARM_SPARES`) | ported — readiness, deadlines, kill, reaping, restart (#24), warm pool (#28) |
+| Orphan prevention when the host dies | — (cooperative stdin EOF) | `mvf_worker::spawner` | new (#28) — Linux PDEATHSIG, Windows Job Object; macOS cooperative only |
+| Per-node arena isolation | — | `spec.memory.arena: private`, `MVF_ISOLATE_ARENAS` | new (#28) |
 | Worker logs / observability | `WorkerLoggingTests`, `WorkerObservabilityTests` | `HostServices.logs` | partial — logs, stderr, supervisor events; no RPC latency metrics |
 | Epoch checkpoint / restore / resume | `PipelineGraphExecutorCheckpointTests`, `CheckpointResumeTests`, `WorkerCheckpointTests` | `run.checkpoint`, worker `checkpoint`/`restore` | ported (#24) — atomic epochs, durable resume, worker state |
 | Node failure policy (fail / restart) | `NodeResilienceTests`, `SourceFailureTests` | `onError`, `run.onError` | ported (#24) — plus explicit `skip`; Rust default `fail` for all roles |
@@ -71,5 +73,5 @@ Updated by every slice; the stage reports carry the details.
 | GPU compute nodes, device-resident payloads | `mvf-compute` | new — tested on Apple M4/Metal (stage 09) |
 | PLC simulator with duplicate-commit detection | `plc-sim` builtin | new — stage 10 |
 
-Still missing (follow-up issues): warm worker pool and worker RPC metrics (#28); interactive
-prompt/TUI and egress are out of scope (adapters at the edges).
+Still missing: worker RPC latency metrics; interactive prompt/TUI and egress are out of scope
+(adapters at the edges).

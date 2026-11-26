@@ -16,8 +16,10 @@
 //! contract's readiness budget → `execute`* → `shutdown` + bounded grace → kill. A handle that is
 //! dropped kills and reaps its child.
 
+mod pool;
 pub mod process;
 pub mod protocol;
+pub mod spawner;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -44,6 +46,9 @@ pub struct WorkerBackend {
     python: OsString,
     python_sdk: Option<PathBuf>,
     verify_inputs: bool,
+    warm_spares: usize,
+    isolate_arenas: bool,
+    pools: pool::PoolRegistry,
 }
 
 impl Default for WorkerBackend {
@@ -61,7 +66,27 @@ impl WorkerBackend {
             python: std::env::var_os("MVF_PYTHON").unwrap_or_else(|| default.into()),
             python_sdk: std::env::var_os("MVF_PYTHON_SDK").map(PathBuf::from),
             verify_inputs: std::env::var_os("MVF_VERIFY_INPUTS").is_some_and(|v| v == "1"),
+            warm_spares: std::env::var("MVF_WARM_SPARES")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0),
+            isolate_arenas: std::env::var_os("MVF_ISOLATE_ARENAS").is_some_and(|v| v == "1"),
+            pools: pool::PoolRegistry::default(),
         }
+    }
+
+    /// Keeps `n` pre-warmed spare workers per node, so a restart or re-open skips the cold start
+    /// (parity with the .NET `WarmWorkerPool`; also `MVF_WARM_SPARES=n`). Default 0.
+    pub fn with_warm_spares(mut self, n: usize) -> Self {
+        self.warm_spares = n;
+        self
+    }
+
+    /// Gives every worker an arena of its own, whatever its contract says (also
+    /// `MVF_ISOLATE_ARENAS=1`): no worker can see or touch another node's payloads.
+    pub fn with_isolated_arenas(mut self, on: bool) -> Self {
+        self.isolate_arenas = on;
+        self
     }
 
     /// Fingerprints every input before and after `execute` and fails the node if a worker wrote to
@@ -110,6 +135,8 @@ impl ExecutionBackend for WorkerBackend {
             // Stateful through the protocol's `checkpoint`/`restore` messages.
             replacement: vec![Replacement::Stateless, Replacement::Stateful],
             grants: Default::default(),
+            // Each node can get an arena of its own (`memory.arena: private`).
+            private_arenas: true,
         }
     }
 
@@ -163,17 +190,34 @@ impl ExecutionBackend for WorkerBackend {
             WorkerRuntime::Executable => (entry_path.clone().into_os_string(), vec![]),
         };
         let _ = mapping;
-        worker_node(
+        let spec = LaunchSpec {
+            program,
+            args,
+            cwd: contract_dir,
+            env,
+        };
+        let private = self.isolate_arenas
+            || request.contract.spec.memory.arena == mvf_contract::ArenaSharing::Private;
+        let recipe = (self.warm_spares > 0).then(|| PoolRecipe {
+            registry: self.pools.clone(),
+            key: format!(
+                "{}|{:?}|{:?}|{}|{:?}|{private}",
+                request.node_id,
+                spec.program,
+                spec.args,
+                spec.cwd.display(),
+                spec.env
+            ),
+            target: self.warm_spares,
+            spec: spec.clone(),
+            budget: Duration::from_millis(request.contract.spec.lifecycle.readiness_timeout_ms),
+        });
+        build_worker_node(
             request,
-            Box::new(ProcessLauncher {
-                spec: LaunchSpec {
-                    program,
-                    args,
-                    cwd: contract_dir,
-                    env,
-                },
-            }),
+            Box::new(ProcessLauncher { spec }),
             self.verify_inputs,
+            private,
+            recipe,
         )
     }
 }
@@ -204,11 +248,22 @@ impl Launcher for ProcessLauncher {
     }
 }
 
-/// Builds a supervised protocol-v1 worker handle around any launcher.
+/// Builds a supervised protocol-v1 worker handle around any launcher (private arena when the
+/// contract asks for one).
 pub fn worker_node(
     request: &InstantiateRequest<'_>,
     launcher: Box<dyn Launcher>,
     verify_inputs: bool,
+) -> Result<Box<dyn NodeHandle>, NodeError> {
+    build_worker_node(request, launcher, verify_inputs, false, None)
+}
+
+fn build_worker_node(
+    request: &InstantiateRequest<'_>,
+    launcher: Box<dyn Launcher>,
+    verify_inputs: bool,
+    private: bool,
+    recipe: Option<PoolRecipe>,
 ) -> Result<Box<dyn NodeHandle>, NodeError> {
     Ok(Box::new(WorkerNode {
         node_id: request.node_id.to_string(),
@@ -230,6 +285,11 @@ pub fn worker_node(
         next_id: 1,
         verify_inputs,
         features: Vec::new(),
+        private: private
+            || request.contract.spec.memory.arena == mvf_contract::ArenaSharing::Private,
+        private_arena: None,
+        recipe,
+        pool: None,
     }))
 }
 
@@ -332,6 +392,13 @@ struct WorkerNode {
     verify_inputs: bool,
     /// Features the running worker advertised in `hello`.
     features: Vec<String>,
+    /// Private-arena mode (`spec.memory.arena: private`, or the host forces it).
+    private: bool,
+    /// The arena only this node's process maps (private mode).
+    private_arena: Option<std::sync::Arc<mvf_memory::Arena>>,
+    /// Warm-spare recipe (process launchers with `MVF_WARM_SPARES` > 0).
+    recipe: Option<PoolRecipe>,
+    pool: Option<std::sync::Arc<pool::WarmPool>>,
 }
 
 impl WorkerNode {
@@ -399,11 +466,146 @@ impl WorkerNode {
         e
     }
 
+    /// The arena this node's process maps: its own in private mode, else the engine's.
     fn arena(&self) -> Result<std::sync::Arc<mvf_memory::Arena>, NodeError> {
+        if let Some(private) = &self.private_arena {
+            return Ok(std::sync::Arc::clone(private));
+        }
         self.services
             .arena()
             .map_err(|e| NodeError::new(NodeErrorKind::Resource, e.to_string()))
     }
+
+    /// A private arena has the engine arena's slot size and directory, but only the slots one node
+    /// needs (its input copy, its output, a state slot and a few outputs still held downstream):
+    /// `MVF_PRIVATE_ARENA_SLOTS`, default 8, never more than the engine arena. Every private arena
+    /// reserves `slotSize × slots` in the backing directory (`/dev/shm` on Linux), so it is kept
+    /// small; a pipelined node whose outputs queue deeper waits (`stall`) or drops.
+    fn private_config(&self) -> mvf_memory::ArenaConfig {
+        let mut config = self.services.arena_config.clone();
+        let slots = std::env::var("MVF_PRIVATE_ARENA_SLOTS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(8);
+        config.slot_count = slots.min(config.slot_count.max(1));
+        config
+    }
+
+    /// The node's warm pool, created (and warming) on first use; shared with later generations.
+    fn warm_pool(&mut self) -> Option<std::sync::Arc<pool::WarmPool>> {
+        if self.pool.is_none()
+            && let Some(recipe) = &self.recipe
+        {
+            let spawn = spare_spawner(
+                recipe,
+                &self.node_id,
+                &self.services,
+                self.private.then(|| self.private_config()),
+            );
+            self.pool = recipe
+                .registry
+                .get_or_start(&recipe.key, recipe.target, || spawn);
+        }
+        self.pool.clone()
+    }
+}
+
+/// Why a handshake failed.
+enum Handshake {
+    Wait(WaitError, &'static str),
+    Protocol(u64),
+}
+
+/// `hello`, the protocol check and (when the child warms up first) `ready`, within `deadline`.
+fn handshake(
+    process: &mut WorkerProcess,
+    deadline: Instant,
+    cancel: &mvf_engine::CancellationToken,
+) -> Result<pool::Hello, Handshake> {
+    let hello = process
+        .wait_for(Some(deadline), Some(cancel), |m| {
+            matches!(m, ChildMessage::Hello { .. })
+        })
+        .map_err(|e| Handshake::Wait(e, "readiness (waiting for hello)"))?;
+    let ChildMessage::Hello {
+        protocol,
+        capability,
+        ready,
+        features,
+        ..
+    } = hello
+    else {
+        unreachable!("accept() only admits hello");
+    };
+    if protocol != protocol::PROTOCOL_VERSION {
+        return Err(Handshake::Protocol(protocol));
+    }
+    if !ready {
+        process
+            .wait_for(Some(deadline), Some(cancel), |m| {
+                matches!(m, ChildMessage::Ready)
+            })
+            .map_err(|e| Handshake::Wait(e, "readiness (waiting for ready)"))?;
+    }
+    Ok(pool::Hello {
+        capability,
+        features,
+    })
+}
+
+/// How to warm spares for one node.
+#[derive(Debug, Clone)]
+struct PoolRecipe {
+    registry: pool::PoolRegistry,
+    key: String,
+    target: usize,
+    spec: LaunchSpec,
+    budget: Duration,
+}
+
+/// Builds the warmup closure: launch, handshake, hand over (with its own arena in private mode).
+fn spare_spawner(
+    recipe: &PoolRecipe,
+    node: &str,
+    services: &HostServices,
+    private: Option<mvf_memory::ArenaConfig>,
+) -> std::sync::Arc<dyn Fn() -> Result<pool::Spare, NodeError> + Send + Sync> {
+    let spec = recipe.spec.clone();
+    let budget = recipe.budget;
+    let node = node.to_string();
+    let services = services.clone();
+    std::sync::Arc::new(move || {
+        let own = private
+            .as_ref()
+            .map(mvf_memory::Arena::create)
+            .transpose()
+            .map_err(resource)?;
+        let arena = match &own {
+            Some(a) => std::sync::Arc::clone(a),
+            None => services.arena().map_err(resource)?,
+        };
+        let launch = ProcessLauncher { spec: spec.clone() }.prepare(arena.path())?;
+        let mut process = WorkerProcess::spawn(&launch, &node, 0, &services.logs)
+            .map_err(|e| NodeError::new(NodeErrorKind::StartFailed, e.to_string()))?;
+        let cancel = mvf_engine::CancellationToken::new();
+        let pid = process.pid();
+        let hello = handshake(&mut process, Instant::now() + budget, &cancel).map_err(|e| {
+            NodeError::new(
+                NodeErrorKind::StartFailed,
+                match e {
+                    Handshake::Wait(_, context) => format!("warm spare: {context} failed"),
+                    Handshake::Protocol(p) => format!("warm spare speaks protocol {p}"),
+                },
+            )
+        })?;
+        services.log(&node, 0, "supervisor", format!("warmed spare pid={pid}"));
+        Ok(pool::Spare {
+            process,
+            hello,
+            arena: own,
+        })
+    })
 }
 
 fn resource(e: ArenaError) -> NodeError {
@@ -414,47 +616,75 @@ impl NodeHandle for WorkerNode {
     fn start(&mut self, ctx: &LifecycleContext<'_>) -> Result<(), NodeError> {
         let started = Instant::now();
         let deadline = started + ctx.budget;
-        let arena = self.arena()?;
-        let spec = self.launcher.prepare(arena.path())?;
-        let process =
-            WorkerProcess::spawn(&spec, &self.node_id, self.generation, &self.services.logs)
+        // A warm spare (already handshaked) when the pool has one; otherwise a cold spawn.
+        let spare = self.warm_pool().and_then(|pool| {
+            let spare = pool.acquire();
+            if let Some(s) = &spare {
+                s.process.set_generation(self.generation);
+                self.log(format!(
+                    "took warm spare pid={} (warm starts {}, spares ready {})",
+                    s.process.pid(),
+                    pool.hits(),
+                    pool.ready_count()
+                ));
+            }
+            spare
+        });
+        let hello = match spare {
+            Some(spare) => {
+                self.private_arena = spare.arena;
+                self.process = Some(spare.process);
+                spare.hello
+            }
+            None => {
+                self.private_arena = match self.private {
+                    true => {
+                        Some(mvf_memory::Arena::create(&self.private_config()).map_err(resource)?)
+                    }
+                    false => None,
+                };
+                let arena = self.arena()?;
+                let spec = self.launcher.prepare(arena.path())?;
+                let process = WorkerProcess::spawn(
+                    &spec,
+                    &self.node_id,
+                    self.generation,
+                    &self.services.logs,
+                )
                 .map_err(|e| {
                     NodeError::new(
                         NodeErrorKind::StartFailed,
                         format!("could not spawn {:?}: {e}", spec.program),
                     )
                 })?;
-        let pid = process.pid();
-        self.process = Some(process);
-        self.log(format!("spawned pid={pid}"));
-
-        let hello = self
-            .process
-            .as_mut()
-            .map(|p| {
-                p.wait_for(Some(deadline), Some(ctx.cancel), |m| {
-                    matches!(m, ChildMessage::Hello { .. })
-                })
-            })
-            .unwrap_or(Err(WaitError::Cancelled));
-        let (protocol, capability, ready, features) = match hello {
-            Ok(ChildMessage::Hello {
-                protocol,
-                capability,
-                ready,
-                features,
-                ..
-            }) => (protocol, capability, ready, features),
-            Ok(_) => unreachable!("accept() only admits hello"),
-            Err(e) => return Err(self.fail(e, "readiness (waiting for hello)")),
+                let pid = process.pid();
+                self.process = Some(process);
+                self.log(format!("spawned pid={pid}"));
+                let shaken = match self.process.as_mut() {
+                    Some(p) => handshake(p, deadline, ctx.cancel),
+                    None => Err(Handshake::Wait(
+                        WaitError::Cancelled,
+                        "readiness (waiting for hello)",
+                    )),
+                };
+                match shaken {
+                    Ok(hello) => hello,
+                    Err(Handshake::Wait(e, context)) => return Err(self.fail(e, context)),
+                    Err(Handshake::Protocol(protocol)) => {
+                        self.process.as_mut().map(WorkerProcess::kill);
+                        return Err(NodeError::new(
+                            NodeErrorKind::Protocol,
+                            format!("worker speaks protocol {protocol}; this host speaks 1"),
+                        ));
+                    }
+                }
+            }
         };
-        if protocol != protocol::PROTOCOL_VERSION {
-            self.process.as_mut().map(WorkerProcess::kill);
-            return Err(NodeError::new(
-                NodeErrorKind::Protocol,
-                format!("worker speaks protocol {protocol}; this host speaks 1"),
-            ));
-        }
+        let pid = self.process.as_ref().map(WorkerProcess::pid).unwrap_or(0);
+        let crate::pool::Hello {
+            capability,
+            features,
+        } = hello;
         self.capability = match capability.as_str() {
             "classifier" => Capability::Classifier,
             "processor" => Capability::Processor,
@@ -470,20 +700,6 @@ impl NodeHandle for WorkerNode {
         if let Err(message) = self.mapping.accepts(self.capability) {
             self.process.as_mut().map(WorkerProcess::kill);
             return Err(NodeError::new(NodeErrorKind::StartFailed, message));
-        }
-        if !ready {
-            let r = self
-                .process
-                .as_mut()
-                .map(|p| {
-                    p.wait_for(Some(deadline), Some(ctx.cancel), |m| {
-                        matches!(m, ChildMessage::Ready)
-                    })
-                })
-                .unwrap_or(Err(WaitError::Cancelled));
-            if let Err(e) = r {
-                return Err(self.fail(e, "readiness (waiting for ready)"));
-            }
         }
         self.features = features;
         if !self.config.is_empty() {
@@ -788,6 +1004,13 @@ impl NodeHandle for WorkerNode {
         let exit = process.exit();
         drop(process);
         self.launcher.cleanup();
+        if let Some(private) = &self.private_arena {
+            let m = private.metrics();
+            self.log(format!(
+                "private arena: copiesIn={} bytesCopiedIn={} handoffs={}",
+                m.copies_in, m.bytes_copied_in, m.zero_copy_handoffs
+            ));
+        }
         self.log(format!(
             "stopped pid={pid} outcome={outcome:?} exit={exit:?}"
         ));

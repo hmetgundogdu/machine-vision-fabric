@@ -25,6 +25,7 @@ fn in_process() -> BackendCapabilities {
         enforces_pids_limit: false,
         replacement: vec![Replacement::Stateless, Replacement::Stateful],
         grants: Default::default(),
+        private_arenas: false,
     }
 }
 
@@ -41,6 +42,7 @@ fn worker() -> BackendCapabilities {
         enforces_pids_limit: false,
         replacement: vec![Replacement::Stateless],
         grants: Default::default(),
+        private_arenas: false,
     }
 }
 
@@ -57,6 +59,7 @@ fn compute() -> BackendCapabilities {
         enforces_pids_limit: false,
         replacement: vec![Replacement::Stateless],
         grants: Default::default(),
+        private_arenas: false,
     }
 }
 
@@ -118,6 +121,7 @@ fn enforcing_sandbox_backend_is_accepted() {
             devices: vec![],
             cdi_devices: vec![],
         },
+        private_arenas: false,
     };
     let p = negotiate(&load("oci-sandboxed-detector.yaml"), &[oci]).expect("placed");
     assert_eq!(p.backend, BackendKind::Oci);
@@ -199,6 +203,7 @@ fn sandbox(grants: GrantSupport) -> BackendCapabilities {
         enforces_pids_limit: true,
         replacement: vec![Replacement::Stateless],
         grants,
+        private_arenas: false,
     }
 }
 
@@ -247,4 +252,61 @@ fn permissions_do_not_apply_to_non_restricting_backends() {
         access: DeviceAccess::Rw,
     }];
     assert!(negotiate(&contract, &[worker()]).is_ok());
+}
+
+fn contract_with(spec_extra: &str, backend: &str) -> Result<NodeContract, ContractError> {
+    let artifact = match backend {
+        "worker" => "{ backend: worker, runtime: python, entry: m.py, protocol: 1 }",
+        _ => "{ backend: in-process, builtin: m }",
+    };
+    parse_contract(&format!(
+        "apiVersion: mvf.dev/v1alpha1\nkind: NodeContract\nmetadata: {{ id: test.m, version: 1.0.0 }}\nspec:\n  ports:\n    inputs: [ {{ name: frame, channel: data, type: frame }} ]\n    outputs: [ {{ name: class, channel: data, type: classification }} ]\n  artifacts: [ {artifact} ]\n{spec_extra}"
+    ))
+}
+
+#[test]
+fn a_private_arena_is_negotiated_fail_closed() {
+    let private = contract_with("  memory: { arena: private }\n", "in-process").expect("valid");
+    let err = negotiate(&private, &[in_process()]).expect_err("in-process cannot isolate memory");
+    assert!(
+        err.rejections
+            .iter()
+            .flat_map(|r| r.reasons.iter())
+            .any(|r| r.code == "negotiation.private-arena-unsupported")
+    );
+    let worker = contract_with("  memory: { arena: private }\n", "worker").expect("valid");
+    let caps = BackendCapabilities {
+        kind: BackendKind::Worker,
+        isolation: IsolationLevel::Process,
+        private_arenas: true,
+        ..in_process()
+    };
+    assert!(negotiate(&worker, &[caps]).is_ok());
+}
+
+#[test]
+fn contradictory_memory_and_parallelism_requests_are_invalid() {
+    let codes = |extra: &str| match contract_with(extra, "worker") {
+        Ok(_) => Vec::new(),
+        Err(ContractError::Invalid(issues)) => issues.iter().map(|i| i.code).collect(),
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(
+        codes("  memory: { arena: private, zeroCopy: required }\n"),
+        ["contract.memory.private-arena-copies"]
+    );
+    assert_eq!(
+        codes(
+            "  execution: { maxParallelism: 4 }\n  lifecycle: { replacement: stateful, state: { schemaVersion: 1 } }\n"
+        ),
+        ["contract.execution.stateful-parallelism"]
+    );
+    assert_eq!(
+        codes("  execution: { maxParallelism: 0 }\n"),
+        ["contract.execution.invalid-max-parallelism"]
+    );
+    assert!(
+        codes("  execution: { maxParallelism: 4 }\n  lifecycle: { replacement: stateless }\n")
+            .is_empty()
+    );
 }

@@ -183,6 +183,7 @@ impl ExecutionBackend for OciBackend {
                 // CDI injection is not implemented: no CDI device is ever offered.
                 cdi_devices: vec![],
             },
+            private_arenas: true,
         }
     }
 

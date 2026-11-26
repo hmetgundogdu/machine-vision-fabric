@@ -47,6 +47,9 @@ pub struct BackendCapabilities {
     /// Grants a sandboxing backend can provide (ignored for backends weaker than `sandbox`).
     #[serde(default)]
     pub grants: GrantSupport,
+    /// Whether the backend can give a node an arena of its own (`memory.arena: private`).
+    #[serde(default)]
+    pub private_arenas: bool,
 }
 
 /// Permission grants a sandboxing backend can provide on this host.
@@ -308,6 +311,15 @@ fn evaluate(
             ),
         }),
         _ => {}
+    }
+    if spec.memory.arena == crate::ArenaSharing::Private && !caps.private_arenas {
+        reasons.push(reason(
+            "negotiation.private-arena-unsupported",
+            format!(
+                "node requires an arena of its own; backend `{}` cannot isolate payload memory",
+                caps.kind.as_str()
+            ),
+        ));
     }
 
     let resources = &spec.resources;

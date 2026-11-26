@@ -56,6 +56,7 @@ spec:
 | `isolation.minimum` | `none`, `process`, `sandbox`, `vm` | `none` | Replaces the ambiguous `isolation.required: true` (rejected as an unknown field). |
 | `memory.domain` | `host`, `device` | `host` | `device` requires `target: gpu`. |
 | `memory.zeroCopy` | `required`, `preferred`, `disabled` | `preferred` | `required` fails negotiation on a copying backend. |
+| `memory.arena` | `shared`, `private` | `shared` | `private`: the node's process maps an arena of its own (no other node's payload is visible to it); inputs are copied in. Needs a backend with private arenas (worker, OCI); incompatible with `zeroCopy: required`. |
 | `lifecycle.activation` | `resident`, `on-demand` | `resident` | MVF defaults: sources, PLC and models are resident. |
 | `lifecycle.replacement` | `unsupported`, `stateless`, `stateful` | `unsupported` | `stateful` requires `state.schemaVersion` (+ `migratesFrom`). |
 | `resources.enforcement` | `best-effort`, `required` | `best-effort` | `required` rejects any backend that cannot enforce every declared limit. |
@@ -111,7 +112,7 @@ Contract: `contract.api-version.unsupported`, `contract.kind.unsupported`,
 `contract.artifact.unsupported-protocol`, `contract.artifact.invalid-image`,
 `contract.artifact.invalid-digest`, `contract.artifact.invalid-entry-point`,
 `contract.artifact.no-targets`, `contract.artifact.duplicate-target`,
-`contract.execution.backend-without-artifact`, `contract.execution.invalid-max-parallelism`, `contract.execution.stateful-parallelism`, `contract.placement.no-artifact-for-target`,
+`contract.execution.backend-without-artifact`, `contract.memory.private-arena-copies`, `contract.execution.invalid-max-parallelism`, `contract.execution.stateful-parallelism`, `contract.placement.no-artifact-for-target`,
 `contract.placement.redundant-fallback`, `contract.memory.device-without-gpu`,
 `contract.memory.zero-copy-conflicts-with-fallback`, `contract.lifecycle.timeout-out-of-range`,
 `contract.lifecycle.stateful-without-state`, `contract.lifecycle.state-without-stateful`,

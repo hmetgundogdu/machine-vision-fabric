@@ -65,6 +65,7 @@ impl ExecutionBackend for ComputeBackend {
             enforces_pids_limit: false,
             replacement: vec![Replacement::Stateless],
             grants: Default::default(),
+            private_arenas: false,
         }
     }
 

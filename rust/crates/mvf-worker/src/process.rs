@@ -5,6 +5,8 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -102,7 +104,8 @@ pub struct WorkerProcess {
     readers: Vec<JoinHandle<()>>,
     exit: Option<ExitInfo>,
     node: String,
-    generation: u64,
+    /// Generation stamped on the child's log lines; a warm spare is re-stamped when acquired.
+    generation: Arc<AtomicU64>,
     logs: Logs,
 }
 
@@ -169,7 +172,8 @@ impl WorkerProcess {
         for (k, v) in &spec.env {
             command.env(k, v);
         }
-        let mut child = command.spawn()?;
+        let mut child = crate::spawner::spawn(command)?;
+        let shared_generation = Arc::new(AtomicU64::new(generation));
         let (tx, events) = mpsc::channel();
         let mut readers = Vec::new();
 
@@ -181,11 +185,12 @@ impl WorkerProcess {
 
         let out_logs = logs.clone();
         let out_node = node.to_string();
+        let out_generation = Arc::clone(&shared_generation);
         readers.push(std::thread::spawn(move || {
             let log = |level: &str, message: String| {
                 out_logs.push(LogEvent {
                     node: out_node.clone(),
-                    generation,
+                    generation: out_generation.load(Ordering::Relaxed),
                     level: level.into(),
                     message,
                 })
@@ -209,6 +214,7 @@ impl WorkerProcess {
 
         let err_logs = logs.clone();
         let err_node = node.to_string();
+        let err_generation = Arc::clone(&shared_generation);
         readers.push(std::thread::spawn(move || {
             read_lines(BufReader::new(stderr), |line| {
                 let message = match line {
@@ -217,7 +223,7 @@ impl WorkerProcess {
                 };
                 err_logs.push(LogEvent {
                     node: err_node.clone(),
-                    generation,
+                    generation: err_generation.load(Ordering::Relaxed),
                     level: "stderr".into(),
                     message,
                 });
@@ -231,9 +237,19 @@ impl WorkerProcess {
             readers,
             exit: None,
             node: node.to_string(),
-            generation,
+            generation: shared_generation,
             logs: logs.clone(),
         })
+    }
+
+    /// Re-stamps the generation on this child's log lines (a warm spare taken by a new generation).
+    pub fn set_generation(&self, generation: u64) {
+        self.generation.store(generation, Ordering::Relaxed);
+    }
+
+    /// True once the child has exited (polls without blocking).
+    pub fn has_exited(&mut self) -> bool {
+        self.exit.is_some() || matches!(self.child.try_wait(), Ok(Some(_)))
     }
 
     /// OS process id.
@@ -293,7 +309,7 @@ impl WorkerProcess {
                 Ok(Event::Message(m)) if accept(&m) => return Ok(m),
                 Ok(Event::Message(m)) => self.logs.push(LogEvent {
                     node: self.node.clone(),
-                    generation: self.generation,
+                    generation: self.generation.load(Ordering::Relaxed),
                     level: "warn".into(),
                     message: format!("ignored unexpected message {m:?}"),
                 }),

@@ -749,12 +749,14 @@ dependencies = [
 name = "mvf-worker"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "mvf-contract",
  "mvf-engine",
  "mvf-graph",
  "mvf-memory",
  "serde",
  "serde_json",
+ "windows-sys",
 ]
 
 [[package]]

@@ -352,6 +352,15 @@ fn check_targets(targets: Option<&[Target]>, path: &str, issues: &mut Issues) {
 }
 
 fn validate_policy(spec: &NodeSpec, issues: &mut Issues) {
+    if spec.memory.arena == crate::ArenaSharing::Private
+        && spec.memory.zero_copy == crate::ZeroCopy::Required
+    {
+        issues.push(
+            "contract.memory.private-arena-copies",
+            "spec.memory".to_string(),
+            "a private arena copies every input in, so zero copy cannot be required",
+        );
+    }
     if spec.execution.max_parallelism == 0 || spec.execution.max_parallelism > 64 {
         issues.push(
             "contract.execution.invalid-max-parallelism",
