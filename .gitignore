@@ -1,4 +1,6 @@
 bin/
+# Rust binary targets live in src/bin/ (not .NET build output).
+!rust/crates/*/src/bin/
 obj/
 .vs/
 .vscode/
