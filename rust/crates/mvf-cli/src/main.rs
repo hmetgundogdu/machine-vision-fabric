@@ -124,9 +124,26 @@ fn main() -> ExitCode {
     }
 }
 
-/// Every backend this binary provides.
+/// Every backend this host provides: in-process and worker always; the GPU compute backend when a
+/// hardware adapter exists (`MVF_DISABLE_GPU=1` turns it off); the daemonless OCI backend on Linux
+/// when `runc`/`crun` is installed (images from `MVF_STORE`, state under `~/.mvf/state`).
 fn host_backends() -> BackendRegistry {
-    default_backends().with(WorkerBackend::from_env())
+    let mut registry = default_backends().with(WorkerBackend::from_env());
+    if std::env::var_os("MVF_DISABLE_GPU").is_none()
+        && let Some(gpu) = mvf_compute::ComputeBackend::detect(&mvf_compute::GpuConfig::default())
+    {
+        registry = registry.with(gpu);
+    }
+    let store_root = image::default_store();
+    if let Ok(store) = mvf_oci::ContentStore::open(&store_root)
+        && let Some(oci) = mvf_container::OciBackend::detect(
+            store,
+            store_root.parent().unwrap_or(Path::new(".")).join("state"),
+        )
+    {
+        registry = registry.with(oci);
+    }
+    registry
 }
 
 fn fail(code: u8, message: impl std::fmt::Display) -> ExitCode {

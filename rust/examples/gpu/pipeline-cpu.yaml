@@ -1,0 +1,19 @@
+# CPU reference of pipeline-cpu.yaml: same graph, in-process builtins.
+#   cargo run --release -p mvf-cli -- run examples/gpu/pipeline-cpu.yaml
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata: { name: cpu-chain }
+spec:
+  nodes:
+    - { id: cam, builtin: synthetic-source, config: { width: 640, height: 480, frames: 100 } }
+    - { id: invert, builtin: invert }
+    - { id: normalize, builtin: normalize-u8-f32 }
+    - { id: mean, builtin: mean-f32 }
+    - { id: sink, builtin: record }
+  edges:
+    data:
+      - { from: cam.frame, to: invert.frame }
+      - { from: invert.frame, to: normalize.frame }
+      - { from: normalize.tensor, to: mean.tensor }
+      - { from: mean.class, to: sink.class }
+      - { from: mean.stats, to: sink.json }

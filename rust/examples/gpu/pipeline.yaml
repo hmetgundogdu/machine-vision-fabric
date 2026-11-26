@@ -1,0 +1,20 @@
+# GPU chain: CPU camera -> upload once -> invert -> normalize -> mean, device-resident between GPU
+# nodes; only 64 partial sums per frame return to the host. Run from rust/:
+#   cargo run --release -p mvf-cli -- run examples/gpu/pipeline.yaml
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata: { name: gpu-chain }
+spec:
+  nodes:
+    - { id: cam, builtin: synthetic-source, config: { width: 640, height: 480, frames: 100 } }
+    - { id: invert, contract: nodes/gpu-invert.yaml }
+    - { id: normalize, contract: nodes/gpu-normalize.yaml }
+    - { id: mean, contract: nodes/gpu-mean.yaml }
+    - { id: sink, builtin: record }
+  edges:
+    data:
+      - { from: cam.frame, to: invert.frame }
+      - { from: invert.frame, to: normalize.frame }
+      - { from: normalize.tensor, to: mean.tensor }
+      - { from: mean.class, to: sink.class }
+      - { from: mean.stats, to: sink.json }

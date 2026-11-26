@@ -1,0 +1,13 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.normalize-u8-f32
+  version: 1.0.0
+  description: CPU reference - u8 frame to f32 tensor (x / 255).
+spec:
+  ports:
+    inputs: [ { name: frame, channel: data, type: frame } ]
+    outputs: [ { name: tensor, channel: data, type: tensor } ]
+  artifacts:
+    - { backend: in-process, builtin: normalize-u8-f32 }
+  lifecycle: { replacement: stateless }

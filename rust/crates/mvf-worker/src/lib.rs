@@ -500,7 +500,13 @@ impl NodeHandle for WorkerNode {
                 lease.clone()
             }
             _ => arena
-                .publish_copy(&frame.payload.descriptor, frame.payload.bytes())
+                .publish_copy(
+                    &frame.payload.descriptor,
+                    frame
+                        .payload
+                        .try_bytes()
+                        .map_err(|e| NodeError::new(NodeErrorKind::Resource, e))?,
+                )
                 .map_err(resource)?,
         };
         let fingerprint = self

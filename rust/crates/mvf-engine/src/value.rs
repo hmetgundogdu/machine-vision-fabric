@@ -2,7 +2,7 @@
 //! re-checks it against the producer's declared port at runtime (UI/graph validation is not trusted
 //! alone).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use mvf_contract::PortType;
 pub use mvf_memory::{Descriptor, ElementType, MAX_RANK, MediaType};
@@ -16,6 +16,25 @@ pub enum PayloadData {
     /// A reference-counted lease on an engine-owned shared-memory arena slot. Cloning adds a
     /// reference (fan-out); dropping the last one reclaims the slot.
     Arena(mvf_memory::Lease),
+    /// A device-resident buffer (e.g. GPU memory). Host bytes exist only after an explicit,
+    /// counted download (see [`Payload::try_bytes`]); device-native consumers use the handle.
+    Device(Arc<dyn DeviceBuffer>),
+}
+
+/// A buffer that lives in device memory. Implemented by compute backends.
+pub trait DeviceBuffer: Send + Sync + std::fmt::Debug {
+    /// Stable identity of the device (and logical device) that owns the buffer.
+    fn device_id(&self) -> &str;
+    /// Logical length in bytes.
+    fn len(&self) -> usize;
+    /// True when empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// For downcasting by the owning backend.
+    fn as_any(&self) -> &dyn std::any::Any;
+    /// Explicit device→host transfer; implementations count it.
+    fn download(&self) -> Result<Vec<u8>, String>;
 }
 
 /// Typed payload: descriptor + bytes. Cloning shares the bytes.
@@ -24,6 +43,8 @@ pub struct Payload {
     /// Descriptor validated against the byte length at construction.
     pub descriptor: Descriptor,
     data: PayloadData,
+    /// Host copy of a device payload, filled by the first host access.
+    host: OnceLock<Arc<[u8]>>,
 }
 
 impl Payload {
@@ -34,6 +55,7 @@ impl Payload {
             Some(n) if n == bytes.len() as u64 => Ok(Self {
                 descriptor,
                 data: PayloadData::Heap(bytes),
+                host: OnceLock::new(),
             }),
             Some(n) => Err(format!(
                 "descriptor implies {n} bytes but {} were given",
@@ -48,6 +70,43 @@ impl Payload {
         Self {
             descriptor: lease.descriptor().clone(),
             data: PayloadData::Arena(lease),
+            host: OnceLock::new(),
+        }
+    }
+
+    /// Wraps a device buffer; the descriptor must describe exactly its bytes.
+    pub fn device(descriptor: Descriptor, buffer: Arc<dyn DeviceBuffer>) -> Result<Self, String> {
+        match descriptor.byte_len() {
+            Some(n) if n == buffer.len() as u64 => Ok(Self {
+                descriptor,
+                data: PayloadData::Device(buffer),
+                host: OnceLock::new(),
+            }),
+            _ => Err("descriptor does not describe the device buffer".into()),
+        }
+    }
+
+    /// The device buffer, when the payload is device-resident.
+    pub fn device_buffer(&self) -> Option<&Arc<dyn DeviceBuffer>> {
+        match &self.data {
+            PayloadData::Device(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Host bytes. Zero copy for heap and arena payloads; for a device payload this performs (once)
+    /// the explicit device→host transfer and reports its failure.
+    pub fn try_bytes(&self) -> Result<&[u8], String> {
+        match &self.data {
+            PayloadData::Heap(b) => Ok(b),
+            PayloadData::Arena(l) => Ok(l.payload()),
+            PayloadData::Device(d) => {
+                if let Some(h) = self.host.get() {
+                    return Ok(h);
+                }
+                let bytes: Arc<[u8]> = d.download()?.into();
+                Ok(self.host.get_or_init(|| bytes))
+            }
         }
     }
 
@@ -55,15 +114,20 @@ impl Payload {
     pub fn lease(&self) -> Option<&mvf_memory::Lease> {
         match &self.data {
             PayloadData::Arena(l) => Some(l),
-            PayloadData::Heap(_) => None,
+            PayloadData::Heap(_) | PayloadData::Device(_) => None,
         }
     }
 
-    /// Read-only view of the bytes (zero copy for both heap and arena payloads).
+    /// Read-only view of the bytes (zero copy for heap and arena payloads; a counted download for
+    /// device payloads).
+    ///
+    /// # Panics
+    /// If a device download fails (device lost). Host code that may see device payloads uses
+    /// [`Payload::try_bytes`]; in-process nodes are covered by the panic guard.
     pub fn bytes(&self) -> &[u8] {
-        match &self.data {
-            PayloadData::Heap(b) => b,
-            PayloadData::Arena(l) => l.payload(),
+        match self.try_bytes() {
+            Ok(b) => b,
+            Err(e) => panic!("device payload download failed: {e}"),
         }
     }
 

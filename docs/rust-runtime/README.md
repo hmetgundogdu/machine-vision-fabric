@@ -22,6 +22,7 @@ mechanical change once the .NET host retires.
 | `mvf-worker` | #13 | Supervised stdio worker backend (protocol v1): readiness, deadlines, kill, exit classification, logs. |
 | `mvf-oci` | #17 | Offline OCI layout / Docker archive import, verified content store, safe unpack, export, layer builder. |
 | `mvf-container` | #18 | Daemonless OCI backend (runc/crun), default-deny sandbox spec, packaging, generic workloads. |
+| `mvf-compute` | #19 | wgpu compute backend (Metal/Vulkan/DX12): WGSL kernels, device-resident payloads, same-device zero-copy hand-off. |
 | `mvf-cli` | #12– | `mvf-rs` native CLI: `contract`, `validate`, `run`, `host`. |
 
 ## Commands

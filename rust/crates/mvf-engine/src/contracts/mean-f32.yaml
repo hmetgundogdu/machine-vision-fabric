@@ -1,0 +1,15 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.mean-f32
+  version: 1.0.0
+  description: CPU reference - f32 tensor mean as stats JSON and a bright/dark classification.
+spec:
+  ports:
+    inputs: [ { name: tensor, channel: data, type: tensor } ]
+    outputs:
+      - { name: class, channel: data, type: classification }
+      - { name: stats, channel: data, type: json }
+  artifacts:
+    - { backend: in-process, builtin: mean-f32 }
+  lifecycle: { replacement: stateless }

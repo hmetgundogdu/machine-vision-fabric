@@ -643,6 +643,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "ctrlc",
+ "mvf-compute",
  "mvf-container",
  "mvf-contract",
  "mvf-engine",
@@ -657,7 +658,12 @@ dependencies = [
 name = "mvf-compute"
 version = "0.1.0"
 dependencies = [
+ "mvf-contract",
+ "mvf-engine",
+ "mvf-graph",
  "pollster",
+ "serde",
+ "serde_json",
  "wgpu",
 ]
 

@@ -157,6 +157,16 @@ const BUILTINS: &[Builtin] = &[
         factory: Counter::create,
     },
     Builtin {
+        name: "normalize-u8-f32",
+        contract: include_str!("contracts/normalize-u8-f32.yaml"),
+        factory: NormalizeU8F32::create,
+    },
+    Builtin {
+        name: "mean-f32",
+        contract: include_str!("contracts/mean-f32.yaml"),
+        factory: MeanF32::create,
+    },
+    Builtin {
         name: "folder-source",
         contract: include_str!("contracts/folder-source.yaml"),
         factory: FolderSource::create,
@@ -625,6 +635,91 @@ impl NodeHandle for Fault {
         Ok(Execution::Produced(
             Outputs::new().with("frame", Value::Frame(frame.clone())),
         ))
+    }
+}
+
+// ---------------------------------------------------------------- CPU references for GPU kernels
+
+/// CPU reference of the `normalize-u8-f32` GPU kernel: u8 frame → f32 tensor (`x / 255`).
+#[derive(Debug)]
+pub struct NormalizeU8F32;
+
+impl NormalizeU8F32 {
+    fn create(
+        config: &serde_json::Map<String, serde_json::Value>,
+        _: &HostServices,
+    ) -> Result<Box<dyn NodeHandle>, NodeError> {
+        let _: NoConfig = parse_config(config)?;
+        Ok(Box::new(Self))
+    }
+}
+
+impl NodeHandle for NormalizeU8F32 {
+    fn execute(&mut self, _: &ExecContext<'_>, inputs: &Inputs) -> Result<Execution, NodeError> {
+        let frame = frame_input(inputs, "frame")?;
+        let mut out = Vec::with_capacity(frame.payload.len() * 4);
+        for b in frame.payload.bytes() {
+            out.extend_from_slice(&(f32::from(*b) / 255.0).to_le_bytes());
+        }
+        let descriptor = Descriptor {
+            media: MediaType::Tensor,
+            element: ElementType::F32,
+            shape: frame.payload.descriptor.shape.clone(),
+            epoch: 0,
+        };
+        Ok(Execution::Produced(Outputs::new().with(
+            "tensor",
+            Value::Tensor(Payload::heap(descriptor, out).map_err(NodeError::failed)?),
+        )))
+    }
+}
+
+/// CPU reference of the `mean-f32` GPU kernel: f32 tensor → mean as `stats` JSON and a
+/// bright/dark classification (threshold 0.5).
+#[derive(Debug)]
+pub struct MeanF32;
+
+impl MeanF32 {
+    fn create(
+        config: &serde_json::Map<String, serde_json::Value>,
+        _: &HostServices,
+    ) -> Result<Box<dyn NodeHandle>, NodeError> {
+        let _: NoConfig = parse_config(config)?;
+        Ok(Box::new(Self))
+    }
+}
+
+/// Builds the outputs shared by the CPU and GPU mean nodes.
+pub fn mean_outputs(mean: f64, count: usize) -> Outputs {
+    Outputs::new()
+        .with(
+            "class",
+            Value::Classification(Classification {
+                label: if mean >= 0.5 { "bright" } else { "dark" }.into(),
+                measurement: Some(mean),
+                unit: Some("mean".into()),
+                details: None,
+            }),
+        )
+        .with(
+            "stats",
+            Value::Json(serde_json::json!({ "mean": mean, "count": count })),
+        )
+}
+
+impl NodeHandle for MeanF32 {
+    fn execute(&mut self, _: &ExecContext<'_>, inputs: &Inputs) -> Result<Execution, NodeError> {
+        let Some(Value::Tensor(t)) = inputs.get("tensor") else {
+            return Err(NodeError::failed("input `tensor` is missing"));
+        };
+        let bytes = t.bytes();
+        let count = bytes.len() / 4;
+        let sum: f64 = bytes
+            .chunks_exact(4)
+            .map(|c| f64::from(f32::from_le_bytes([c[0], c[1], c[2], c[3]])))
+            .sum();
+        let mean = if count == 0 { 0.0 } else { sum / count as f64 };
+        Ok(Execution::Produced(mean_outputs(mean, count)))
     }
 }
 

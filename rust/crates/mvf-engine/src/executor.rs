@@ -158,6 +158,8 @@ pub struct DataPlaneReport {
     pub arena_deliveries: u64,
     /// Payload deliveries whose bytes live on the host heap.
     pub heap_deliveries: u64,
+    /// Payload deliveries whose bytes live in device memory (handle only, no transfer).
+    pub device_deliveries: u64,
     /// Arena counters, when the arena was created.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arena: Option<mvf_memory::MetricsSnapshot>,
@@ -439,10 +441,14 @@ impl Engine {
                         skip.get_or_insert(SkipReason::ControlFalse(port.name.clone()));
                     }
                     (Some(v), _) => {
-                        match v.payload().map(|p| p.lease().is_some()) {
-                            Some(true) => self.deliveries.arena_deliveries += 1,
-                            Some(false) => self.deliveries.heap_deliveries += 1,
-                            None => {}
+                        if let Some(p) = v.payload() {
+                            if p.lease().is_some() {
+                                self.deliveries.arena_deliveries += 1;
+                            } else if p.device_buffer().is_some() {
+                                self.deliveries.device_deliveries += 1;
+                            } else {
+                                self.deliveries.heap_deliveries += 1;
+                            }
                         }
                         inputs.insert(port.name.clone(), v.clone())
                     }
