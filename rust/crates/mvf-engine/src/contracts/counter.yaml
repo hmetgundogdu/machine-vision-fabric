@@ -1,0 +1,18 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.counter
+  version: 1.0.0
+  description: Stateful frame counter (state schema 1 = little-endian u64). Live-replaceable with state migration.
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: count, channel: data, type: json }
+  artifacts:
+    - { backend: in-process, builtin: counter }
+  lifecycle:
+    replacement: stateful
+    state:
+      schemaVersion: 1

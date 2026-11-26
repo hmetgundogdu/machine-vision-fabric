@@ -13,6 +13,7 @@
 //! - every emitted value is re-checked against the producer's declared output port and type.
 
 use std::collections::HashMap;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use mvf_contract::{Channel, NodeContract};
@@ -22,6 +23,7 @@ use serde::Serialize;
 use crate::backend::{BackendRegistry, InstantiateRequest};
 use crate::builtins::HostServices;
 use crate::node::*;
+use crate::replace::{ControlCommand, Pending, ReplacementEvent, Standby};
 use crate::value::Value;
 
 /// Why a node did not run in a cycle.
@@ -137,6 +139,8 @@ pub struct RunReport {
     pub nodes: Vec<NodeStats>,
     /// Payload deliveries and shared-memory copy accounting.
     pub data_plane: DataPlaneReport,
+    /// Live replacement events, in order.
+    pub replacements: Vec<ReplacementEvent>,
 }
 
 /// Data-plane accounting for a run. A *delivery* is one payload handed to one consuming node; it
@@ -171,6 +175,14 @@ pub(crate) struct NodeSlot {
     pub(crate) handle: Box<dyn NodeHandle>,
     pub(crate) generation: u64,
     pub(crate) stats: NodeStats,
+    /// Next generation number to hand out (monotonic per node).
+    pub(crate) next_generation: u64,
+    /// A candidate generation being prepared.
+    pub(crate) pending: Option<Pending>,
+    /// The previous generation, warm for rollback during probation.
+    pub(crate) standby: Option<Standby>,
+    /// Remaining probation cycles while `standby` is present.
+    pub(crate) probation: u64,
 }
 
 /// A validated graph bound to node handles.
@@ -182,8 +194,12 @@ pub struct Engine {
     feeds: HashMap<(usize, String), (usize, String)>,
     pub(crate) next_cycle: u64,
     started: bool,
-    services: HostServices,
+    pub(crate) services: HostServices,
     deliveries: DataPlaneReport,
+    pub(crate) backends: BackendRegistry,
+    pub(crate) control_tx: Sender<ControlCommand>,
+    pub(crate) control_rx: Receiver<ControlCommand>,
+    pub(crate) replacement_log: Vec<ReplacementEvent>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -239,6 +255,10 @@ impl Engine {
                     generation: 1,
                     ..NodeStats::default()
                 },
+                next_generation: 2,
+                pending: None,
+                standby: None,
+                probation: 0,
             });
         }
         let mut exec_order: Vec<usize> = graph.order.clone();
@@ -255,6 +275,7 @@ impl Engine {
                 )
             })
             .collect();
+        let (control_tx, control_rx) = mpsc::channel();
         Ok(Self {
             graph,
             slots,
@@ -264,6 +285,10 @@ impl Engine {
             started: false,
             services: services.clone(),
             deliveries: DataPlaneReport::default(),
+            backends: backends.clone(),
+            control_tx,
+            control_rx,
+            replacement_log: Vec::new(),
         })
     }
 
@@ -307,6 +332,7 @@ impl Engine {
 
     /// Drains and stops every node (reverse execution order). Idempotent.
     pub fn shutdown(&mut self, cancel: &CancellationToken) {
+        self.shutdown_replacements(cancel);
         for &i in self.exec_order.iter().rev() {
             let slot = &mut self.slots[i];
             let ctx = LifecycleContext {
@@ -326,7 +352,12 @@ impl Engine {
         let started_at = Instant::now();
         let end = match self.start(&options.cancel) {
             Err((node, error)) => EndReason::StartFailed { node, error },
-            Ok(()) => self.run_cycles(options, observer, &mut |_| {}),
+            Ok(()) => {
+                let cancel = options.cancel.clone();
+                self.run_cycles(options, observer, &mut |e: &mut Engine| {
+                    e.on_boundary(&cancel)
+                })
+            }
         };
         self.shutdown(&options.cancel);
         self.report(end, started_at)
@@ -340,6 +371,7 @@ impl Engine {
             wall_time_ms: started_at.elapsed().as_secs_f64() * 1e3,
             nodes: self.stats(),
             data_plane: self.data_plane(),
+            replacements: self.replacement_log.clone(),
         }
     }
 
@@ -410,8 +442,8 @@ impl Engine {
                 }
             }
 
-            let slot = &mut self.slots[i];
             if let Some(reason) = skip {
+                let slot = &mut self.slots[i];
                 slot.stats.skipped += 1;
                 observer.node(
                     cycle,
@@ -422,78 +454,72 @@ impl Engine {
                 continue;
             }
 
-            let deadline = match slot.contract.spec.lifecycle.execute_timeout_ms {
-                0 => None,
-                ms => Some(Instant::now() + Duration::from_millis(ms)),
-            };
-            let ctx = ExecContext {
-                cycle,
-                node_id: &slot.id,
-                generation: slot.generation,
-                cancel,
-                deadline,
-            };
-            let t0 = Instant::now();
-            let result = slot.handle.execute(&ctx, &inputs);
-            let elapsed = t0.elapsed();
-            let us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
-            slot.stats.executed += 1;
-            slot.stats.total_us = slot.stats.total_us.saturating_add(us);
-            slot.stats.max_us = slot.stats.max_us.max(us);
+            let is_source = self.graph.nodes[i].is_source();
+            // Executes on the active generation. A candidate that fails during probation is rolled
+            // back and the same inputs are re-executed on the restored generation (lossless).
+            let (outputs, elapsed) = loop {
+                let slot = &mut self.slots[i];
+                let deadline = match slot.contract.spec.lifecycle.execute_timeout_ms {
+                    0 => None,
+                    ms => Some(Instant::now() + Duration::from_millis(ms)),
+                };
+                let ctx = ExecContext {
+                    cycle,
+                    node_id: &slot.id,
+                    generation: slot.generation,
+                    cancel,
+                    deadline,
+                };
+                let t0 = Instant::now();
+                let result = slot.handle.execute(&ctx, &inputs);
+                let elapsed = t0.elapsed();
+                let us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+                slot.stats.executed += 1;
+                slot.stats.total_us = slot.stats.total_us.saturating_add(us);
+                slot.stats.max_us = slot.stats.max_us.max(us);
 
-            let outputs = match result {
-                Ok(Execution::Produced(outputs)) => outputs,
-                Ok(Execution::Exhausted) if node.is_source() => {
-                    return Some(EndReason::SourceExhausted {
-                        node: slot.id.clone(),
-                    });
-                }
-                Ok(Execution::Exhausted) => {
-                    return Some(EndReason::NodeFailed {
-                        node: slot.id.clone(),
-                        cycle,
-                        error: NodeError::new(
-                            NodeErrorKind::InvalidOutput,
-                            "only a source may report exhaustion",
-                        ),
-                    });
-                }
-                Err(error) => {
-                    return Some(EndReason::NodeFailed {
-                        node: slot.id.clone(),
-                        cycle,
-                        error,
-                    });
+                let validated = match result {
+                    Ok(Execution::Produced(outputs)) => validate_outputs(&slot.contract, outputs),
+                    Ok(Execution::Exhausted) if is_source => {
+                        return Some(EndReason::SourceExhausted {
+                            node: slot.id.clone(),
+                        });
+                    }
+                    Ok(Execution::Exhausted) => Err(NodeError::new(
+                        NodeErrorKind::InvalidOutput,
+                        "only a source may report exhaustion",
+                    )),
+                    Err(error) => Err(error),
+                };
+                match validated {
+                    Ok(outputs) => {
+                        if slot.standby.is_some() {
+                            slot.probation = slot.probation.saturating_sub(1);
+                        }
+                        break (outputs, elapsed);
+                    }
+                    Err(error) if slot.standby.is_some() => {
+                        let message = format!(
+                            "generation {} failed at cycle {cycle}: {error}",
+                            slot.generation
+                        );
+                        self.rollback(i, "replace.candidate-failed", message);
+                    }
+                    Err(error) => {
+                        return Some(EndReason::NodeFailed {
+                            node: slot.id.clone(),
+                            cycle,
+                            error,
+                        });
+                    }
                 }
             };
 
             let count = outputs.len();
-            for (port, value) in outputs.into_inner() {
-                let declared = node
-                    .contract
-                    .spec
-                    .ports
-                    .outputs
-                    .iter()
-                    .find(|p| p.name == port);
-                let error = match declared {
-                    None => Some(format!("emitted undeclared output port `{port}`")),
-                    Some(p) if p.port_type != value.port_type() => Some(format!(
-                        "output `{port}` is declared `{}` but carried `{}`",
-                        p.port_type.as_str(),
-                        value.port_type().as_str()
-                    )),
-                    Some(_) => None,
-                };
-                if let Some(message) = error {
-                    return Some(EndReason::NodeFailed {
-                        node: slot.id.clone(),
-                        cycle,
-                        error: NodeError::new(NodeErrorKind::InvalidOutput, message),
-                    });
-                }
+            for (port, value) in outputs {
                 values.insert((i, port), value);
             }
+            let slot = &self.slots[i];
             observer.node(
                 cycle,
                 &slot.id,
@@ -506,4 +532,28 @@ impl Engine {
         }
         None
     }
+}
+
+/// Re-checks every emitted value against the active generation's declared outputs.
+fn validate_outputs(
+    contract: &NodeContract,
+    outputs: Outputs,
+) -> Result<std::collections::BTreeMap<String, Value>, NodeError> {
+    let outputs = outputs.into_inner();
+    for (port, value) in &outputs {
+        let declared = contract.spec.ports.outputs.iter().find(|p| &p.name == port);
+        let error = match declared {
+            None => Some(format!("emitted undeclared output port `{port}`")),
+            Some(p) if p.port_type != value.port_type() => Some(format!(
+                "output `{port}` is declared `{}` but carried `{}`",
+                p.port_type.as_str(),
+                value.port_type().as_str()
+            )),
+            Some(_) => None,
+        };
+        if let Some(message) = error {
+            return Err(NodeError::new(NodeErrorKind::InvalidOutput, message));
+        }
+    }
+    Ok(outputs)
 }

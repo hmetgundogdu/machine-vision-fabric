@@ -7,6 +7,7 @@ pub mod backend;
 pub mod builtins;
 pub mod executor;
 pub mod node;
+pub mod replace;
 pub mod resolver;
 pub mod services;
 pub mod value;
@@ -18,6 +19,10 @@ pub use executor::{
     RunOptions, RunReport, SkipReason,
 };
 pub use node::*;
+pub use replace::{
+    ControlHandle, NodeReference, PlannedCommand, ReplacementEvent, ReplacementEventKind,
+    ReplacementRequest, UpdatePlan, parse_update_plan,
+};
 pub use resolver::HostResolver;
 pub use services::{HostServices, LogEvent, Logs};
 pub use value::*;

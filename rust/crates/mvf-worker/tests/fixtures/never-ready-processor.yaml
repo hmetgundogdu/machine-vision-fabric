@@ -1,0 +1,10 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: test.never-ready-processor, version: 2.0.0 }
+spec:
+  ports:
+    inputs: [ { name: frame, channel: data, type: frame } ]
+    outputs: [ { name: frame, channel: data, type: frame } ]
+  artifacts: [ { backend: worker, runtime: python, entry: never_ready_processor.py, protocol: 1 } ]
+  isolation: { minimum: process }
+  lifecycle: { readinessTimeoutMs: 500, executeTimeoutMs: 5000, replacement: stateless }

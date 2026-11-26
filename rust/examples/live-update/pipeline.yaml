@@ -1,0 +1,24 @@
+# Live node replacement demo (issue #10, Gate A). Run from rust/:
+#   cargo run -p mvf-cli -- run examples/live-update/pipeline.yaml --updates examples/live-update/updates.yaml
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: live-update
+  description: Continuous synthetic camera -> replaceable processor -> Python classifier -> recorder.
+spec:
+  nodes:
+    - id: cam
+      builtin: synthetic-source
+      config: { width: 8, height: 8, frames: 120, intervalMs: 5, arena: true }
+    - id: proc
+      builtin: invert                      # v1: trusted in-process Rust
+    - id: classify
+      module: py.brightness-classifier     # Python worker, zero-copy over shared memory
+    - id: sink
+      builtin: record
+  edges:
+    data:
+      - { from: cam.frame, to: proc.frame }
+      - { from: proc.frame, to: classify.frame }
+      - { from: proc.frame, to: sink.frame }
+      - { from: classify.class, to: sink.class }

@@ -151,6 +151,11 @@ const BUILTINS: &[Builtin] = &[
         contract: include_str!("contracts/fault.yaml"),
         factory: Fault::create,
     },
+    Builtin {
+        name: "counter",
+        contract: include_str!("contracts/counter.yaml"),
+        factory: Counter::create,
+    },
 ];
 
 /// Names of every builtin this host provides.
@@ -353,26 +358,53 @@ impl NodeHandle for SyntheticSource {
 #[serde(deny_unknown_fields)]
 struct NoConfig {}
 
-/// `b → 255 − b`. Writes a new output buffer (a transform write, not a transfer copy).
+/// `b → 255 − b`. Writes a new output buffer (a transform write, not a transfer copy). The output
+/// stays in the memory domain the input arrived in: an arena input yields an arena output, so a
+/// downstream worker receives it by handle.
 #[derive(Debug)]
-pub struct Invert;
+pub struct Invert {
+    services: HostServices,
+}
 
 impl Invert {
     fn create(
         config: &serde_json::Map<String, serde_json::Value>,
-        _: &HostServices,
+        services: &HostServices,
     ) -> Result<Box<dyn NodeHandle>, NodeError> {
         let _: NoConfig = parse_config(config)?;
-        Ok(Box::new(Invert))
+        Ok(Box::new(Invert {
+            services: services.clone(),
+        }))
     }
 }
 
 impl NodeHandle for Invert {
     fn execute(&mut self, _: &ExecContext<'_>, inputs: &Inputs) -> Result<Execution, NodeError> {
         let frame = frame_input(inputs, "frame")?;
-        let inverted: Vec<u8> = frame.payload.bytes().iter().map(|b| 255 - b).collect();
-        let payload =
-            Payload::heap(frame.payload.descriptor.clone(), inverted).map_err(NodeError::failed)?;
+        let input = frame.payload.bytes();
+        let resource =
+            |e: mvf_memory::ArenaError| NodeError::new(NodeErrorKind::Resource, e.to_string());
+        let payload = if frame.payload.lease().is_some() {
+            let arena = self.services.arena().map_err(resource)?;
+            let mut slot = arena.reserve().map_err(resource)?;
+            let out = slot.payload_mut();
+            if out.len() < input.len() {
+                return Err(NodeError::new(
+                    NodeErrorKind::Resource,
+                    "frame exceeds the arena slot",
+                ));
+            }
+            for (o, i) in out.iter_mut().zip(input) {
+                *o = 255 - i;
+            }
+            slot.write_header(&frame.payload.descriptor)
+                .and_then(|_| slot.seal())
+                .map(Payload::arena)
+                .map_err(resource)?
+        } else {
+            let inverted: Vec<u8> = input.iter().map(|b| 255 - b).collect();
+            Payload::heap(frame.payload.descriptor.clone(), inverted).map_err(NodeError::failed)?
+        };
         Ok(Execution::Produced(Outputs::new().with(
             "frame",
             Value::Frame(Frame {
@@ -588,6 +620,101 @@ impl NodeHandle for Fault {
         Ok(Execution::Produced(
             Outputs::new().with("frame", Value::Frame(frame.clone())),
         ))
+    }
+}
+
+// ---------------------------------------------------------------- counter (stateful)
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CounterConfig {
+    /// Which implementation to emulate: schema 1 (u64 state) or schema 2 (JSON state, migrates 1).
+    #[serde(default = "one_u32")]
+    schema_version: u32,
+}
+
+fn one_u32() -> u32 {
+    1
+}
+
+/// Counts frames and emits `{"count": n, "schema": v}`. Exports versioned state so a live
+/// replacement can carry the count across generations (schema 1 → 2 migration supported).
+#[derive(Debug)]
+pub struct Counter {
+    schema: u32,
+    count: u64,
+}
+
+impl Counter {
+    fn create(
+        config: &serde_json::Map<String, serde_json::Value>,
+        _: &HostServices,
+    ) -> Result<Box<dyn NodeHandle>, NodeError> {
+        let c: CounterConfig = parse_config(config)?;
+        if !(1..=2).contains(&c.schema_version) {
+            return Err(NodeError::new(
+                NodeErrorKind::InvalidConfig,
+                "schemaVersion must be 1 or 2",
+            ));
+        }
+        Ok(Box::new(Self {
+            schema: c.schema_version,
+            count: 0,
+        }))
+    }
+}
+
+impl NodeHandle for Counter {
+    fn execute(&mut self, _: &ExecContext<'_>, inputs: &Inputs) -> Result<Execution, NodeError> {
+        frame_input(inputs, "frame")?;
+        self.count += 1;
+        Ok(Execution::Produced(Outputs::new().with(
+            "count",
+            Value::Json(serde_json::json!({ "count": self.count, "schema": self.schema })),
+        )))
+    }
+
+    fn export_state(&mut self) -> Result<Option<StateBlob>, NodeError> {
+        let bytes = match self.schema {
+            1 => self.count.to_le_bytes().to_vec(),
+            _ => serde_json::to_vec(&serde_json::json!({ "count": self.count }))
+                .map_err(|e| NodeError::failed(e.to_string()))?,
+        };
+        Ok(Some(StateBlob {
+            schema_version: self.schema,
+            bytes,
+        }))
+    }
+
+    fn import_state(&mut self, state: &StateBlob) -> Result<(), NodeError> {
+        let incompatible = || {
+            NodeError::new(
+                NodeErrorKind::Unsupported,
+                format!(
+                    "counter schema {} cannot import state schema {}",
+                    self.schema, state.schema_version
+                ),
+            )
+        };
+        self.count = match (self.schema, state.schema_version) {
+            (_, 1) => {
+                let raw: [u8; 8] = state.bytes.as_slice().try_into().map_err(|_| {
+                    NodeError::new(
+                        NodeErrorKind::InvalidConfig,
+                        "schema 1 state must be 8 bytes",
+                    )
+                })?;
+                u64::from_le_bytes(raw)
+            }
+            (2, 2) => serde_json::from_slice::<serde_json::Value>(&state.bytes)
+                .ok()
+                .and_then(|v| v.get("count").and_then(serde_json::Value::as_u64))
+                .ok_or_else(|| {
+                    NodeError::new(NodeErrorKind::InvalidConfig, "bad schema 2 state")
+                })?,
+            _ => return Err(incompatible()),
+        };
+        Ok(())
     }
 }
 

@@ -24,7 +24,7 @@ Updated by every slice; the stage reports carry the details.
 | Readiness budget (`hello ready:false` → `ready`) | `protocol/README.md`, `WorkerReadinessTests` | `spec.lifecycle.readinessTimeoutMs` | ported |
 | Typed payload descriptor (192-byte header, `MVF1`) | `PayloadDescriptor.cs` | `mvf_memory::Descriptor` | ported — byte-for-byte golden + Python SDK cross-check |
 | Isolation / resource / memory / placement policy | — | `spec.isolation`, `spec.resources`, `spec.memory`, `spec.execution` | new |
-| Live replacement + versioned state | — | `spec.lifecycle.replacement`, `spec.lifecycle.state` | new (schema); behaviour in #15 |
+| Live replacement + versioned state | — | `spec.lifecycle.replacement`, `spec.lifecycle.state`, `mvf_engine::replace` | new — stateless + in-process stateful, rollback, update plans |
 | Backend capability negotiation | — | `mvf_contract::negotiate` | new |
 | Strict YAML (dup keys, no anchors/tags, bounded) | JSON via `System.Text.Json` | `mvf_contract::yaml` | new |
 

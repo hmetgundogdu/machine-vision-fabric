@@ -11,8 +11,9 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use mvf_engine::{
-    BackendRegistry, CancellationToken, EndReason, Engine, HostResolver, HostServices, LogEvent,
-    Logs, NullObserver, Record, Recorder, RunOptions, RunReport, default_backends,
+    BackendRegistry, CancellationToken, ControlHandle, EndReason, Engine, HostResolver,
+    HostServices, LogEvent, Logs, Observer, PlannedCommand, Record, Recorder, RunOptions,
+    RunReport, default_backends, parse_update_plan,
 };
 use mvf_worker::WorkerBackend;
 
@@ -59,6 +60,9 @@ enum Command {
         /// Emit JSON lines (`{"record":…}` per sink record, then `{"report":…}`).
         #[arg(long)]
         json: bool,
+        /// Live-update plan (`kind: UpdatePlan`) applied while the pipeline runs.
+        #[arg(long)]
+        updates: Option<PathBuf>,
     },
     /// List the builtins and backends this host provides.
     Host,
@@ -73,7 +77,8 @@ fn main() -> ExitCode {
             args,
             max_cycles,
             json,
-        } => run(&args, max_cycles, json),
+            updates,
+        } => run(&args, max_cycles, json, updates.as_deref()),
         Command::Host => host(),
     }
 }
@@ -214,9 +219,72 @@ fn print_report(report: &RunReport, json: bool) {
             n.id, n.backend, n.generation, n.executed, n.skipped, n.total_us, n.max_us
         );
     }
+    for e in &report.replacements {
+        eprintln!(
+            "  replace {:<10} {:<12} at cycle {:<4} gen {} -> {} {}{}{}",
+            e.node,
+            serde_json::to_string(&e.kind)
+                .unwrap_or_default()
+                .trim_matches('"'),
+            e.cycle,
+            e.from_generation,
+            e.to_generation
+                .map(|g| g.to_string())
+                .unwrap_or_else(|| "-".into()),
+            e.code.map(|c| format!("[{c}] ")).unwrap_or_default(),
+            e.preparation_ms
+                .map(|p| format!("prep={p:.1}ms "))
+                .unwrap_or_default(),
+            e.cutover_us
+                .map(|c| format!("cutover={c}us"))
+                .unwrap_or_default(),
+        );
+    }
+    if let Some(a) = &report.data_plane.arena {
+        eprintln!(
+            "  data plane: copiesIn={} copiesOut={} transformWrites={} zeroCopyHandoffs={} inUse={}",
+            a.copies_in, a.copies_out, a.transform_writes, a.zero_copy_handoffs, a.in_use
+        );
+    }
 }
 
-fn run(args: &PipelineArgs, max_cycles: Option<u64>, json: bool) -> ExitCode {
+/// Submits scripted update steps at the boundary before their cycle.
+struct PlanDriver {
+    control: ControlHandle,
+    steps: Vec<(u64, PlannedCommand)>,
+}
+
+impl Observer for PlanDriver {
+    fn cycle_completed(&mut self, cycle: u64) {
+        for (at, command) in &self.steps {
+            if *at == cycle + 1 {
+                command.submit(&self.control);
+            }
+        }
+    }
+}
+
+fn load_plan(path: &Path, args: &PipelineArgs) -> Result<Vec<(u64, PlannedCommand)>, ExitCode> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| fail(2, format!("{}: {e}", path.display())))?;
+    let base = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut plan_resolver = HostResolver::new(base);
+    for root in resolver(args).module_roots() {
+        plan_resolver = plan_resolver.with_module_root(root);
+    }
+    parse_update_plan(&text, &plan_resolver)
+        .map_err(|e| fail(2, format!("{}: {e}", path.display())))
+}
+
+fn run(
+    args: &PipelineArgs,
+    max_cycles: Option<u64>,
+    json: bool,
+    updates: Option<&Path>,
+) -> ExitCode {
     let services = HostServices {
         logs: Logs::streaming(move |e| print_log(e, json)),
         ..HostServices::with_recorder(Recorder::streaming(move |r| print_record(r, json)))
@@ -225,11 +293,19 @@ fn run(args: &PipelineArgs, max_cycles: Option<u64>, json: bool) -> ExitCode {
         Ok(e) => e,
         Err(code) => return code,
     };
+    let steps = match updates.map(|p| load_plan(p, args)).transpose() {
+        Ok(s) => s.unwrap_or_default(),
+        Err(code) => return code,
+    };
     let cancel = CancellationToken::new();
     let handler_token = cancel.clone();
     // Ctrl+C requests a clean stop at the next cycle boundary.
     let _ = ctrlc::set_handler(move || handler_token.cancel());
-    let report = engine.run(&RunOptions { max_cycles, cancel }, &mut NullObserver);
+    let mut driver = PlanDriver {
+        control: engine.control(),
+        steps,
+    };
+    let report = engine.run(&RunOptions { max_cycles, cancel }, &mut driver);
     print_report(&report, json);
     match report.end {
         EndReason::NodeFailed { .. } | EndReason::StartFailed { .. } => ExitCode::from(1),
