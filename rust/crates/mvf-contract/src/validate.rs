@@ -351,6 +351,75 @@ fn check_targets(targets: Option<&[Target]>, path: &str, issues: &mut Issues) {
     }
 }
 
+fn validate_display(spec: &NodeSpec, issues: &mut Issues) {
+    use crate::DisplayMode;
+    let d = &spec.permissions.display;
+    let path = |field: &str| format!("spec.permissions.display.{field}");
+    if d.mode == DisplayMode::None {
+        for (field, set) in [
+            ("keyboard", d.keyboard),
+            ("mouse", d.mouse),
+            ("clipboard", d.clipboard),
+            ("fullscreen", d.fullscreen),
+        ] {
+            if set {
+                issues.push(
+                    "contract.display.grant-without-display",
+                    path(field),
+                    format!("`{field}` needs `display.mode: native` or `managed-surface`"),
+                );
+            }
+        }
+        if spec.presentation.is_some() {
+            issues.push(
+                "contract.display.presentation-without-display",
+                "spec.presentation".to_string(),
+                "presentation hints need `permissions.display.mode`",
+            );
+        }
+        return;
+    }
+    if !(1..=8).contains(&d.max_windows) {
+        issues.push(
+            "contract.display.invalid-max-windows",
+            path("maxWindows"),
+            "maxWindows must be between 1 and 8",
+        );
+    }
+    for (field, value) in [("maxWidth", d.max_width), ("maxHeight", d.max_height)] {
+        if !(16..=8192).contains(&value) {
+            issues.push(
+                "contract.display.invalid-size",
+                path(field),
+                format!("{field} must be between 16 and 8192 pixels"),
+            );
+        }
+    }
+    if let Some(p) = &spec.presentation {
+        for (field, value, max) in [
+            ("width", p.width, d.max_width),
+            ("height", p.height, d.max_height),
+        ] {
+            if let Some(v) = value
+                && (v == 0 || v > 8192)
+            {
+                issues.push(
+                    "contract.display.invalid-size",
+                    format!("spec.presentation.{field}"),
+                    format!("{field} must be between 1 and 8192 (surface maximum {max})"),
+                );
+            }
+        }
+        if p.title.as_deref().is_some_and(|t| t.chars().count() > 120) {
+            issues.push(
+                "contract.display.invalid-title",
+                "spec.presentation.title".to_string(),
+                "title is longer than 120 characters",
+            );
+        }
+    }
+}
+
 fn validate_network(spec: &NodeSpec, issues: &mut Issues) {
     use crate::{NetworkPermission, NetworkPolicy};
     let network = &spec.permissions.network;
@@ -577,6 +646,7 @@ fn validate_policy(spec: &NodeSpec, issues: &mut Issues) {
         }
     }
     validate_network(spec, issues);
+    validate_display(spec, issues);
     for (i, name) in spec.permissions.cdi_devices.iter().enumerate() {
         let valid = name.split_once('=').is_some_and(|(kind, dev)| {
             kind.split_once('/')

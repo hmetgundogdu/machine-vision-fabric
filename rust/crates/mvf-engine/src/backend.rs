@@ -119,6 +119,7 @@ impl ExecutionBackend for InProcessBackend {
             replacement: vec![Replacement::Stateless, Replacement::Stateful],
             grants: Default::default(),
             private_arenas: false,
+            display: Default::default(),
         }
     }
 

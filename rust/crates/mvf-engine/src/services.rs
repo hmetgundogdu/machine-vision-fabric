@@ -92,6 +92,9 @@ pub struct HostServices {
     pub package_dir: Option<std::path::PathBuf>,
     /// Machine-local bindings (`value`/`select` resolution, live edits, module bindings).
     pub bindings: Arc<crate::bindings::Bindings>,
+    /// Presentation surfaces of nodes that render for a display host (#30). Owned by the engine,
+    /// keyed by pipeline node, removed when the engine stops.
+    pub display: Arc<mvf_display::DisplayRegistry>,
 }
 
 impl HostServices {

@@ -1,7 +1,8 @@
 # MVF worker protocol (control plane)
 
 Language-agnostic contract between the engine (parent) and an out-of-process module
-(child), spoken over the child's **stdio** — local only, **no network**. One JSON object
+(child), spoken over the child's **stdio** — local only, **no network**. Presentation (windows,
+input) is a separate shared-memory format: [`display-surface.md`](display-surface.md) (#30). One JSON object
 per line (newline-delimited). Targets: Python, Node.js, .NET.
 
 Payload bytes are NOT part of this contract — they live in the **shared-memory data plane**. The

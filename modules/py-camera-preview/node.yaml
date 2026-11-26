@@ -1,0 +1,35 @@
+# Universal Node Contract for the Rust runtime (issue #30). A camera preview with no UI toolkit:
+# the node writes frames into Display Fabric managed surfaces and a display host in the user's
+# session shows them. Window 1 is the live view (click to set the region of interest), window 2 a
+# detail view of that region. `required: false`: on a host that cannot provide surfaces the node
+# still runs, headless, and says so.
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: py.camera-preview
+  version: 1.0.0
+  description: Live camera preview and clicked-region detail view (Display Fabric managed surfaces).
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: status, channel: data, type: json }
+  artifacts:
+    - { backend: worker, runtime: python, entry: preview.py, protocol: 1 }
+  isolation:
+    minimum: process
+  lifecycle:
+    readinessTimeoutMs: 10000
+  permissions:
+    display:
+      mode: managed-surface
+      required: false
+      maxWindows: 2
+      maxWidth: 1920
+      maxHeight: 1080
+      mouse: true
+  presentation:
+    title: Camera preview
+    width: 960
+    height: 540

@@ -1,0 +1,27 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: py.camera-preview
+  version: 1.0.0
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: status, channel: data, type: json }
+  artifacts:
+    - { backend: worker, runtime: python, entry: preview.py, protocol: 1 }
+  isolation:
+    minimum: process
+  permissions:
+    display:
+      mode: managed-surface
+      required: false
+      maxWindows: 2
+      maxWidth: 1280
+      maxHeight: 720
+      mouse: true
+  presentation:
+    title: Camera preview
+    width: 640
+    height: 360

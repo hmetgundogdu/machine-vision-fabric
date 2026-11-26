@@ -1,0 +1,33 @@
+# Display Fabric demo (issue #30): one camera, two presenting nodes, no UI code in either.
+#
+# - `preview` (Python, py.camera-preview): live view plus a detail view of the region you click.
+# - `cube` (Rust, rs.cube-inspector): the camera frame on a 3D cube; drag to orbit, wheel to zoom,
+#   `r` to reset. It renders at the size of its window.
+#
+# The engine allocates the surfaces; mvf-display-host (a separate process in your desktop
+# session) opens the windows. Start it before or after the pipeline, close it, restart it: the
+# pipeline does not notice. rust/scripts/display-demo.sh builds and runs both.
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: display-demo
+  description: Camera preview and 3D inspector through Display Fabric managed surfaces.
+spec:
+  nodes:
+    - id: cam
+      builtin: synthetic-source
+      config: { width: 640, height: 360, channels: 3, intervalMs: 33, seed: 11 }
+    - id: preview
+      module: py.camera-preview
+    - id: cube
+      module: rs.cube-inspector
+    - id: preview-log
+      builtin: record
+    - id: cube-log
+      builtin: record
+  edges:
+    data:
+      - { from: cam.frame, to: preview.frame }
+      - { from: cam.frame, to: cube.frame }
+      - { from: preview.status, to: preview-log.json }
+      - { from: cube.view, to: cube-log.json }

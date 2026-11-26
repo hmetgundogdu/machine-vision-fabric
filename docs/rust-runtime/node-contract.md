@@ -57,6 +57,12 @@ spec:
 | `memory.domain` | `host`, `device` | `host` | `device` requires `target: gpu`. |
 | `memory.zeroCopy` | `required`, `preferred`, `disabled` | `preferred` | `required` fails negotiation on a copying backend. |
 | `permissions.network` | `none`, `loopback`, `host`, `restricted`, or `{ mode: restricted, inbound: [...], outbound: deny \| [...] }` | `none` | Enforced only by a sandbox backend; trusted backends share the host network (logged). `restricted` needs `isolation.minimum: sandbox`. See [stage 16](stages/16.md). |
+| `permissions.display.mode` | `none`, `native`, `managed-surface` | `none` | Applies to every backend (an allocation, not only a restriction). `native`: the node's own toolkit opens windows; needs an interactive session (`negotiation.display-unavailable` otherwise). `managed-surface`: shared-memory surfaces a separate `mvf-display-host` presents. A node without `native` does not inherit `DISPLAY`/`WAYLAND_DISPLAY` (hygiene for trusted backends, not enforcement). See [stage 18](stages/18.md) and `protocol/display-surface.md`. |
+| `permissions.display.required` | bool | `true` | `false`: run headless (`placement.display-headless`) where the mode is unavailable. |
+| `permissions.display.maxWindows`, `maxWidth`, `maxHeight` | `1..=8`; `16..=8192` | `1`; `1920`×`1080` | One surface per window, sized for the largest frame. |
+| `permissions.display.keyboard`, `mouse` | bool | `false` | Input the display host routes to the node's surfaces; anything else is refused by the host. Native windows take OS input directly (`placement.display-input-unmediated`). |
+| `permissions.display.clipboard`, `fullscreen` | bool | `false` | Not grantable yet: asking is rejected (`negotiation.display-clipboard-unsupported`, `-fullscreen-unsupported`), never ignored. |
+| `presentation` | `{ title, width, height }` | node id, 1280×720 | Window hints for the host; needs a display mode. |
 | `isolation.syscalls` | `denylist`, `allowlist` | `denylist` | Sandbox seccomp policy; `allowlist` is Docker's default profile minus the denylist. Needs `isolation.minimum: sandbox`. |
 | `isolation.lsm` | `optional`, `required` | `optional` | `required` fails negotiation unless the host applies an AppArmor/SELinux profile. Needs `minimum: sandbox`. |
 | `memory.arena` | `shared`, `private` | `shared` | `private`: the node's process maps an arena of its own (no other node's payload is visible to it); inputs are copied in. Needs a backend with private arenas (worker, OCI); incompatible with `zeroCopy: required`. |

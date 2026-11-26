@@ -49,6 +49,8 @@ pub struct WorkerBackend {
     warm_spares: usize,
     isolate_arenas: bool,
     pools: pool::PoolRegistry,
+    /// The session this engine runs in (native windows need an interactive one).
+    session: mvf_display::Session,
 }
 
 impl Default for WorkerBackend {
@@ -72,7 +74,14 @@ impl WorkerBackend {
                 .unwrap_or(0),
             isolate_arenas: std::env::var_os("MVF_ISOLATE_ARENAS").is_some_and(|v| v == "1"),
             pools: pool::PoolRegistry::default(),
+            session: mvf_display::session::probe(),
         }
+    }
+
+    /// Overrides the probed session (tests; a host that knows better).
+    pub fn with_session(mut self, session: mvf_display::Session) -> Self {
+        self.session = session;
+        self
     }
 
     /// Keeps `n` pre-warmed spare workers per node, so a restart or re-open skips the cold start
@@ -137,6 +146,14 @@ impl ExecutionBackend for WorkerBackend {
             grants: Default::default(),
             // Each node can get an arena of its own (`memory.arena: private`).
             private_arenas: true,
+            // A worker inherits the engine's session: native windows only in an interactive one.
+            // Managed surfaces need no session at all (the host is a separate process).
+            display: mvf_contract::DisplaySupport {
+                native: self.session.interactive(),
+                managed_surface: true,
+                fullscreen: false,
+                session: self.session.detail.clone(),
+            },
         }
     }
 
@@ -190,11 +207,19 @@ impl ExecutionBackend for WorkerBackend {
             WorkerRuntime::Executable => (entry_path.clone().into_os_string(), vec![]),
         };
         let _ = mapping;
+        let display = display_plan(request, &self.session)?;
+        env.extend(display.env);
+        if let Some(note) = display.note {
+            request
+                .services
+                .log(request.node_id, request.generation, "info", note);
+        }
         let spec = LaunchSpec {
             program,
             args,
             cwd: contract_dir,
             env,
+            remove_env: display.remove_env,
         };
         let private = self.isolate_arenas
             || request.contract.spec.memory.arena == mvf_contract::ArenaSharing::Private;
@@ -309,6 +334,102 @@ fn build_worker_node(
         pool: None,
         produced: 0,
     }))
+}
+
+/// What a worker gets for `permissions.display`.
+struct DisplayPlan {
+    env: Vec<(String, OsString)>,
+    remove_env: Vec<String>,
+    note: Option<String>,
+}
+
+/// Native nodes keep the session's display environment; every other node has it withheld (least
+/// privilege — a worker is not sandboxed, so this is hygiene, not enforcement). Managed-surface
+/// nodes get their surfaces from the engine's registry: the same files for every generation.
+fn display_plan(
+    request: &InstantiateRequest<'_>,
+    session: &mvf_display::Session,
+) -> Result<DisplayPlan, NodeError> {
+    use mvf_contract::DisplayMode;
+    let d = &request.contract.spec.permissions.display;
+    let withheld = || {
+        mvf_display::session::DISPLAY_ENV
+            .iter()
+            .map(|k| k.to_string())
+            .collect::<Vec<_>>()
+    };
+    let headless = |why: String| DisplayPlan {
+        env: vec![],
+        remove_env: withheld(),
+        note: Some(format!("display: headless — {why}")),
+    };
+    match d.mode {
+        DisplayMode::None => Ok(DisplayPlan {
+            env: vec![],
+            remove_env: withheld(),
+            note: None,
+        }),
+        DisplayMode::Native if session.interactive() => Ok(DisplayPlan {
+            env: vec![],
+            remove_env: vec![],
+            note: Some(format!(
+                "display: native windows in the {} session (the application owns its windows \
+                 and input; isolation `process` does not confine them)",
+                session.detail
+            )),
+        }),
+        // Negotiation admitted this only for `required: false`.
+        DisplayMode::Native => Ok(headless(format!(
+            "native windows unavailable ({})",
+            session.detail
+        ))),
+        DisplayMode::ManagedSurface => {
+            let p = request.contract.spec.presentation.as_ref();
+            let surface_request = mvf_display::SurfaceRequest {
+                title: p
+                    .and_then(|p| p.title.clone())
+                    .unwrap_or_else(|| request.node_id.to_string()),
+                width: p.and_then(|p| p.width).unwrap_or(d.max_width.min(1280)),
+                height: p.and_then(|p| p.height).unwrap_or(d.max_height.min(720)),
+                max_width: d.max_width,
+                max_height: d.max_height,
+                windows: d.max_windows,
+                grants: mvf_display::Grants {
+                    keyboard: d.keyboard,
+                    mouse: d.mouse,
+                },
+            };
+            let surfaces = match request
+                .services
+                .display
+                .surfaces(request.node_id, &surface_request)
+            {
+                Ok(s) => s,
+                Err(e) if !d.required => return Ok(headless(e.to_string())),
+                Err(e) => return Err(NodeError::new(NodeErrorKind::StartFailed, e.to_string())),
+            };
+            let joined = std::env::join_paths(&surfaces).map_err(|e| {
+                NodeError::new(NodeErrorKind::StartFailed, format!("display surfaces: {e}"))
+            })?;
+            let dir = request
+                .services
+                .display
+                .run_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default();
+            Ok(DisplayPlan {
+                env: vec![("MVF_DISPLAY_SURFACES".into(), joined)],
+                remove_env: withheld(),
+                note: Some(format!(
+                    "display: {} managed surface(s) in {dir} (input: keyboard={}, mouse={}); a \
+                     display host in the user session presents them, the graph never waits for it",
+                    surfaces.len(),
+                    d.keyboard,
+                    d.mouse
+                )),
+            })
+        }
+    }
 }
 
 fn unsupported(message: impl Into<String>) -> NodeError {

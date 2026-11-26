@@ -66,6 +66,7 @@ impl ExecutionBackend for ComputeBackend {
             replacement: vec![Replacement::Stateless],
             grants: Default::default(),
             private_arenas: false,
+            display: Default::default(),
         }
     }
 

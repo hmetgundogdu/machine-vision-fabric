@@ -26,6 +26,7 @@ fn in_process() -> BackendCapabilities {
         replacement: vec![Replacement::Stateless, Replacement::Stateful],
         grants: Default::default(),
         private_arenas: false,
+        display: Default::default(),
     }
 }
 
@@ -43,6 +44,7 @@ fn worker() -> BackendCapabilities {
         replacement: vec![Replacement::Stateless],
         grants: Default::default(),
         private_arenas: false,
+        display: Default::default(),
     }
 }
 
@@ -60,6 +62,7 @@ fn compute() -> BackendCapabilities {
         replacement: vec![Replacement::Stateless],
         grants: Default::default(),
         private_arenas: false,
+        display: Default::default(),
     }
 }
 
@@ -123,6 +126,7 @@ fn enforcing_sandbox_backend_is_accepted() {
             lsm: vec![],
         },
         private_arenas: false,
+        display: Default::default(),
     };
     let p = negotiate(&load("oci-sandboxed-detector.yaml"), &[oci]).expect("placed");
     assert_eq!(p.backend, BackendKind::Oci);
@@ -205,6 +209,7 @@ fn sandbox(grants: GrantSupport) -> BackendCapabilities {
         replacement: vec![Replacement::Stateless],
         grants,
         private_arenas: false,
+        display: Default::default(),
     }
 }
 
@@ -413,5 +418,99 @@ fn restricted_networking_needs_an_enforcing_backend_and_host_networking_is_repor
             .notes
             .iter()
             .any(|n| n.code == "placement.host-network")
+    );
+}
+
+fn display_contract(display: &str) -> NodeContract {
+    contract_with(
+        &format!("  permissions:\n    display: {display}\n"),
+        "worker",
+    )
+    .expect("valid display contract")
+}
+
+fn codes_of(err: &NegotiationError) -> Vec<&'static str> {
+    err.rejections
+        .iter()
+        .flat_map(|r| r.reasons.iter().map(|x| x.code))
+        .collect()
+}
+
+fn worker_with_display(native: bool, managed: bool, session: &str) -> BackendCapabilities {
+    BackendCapabilities {
+        display: DisplaySupport {
+            native,
+            managed_surface: managed,
+            fullscreen: false,
+            session: session.into(),
+        },
+        ..worker()
+    }
+}
+
+#[test]
+fn a_required_display_fails_closed_and_an_optional_one_runs_headless() {
+    // Service session: no native windows, managed surfaces still possible (a host may attach).
+    let service = worker_with_display(false, true, "service (session 0)");
+    let native = display_contract("{ mode: native }");
+    let err =
+        negotiate(&native, std::slice::from_ref(&service)).expect_err("no interactive session");
+    assert_eq!(codes_of(&err), ["negotiation.display-unavailable"]);
+    assert!(
+        err.rejections[0].reasons[0]
+            .message
+            .contains("service (session 0)")
+    );
+
+    let optional = display_contract("{ mode: native, required: false }");
+    let p = negotiate(&optional, std::slice::from_ref(&service)).expect("headless fallback");
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.code == "placement.display-headless")
+    );
+
+    let managed = display_contract("{ mode: managed-surface, mouse: true }");
+    let p = negotiate(&managed, &[service]).expect("managed surfaces need no session");
+    assert!(
+        p.notes
+            .iter()
+            .all(|n| !n.code.starts_with("placement.display"))
+    );
+
+    // In-process: the engine process never owns windows.
+    let builtin = contract_with(
+        "  permissions:\n    display: { mode: managed-surface }\n",
+        "in-process",
+    )
+    .expect("valid");
+    let err = negotiate(&builtin, &[in_process()]).expect_err("in-process has no display");
+    assert!(codes_of(&err).contains(&"negotiation.display-unavailable"));
+}
+
+#[test]
+fn ungrantable_display_grants_are_rejected_even_when_the_display_is_optional() {
+    let any = worker_with_display(true, true, "interactive (aqua)");
+    let clipboard = display_contract("{ mode: managed-surface, required: false, clipboard: true }");
+    let err = negotiate(&clipboard, std::slice::from_ref(&any))
+        .expect_err("clipboard is never silently dropped");
+    assert_eq!(
+        codes_of(&err),
+        ["negotiation.display-clipboard-unsupported"]
+    );
+    let fullscreen = display_contract("{ mode: managed-surface, fullscreen: true }");
+    let err = negotiate(&fullscreen, std::slice::from_ref(&any))
+        .expect_err("no backend grants fullscreen yet");
+    assert_eq!(
+        codes_of(&err),
+        ["negotiation.display-fullscreen-unsupported"]
+    );
+
+    let native_input = display_contract("{ mode: native, keyboard: true }");
+    let p = negotiate(&native_input, &[any]).expect("native windows in an interactive session");
+    assert!(
+        p.notes
+            .iter()
+            .any(|n| n.code == "placement.display-input-unmediated")
     );
 }

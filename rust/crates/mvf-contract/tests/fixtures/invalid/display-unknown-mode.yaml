@@ -1,0 +1,10 @@
+# expect: yaml.schema
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: test.display, version: 1.0.0 }
+spec:
+  ports:
+    inputs: [ { name: frame, channel: data, type: frame } ]
+  artifacts: [ { backend: worker, runtime: python, entry: m.py, protocol: 1 } ]
+  permissions:
+    display: { mode: desktop }

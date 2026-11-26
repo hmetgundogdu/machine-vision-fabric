@@ -247,6 +247,7 @@ impl ExecutionBackend for OciBackend {
                 lsm: self.lsm.iter().map(Lsm::grant).collect(),
             },
             private_arenas: true,
+            display: Default::default(),
         }
     }
 
@@ -605,7 +606,9 @@ impl OciLauncher {
                 id.into(),
             ],
             cwd: bundle,
+            // runc starts the container with the bundle's explicit environment only.
             env: vec![],
+            remove_env: vec![],
         })
     }
 }

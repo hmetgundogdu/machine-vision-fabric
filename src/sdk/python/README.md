@@ -57,6 +57,23 @@ run_analyzer("py.brightness-analyzer", analyze)
 Optional `on_start` (warmup / readiness), `on_checkpoint` and `on_restore`
 (durable state across restarts) are supported — see the docstrings.
 
+## Presenting frames (Display Fabric, Rust runtime)
+
+A node whose contract declares `permissions.display.mode: managed-surface` gets shared-memory
+surfaces; a display host in the user's session shows them. No UI toolkit is needed:
+
+```python
+from mvf_sdk import display
+
+win = display.surfaces()[0]                 # empty list when the node runs headless
+win.present(payload.memory, width, height, "rgb8")   # never blocks; False on standby
+for event in win.poll_input():              # only what the contract grants (keyboard/mouse)
+    if event.kind == "pointer-down":
+        roi = (event.x, event.y)            # frame pixels
+```
+
+See `modules/py-camera-preview` and `protocol/display-surface.md`.
+
 ## Install
 
 ```bash

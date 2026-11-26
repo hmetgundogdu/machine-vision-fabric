@@ -30,6 +30,9 @@ pub struct LaunchSpec {
     pub cwd: PathBuf,
     /// Extra environment.
     pub env: Vec<(String, OsString)>,
+    /// Inherited variables the child must not see (e.g. the display server of a node without a
+    /// native display grant).
+    pub remove_env: Vec<String>,
 }
 
 /// How a child ended.
@@ -169,6 +172,9 @@ impl WorkerProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for k in &spec.remove_env {
+            command.env_remove(k);
+        }
         for (k, v) in &spec.env {
             command.env(k, v);
         }

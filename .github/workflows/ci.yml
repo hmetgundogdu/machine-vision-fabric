@@ -79,6 +79,9 @@ jobs:
       - run: cargo test --workspace --locked
         env:
           MVF_REQUIRE_CPP: "1"
+          # Display Fabric (#30): open real windows where the runner has a desktop session; a
+          # runner without one reports BLOCKED from the session probe instead of failing.
+          MVF_DISPLAY_SMOKE: "1"
 
   cpp-sdk:
     name: C++ SDK (${{ matrix.os }})

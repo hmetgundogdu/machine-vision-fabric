@@ -64,6 +64,9 @@ pub struct NodeSpec {
     /// What a sandboxed node is granted. Everything not granted is denied.
     #[serde(default)]
     pub permissions: Permissions,
+    /// Window hints for a node that presents (`permissions.display`); ignored when headless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<Presentation>,
 }
 
 /// Grants for sandboxed execution (`isolation.minimum: sandbox` or stronger). A backend that cannot
@@ -81,6 +84,104 @@ pub struct Permissions {
     /// Container Device Interface devices (e.g. `nvidia.com/gpu=0`).
     #[serde(default)]
     pub cdi_devices: Vec<String>,
+    /// Presentation access (windows, input). Unlike the other grants this applies to every
+    /// backend: it is an allocation (a surface, an interactive session), not only a restriction.
+    #[serde(default)]
+    pub display: DisplayPermission,
+}
+
+/// How a node presents, if at all (#30). MVF manages presentation access and lifecycle; it never
+/// draws the node's UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DisplayMode {
+    /// No display dependency at all.
+    #[default]
+    None,
+    /// The node's own toolkit (Qt, OpenCV, WPF, winit, ...) opens its own windows; needs an
+    /// interactive user session. Input goes to the application's windows and is not mediated.
+    Native,
+    /// The node renders into shared-memory surfaces; a separate display host in the user session
+    /// presents them and routes only the granted input back.
+    ManagedSurface,
+}
+
+/// `permissions.display`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DisplayPermission {
+    /// Presentation profile.
+    #[serde(default)]
+    pub mode: DisplayMode,
+    /// Whether the node cannot run without it. `false`: run headless (and say so) when the host
+    /// cannot provide the mode.
+    #[serde(default = "yes")]
+    pub required: bool,
+    /// Surfaces (windows) the node may present at once (managed surfaces, 1..=8).
+    #[serde(default = "one_window")]
+    pub max_windows: u32,
+    /// Largest frame a surface accepts, in pixels (sizes the shared buffers).
+    #[serde(default = "default_max_width")]
+    pub max_width: u32,
+    /// Largest frame height a surface accepts.
+    #[serde(default = "default_max_height")]
+    pub max_height: u32,
+    /// Keyboard events from the node's windows are routed to it.
+    #[serde(default)]
+    pub keyboard: bool,
+    /// Pointer and wheel events from the node's windows are routed to it.
+    #[serde(default)]
+    pub mouse: bool,
+    /// Clipboard access. No backend grants it yet; asking for it is rejected, never ignored.
+    #[serde(default)]
+    pub clipboard: bool,
+    /// The node may ask for a fullscreen window.
+    #[serde(default)]
+    pub fullscreen: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+fn one_window() -> u32 {
+    1
+}
+fn default_max_width() -> u32 {
+    1920
+}
+fn default_max_height() -> u32 {
+    1080
+}
+
+impl Default for DisplayPermission {
+    fn default() -> Self {
+        Self {
+            mode: DisplayMode::None,
+            required: true,
+            max_windows: 1,
+            max_width: default_max_width(),
+            max_height: default_max_height(),
+            keyboard: false,
+            mouse: false,
+            clipboard: false,
+            fullscreen: false,
+        }
+    }
+}
+
+/// `spec.presentation`: hints for the display host; the host decides the actual window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Presentation {
+    /// Window title (defaults to the node id).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Initial content width in logical pixels.
+    #[serde(default)]
+    pub width: Option<u32>,
+    /// Initial content height in logical pixels.
+    #[serde(default)]
+    pub height: Option<u32>,
 }
 
 /// Network mode. Only a sandbox backend *enforces* a mode; trusted backends (in-process, worker)

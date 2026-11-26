@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 mvf-contract = { path = "../mvf-contract" }
+mvf-display = { path = "../mvf-display" }
 mvf-graph = { path = "../mvf-graph" }
 mvf-memory = { path = "../mvf-memory" }
 serde = { version = "1.0.229", features = ["derive"] }

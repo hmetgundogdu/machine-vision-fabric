@@ -50,6 +50,24 @@ pub struct BackendCapabilities {
     /// Whether the backend can give a node an arena of its own (`memory.arena: private`).
     #[serde(default)]
     pub private_arenas: bool,
+    /// Presentation the backend can provide on this host (#30).
+    #[serde(default)]
+    pub display: DisplaySupport,
+}
+
+/// What a backend can provide for `permissions.display` on this host.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplaySupport {
+    /// The backend's processes run in an interactive user session and may open their own windows.
+    pub native: bool,
+    /// The backend can hand a node shared-memory surfaces that a display host presents.
+    pub managed_surface: bool,
+    /// Fullscreen windows can be granted.
+    pub fullscreen: bool,
+    /// The session the backend's processes run in, for operators (e.g. `interactive (aqua)`,
+    /// `service (session 0)`, `headless (no DISPLAY or WAYLAND_DISPLAY)`).
+    pub session: String,
 }
 
 /// Permission grants a sandboxing backend can provide on this host.
@@ -420,6 +438,8 @@ fn evaluate(
         }
     }
 
+    evaluate_display(spec, caps, &mut reasons, &mut notes);
+
     let replacement = spec.lifecycle.replacement;
     if replacement != Replacement::Unsupported && !caps.replacement.contains(&replacement) {
         reasons.push(reason(
@@ -436,5 +456,57 @@ fn evaluate(
         Ok((zero_copy, notes))
     } else {
         Err(reasons)
+    }
+}
+
+fn evaluate_display(
+    spec: &NodeSpec,
+    caps: &BackendCapabilities,
+    reasons: &mut Vec<RejectionReason>,
+    notes: &mut Vec<PlacementNote>,
+) {
+    let d = &spec.permissions.display;
+    let backend = caps.kind.as_str();
+    let (supported, profile) = match d.mode {
+        DisplayMode::None => return,
+        DisplayMode::Native => (caps.display.native, "native windows"),
+        DisplayMode::ManagedSurface => (caps.display.managed_surface, "managed surfaces"),
+    };
+    // Grants nobody provides are refused whether or not the display itself is required: a node
+    // asking for the clipboard must not silently run without it.
+    if d.clipboard {
+        reasons.push(reason(
+            "negotiation.display-clipboard-unsupported",
+            "clipboard access is not grantable by any backend",
+        ));
+    }
+    if d.fullscreen && !caps.display.fullscreen {
+        reasons.push(reason(
+            "negotiation.display-fullscreen-unsupported",
+            format!("backend `{backend}` cannot grant fullscreen windows"),
+        ));
+    }
+    let session = if caps.display.session.is_empty() {
+        "no display support".to_string()
+    } else {
+        caps.display.session.clone()
+    };
+    if !supported {
+        let message = format!("backend `{backend}` cannot provide {profile} here: {session}");
+        if d.required {
+            reasons.push(reason("negotiation.display-unavailable", message));
+        } else {
+            notes.push(PlacementNote {
+                code: "placement.display-headless",
+                message: format!("{message}; the node runs headless (`required: false`)"),
+            });
+        }
+    } else if d.mode == DisplayMode::Native && (d.keyboard || d.mouse) {
+        notes.push(PlacementNote {
+            code: "placement.display-input-unmediated",
+            message: "native windows take input from the OS directly; keyboard/mouse grants are \
+                      not mediated by MVF"
+                .into(),
+        });
     }
 }

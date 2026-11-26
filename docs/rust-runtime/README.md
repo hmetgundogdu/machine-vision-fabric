@@ -2,7 +2,7 @@
 
 Research branch `research/rust-runtime`. Implements the ordered backlog of
 [#10](https://github.com/hmetgundogdu/machine-vision-fabric/issues/10): Gate A (#11–#16) and Gate B
-(#17–#20), then the follow-ups #24–#28 (stage 11: #24; stages 12–13: #25). The shipping .NET engine is **unchanged** and remains the behavioural reference.
+(#17–#20), then the follow-ups #24–#28 (stage 11: #24; stages 12–13: #25), the Network Fabric #23 (stages 16–17) and the Display Fabric #30 (stage 18). The shipping .NET engine is **unchanged** and remains the behavioural reference.
 
 ## Layout decision
 
@@ -23,6 +23,8 @@ mechanical change once the .NET host retires.
 | `mvf-oci` | #17 | Offline OCI layout / Docker archive import, verified content store, safe unpack, export, layer builder. |
 | `mvf-container` | #18 | Daemonless OCI backend (runc/crun), default-deny sandbox spec, packaging, generic workloads. |
 | `mvf-compute` | #19 | wgpu compute backend (Metal/Vulkan/DX12): WGSL kernels, device-resident payloads, same-device zero-copy hand-off. |
+| `mvf-display` | #30 | Display Fabric core, no window library: session probe (interactive / service / headless), shared-memory surface v1 (latest frame, CRC-verified, input ring), per-user surface registry. |
+| `mvf-display-host` | #30 | Optional `mvf-display-host` for the user's session (winit + softbuffer), `mvf-cube` (Rust 3D renderer node), `mvf-native-window` (native-UI PoC). Nothing else links it. |
 | `mvf-cli` | #12– | `mvf-rs` native CLI: `contract`, `validate`, `run`, `host`. |
 
 ## Commands
@@ -56,6 +58,7 @@ demo. Windows: `pwsh rust/scripts/gate-a.ps1`. Baseline against the .NET engine:
 - [p0-report.md](p0-report.md) / [gate-b-report.json](gate-b-report.json) — P0 verdicts (Gate B; P0.1 re-evaluated after #24)
 - [adr-0002-p0-runtime.md](adr-0002-p0-runtime.md) — OCI, GPU and the decision after Gate B
 - [adr-0003-network-fabric.md](adr-0003-network-fabric.md) — per-node network policy, enforcement matrix, listener handover (#23)
+- [adr-0004-display-fabric.md](adr-0004-display-fabric.md) — presentation profiles, session matrix, managed surfaces, display host (#30)
 - [p0-thresholds.md](p0-thresholds.md) — go/no-go thresholds fixed before the final runs
 - [competitive-landscape.md](competitive-landscape.md) — closest alternatives, pinned versions
 

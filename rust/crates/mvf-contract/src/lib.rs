@@ -19,8 +19,8 @@ pub mod yaml;
 
 pub use model::*;
 pub use negotiate::{
-    BackendCapabilities, Cancellation, GrantSupport, NegotiatedPlacement, NegotiationError,
-    PlacementNote, Rejection, RejectionReason, negotiate,
+    BackendCapabilities, Cancellation, DisplaySupport, GrantSupport, NegotiatedPlacement,
+    NegotiationError, PlacementNote, Rejection, RejectionReason, negotiate,
 };
 pub use validate::{ContractIssue, validate};
 
