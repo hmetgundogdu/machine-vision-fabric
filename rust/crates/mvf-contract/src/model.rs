@@ -449,6 +449,37 @@ pub struct Isolation {
     /// Weakest acceptable isolation level.
     #[serde(default)]
     pub minimum: IsolationLevel,
+    /// Sandbox syscall filter: `denylist` (default; blocks known-dangerous syscalls) or
+    /// `allowlist` (default deny; only the syscalls an unprivileged container needs). Needs
+    /// `minimum: sandbox`.
+    #[serde(default)]
+    pub syscalls: SyscallPolicy,
+    /// `required`: run only under a Linux security module profile (AppArmor or SELinux) the host
+    /// provides; fails closed where none is available. Needs `minimum: sandbox`.
+    #[serde(default)]
+    pub lsm: LsmRequirement,
+}
+
+/// Seccomp policy of a sandboxed node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyscallPolicy {
+    /// Allow everything except a list of dangerous syscalls.
+    #[default]
+    Denylist,
+    /// Deny everything except an allowlist (Docker's default profile, minus the denylist).
+    Allowlist,
+}
+
+/// Whether a Linux security module profile is required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LsmRequirement {
+    /// Use one when the host configures it.
+    #[default]
+    Optional,
+    /// Refuse to run without one.
+    Required,
 }
 
 /// Ordered isolation levels. Each level states what it does **and does not** guarantee.

@@ -655,3 +655,196 @@ fn references_are_normalized_like_docker() {
     );
     assert_eq!(normalize_reference("localhost/x:1"), "localhost/x:1");
 }
+
+#[cfg(unix)]
+mod layer_cache {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// (path, kind, mode, content or link target) for every entry, without following links.
+    fn tree(root: &Path) -> Vec<(String, &'static str, u32, String)> {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, &'static str, u32, String)>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir).expect("read").flatten().collect();
+            entries.sort_by_key(|e| e.file_name());
+            for e in entries {
+                let p = e.path();
+                let rel = p.strip_prefix(root).expect("rel").display().to_string();
+                let m = std::fs::symlink_metadata(&p).expect("stat");
+                let mode = m.permissions().mode() & 0o7777;
+                if m.file_type().is_symlink() {
+                    out.push((
+                        rel,
+                        "link",
+                        0,
+                        std::fs::read_link(&p)
+                            .expect("readlink")
+                            .display()
+                            .to_string(),
+                    ));
+                } else if m.is_dir() {
+                    out.push((rel, "dir", mode, String::new()));
+                    walk(root, &p, out);
+                } else {
+                    let bytes = std::fs::read(&p).expect("read file");
+                    out.push((
+                        rel,
+                        "file",
+                        mode,
+                        String::from_utf8_lossy(&bytes).to_string(),
+                    ));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    /// Exercises cross-layer resolution: a lower symlinked directory that an upper layer writes
+    /// through, a file replaced by a directory, and a symlink replaced by a file.
+    fn tricky(store: &ContentStore, name: &str) -> ImageRecord {
+        let base = LayerBuilder::new()
+            .dir("usr")
+            .dir("usr/lib")
+            .file("usr/lib/base.so", b"base", 0o755)
+            .symlink("lib", "usr/lib")
+            .file("thing", b"was a file", 0o644)
+            .symlink("conf", "etc/app.conf")
+            .gzip()
+            .expect("base");
+        let upper = LayerBuilder::new()
+            .dir("lib")
+            .file("lib/extra.so", b"extra", 0o755)
+            .dir("thing")
+            .file("thing/inner", b"now a dir", 0o600)
+            .file("conf", b"now a file", 0o644)
+            .gzip()
+            .expect("upper");
+        create_image(store, name, &linux("arm64"), &exec(), &[base, upper]).expect("image")
+    }
+
+    #[test]
+    fn a_composed_rootfs_is_identical_to_a_full_unpack() {
+        let dir = tmp("layer-cache");
+        let store = ContentStore::open(dir.join("s")).expect("store");
+        let cache = LayerCache::new(dir.join("layers"));
+        for (i, image) in [
+            sample(&store, "sample:1", "arm64"),
+            tricky(&store, "tricky:1"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let full = dir.join(format!("full-{i}"));
+            unpack(&store, image, &full).expect("unpack");
+            let composed = dir.join(format!("composed-{i}"));
+            let r = cache
+                .materialize(&store, image, &composed, &|_| Ok(()), None)
+                .expect("compose");
+            assert_eq!(tree(&full), tree(&composed), "image {i}");
+            assert_eq!(r.layers_unpacked, 2);
+            assert!(r.linked > 0 && r.copied == 0, "{r:?}");
+        }
+        // Through the lower symlink: the upper layer's file landed in usr/lib.
+        let c = dir.join("composed-1");
+        assert!(c.join("usr/lib/extra.so").is_file());
+        assert!(
+            std::fs::symlink_metadata(c.join("lib"))
+                .expect("lib")
+                .file_type()
+                .is_symlink()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_second_image_on_the_same_base_reuses_its_layers_and_links_files() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tmp("layer-reuse");
+        let store = ContentStore::open(dir.join("s")).expect("store");
+        let base = LayerBuilder::new()
+            .dir("opt")
+            .file("opt/runtime.bin", &vec![7u8; 256 * 1024], 0o755)
+            .gzip()
+            .expect("base");
+        let a = create_image(
+            &store,
+            "base:1",
+            &linux("arm64"),
+            &exec(),
+            std::slice::from_ref(&base),
+        )
+        .expect("a");
+        let module = LayerBuilder::new()
+            .dir("mvf")
+            .file("mvf/node.yaml", b"module b", 0o644)
+            .gzip()
+            .expect("module");
+        let b = append_layer(&store, &a, "node:1", &module, None).expect("b");
+        let cache = LayerCache::new(dir.join("layers"));
+        let first = cache
+            .materialize(&store, &a, &dir.join("a"), &|_| Ok(()), None)
+            .expect("a");
+        assert_eq!((first.layers_unpacked, first.layers_reused), (1, 0));
+        let prepared = std::sync::atomic::AtomicUsize::new(0);
+        let count = |_: &Path| {
+            prepared.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        };
+        let second = cache
+            .materialize(&store, &b, &dir.join("b"), &count, None)
+            .expect("b");
+        assert_eq!(
+            (second.layers_unpacked, second.layers_reused),
+            (1, 1),
+            "only the module layer is new"
+        );
+        assert_eq!(prepared.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            second.unpack.bytes,
+            b"module b".len() as u64,
+            "the base was not unpacked again"
+        );
+        let ino = |p: &Path| std::fs::metadata(p).expect("stat").ino();
+        assert_eq!(
+            ino(&dir.join("a/opt/runtime.bin")),
+            ino(&dir.join("b/opt/runtime.bin")),
+            "both rootfs share the cached inode: no bytes copied"
+        );
+        assert!(
+            cache
+                .materialize(&store, &b, &dir.join("b"), &|_| Ok(()), None)
+                .is_err(),
+            "destination must not exist"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_layer_whose_content_does_not_match_its_diff_id_is_never_cached() {
+        let dir = tmp("layer-tamper");
+        let store = ContentStore::open(dir.join("s")).expect("store");
+        let image = sample(&store, "sample:1", "arm64");
+        // Corrupt the first layer blob on disk (the store verifies blobs on read).
+        let blob = dir
+            .join("s/blobs/sha256")
+            .join(image.layers[0].digest.hex());
+        let mut bytes = std::fs::read(&blob).expect("blob");
+        let n = bytes.len();
+        bytes[n / 2] ^= 0xff;
+        std::fs::write(&blob, bytes).expect("tamper");
+        let cache = LayerCache::new(dir.join("layers"));
+        assert!(
+            cache
+                .materialize(&store, &image, &dir.join("r"), &|_| Ok(()), None)
+                .is_err()
+        );
+        let cached: Vec<_> = std::fs::read_dir(dir.join("layers"))
+            .expect("cache")
+            .flatten()
+            .collect();
+        assert!(cached.is_empty(), "nothing published: {cached:?}");
+        assert!(!dir.join("r").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

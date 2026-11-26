@@ -56,6 +56,8 @@ spec:
 | `isolation.minimum` | `none`, `process`, `sandbox`, `vm` | `none` | Replaces the ambiguous `isolation.required: true` (rejected as an unknown field). |
 | `memory.domain` | `host`, `device` | `host` | `device` requires `target: gpu`. |
 | `memory.zeroCopy` | `required`, `preferred`, `disabled` | `preferred` | `required` fails negotiation on a copying backend. |
+| `isolation.syscalls` | `denylist`, `allowlist` | `denylist` | Sandbox seccomp policy; `allowlist` is Docker's default profile minus the denylist. Needs `isolation.minimum: sandbox`. |
+| `isolation.lsm` | `optional`, `required` | `optional` | `required` fails negotiation unless the host applies an AppArmor/SELinux profile. Needs `minimum: sandbox`. |
 | `memory.arena` | `shared`, `private` | `shared` | `private`: the node's process maps an arena of its own (no other node's payload is visible to it); inputs are copied in. Needs a backend with private arenas (worker, OCI); incompatible with `zeroCopy: required`. |
 | `lifecycle.activation` | `resident`, `on-demand` | `resident` | MVF defaults: sources, PLC and models are resident. |
 | `lifecycle.replacement` | `unsupported`, `stateless`, `stateful` | `unsupported` | `stateful` requires `state.schemaVersion` (+ `migratesFrom`). |

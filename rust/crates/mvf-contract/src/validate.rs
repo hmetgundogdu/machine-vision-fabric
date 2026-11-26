@@ -352,6 +352,21 @@ fn check_targets(targets: Option<&[Target]>, path: &str, issues: &mut Issues) {
 }
 
 fn validate_policy(spec: &NodeSpec, issues: &mut Issues) {
+    let sandbox = spec.isolation.minimum >= crate::IsolationLevel::Sandbox;
+    if !sandbox && spec.isolation.syscalls == crate::SyscallPolicy::Allowlist {
+        issues.push(
+            "contract.isolation.needs-sandbox",
+            "spec.isolation.syscalls".to_string(),
+            "a syscall allowlist is a sandbox feature: set `isolation.minimum: sandbox`",
+        );
+    }
+    if !sandbox && spec.isolation.lsm == crate::LsmRequirement::Required {
+        issues.push(
+            "contract.isolation.needs-sandbox",
+            "spec.isolation.lsm".to_string(),
+            "a security-module profile is a sandbox feature: set `isolation.minimum: sandbox`",
+        );
+    }
     if spec.memory.arena == crate::ArenaSharing::Private
         && spec.memory.zero_copy == crate::ZeroCopy::Required
     {

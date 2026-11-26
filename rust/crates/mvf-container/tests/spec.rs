@@ -42,6 +42,8 @@ fn spec(
         devices,
         userns,
         hostname: "mvf-node".into(),
+        syscalls: c.spec.isolation.syscalls,
+        lsm: None,
     })
     .expect("spec")
 }
@@ -213,6 +215,8 @@ fn unsupported_network_policy_fails_closed() {
             devices: vec![],
             userns: None,
             hostname: "h".into(),
+            syscalls: Default::default(),
+            lsm: None,
         })
         .is_err()
     );
@@ -253,4 +257,118 @@ fn generated_oci_contract_parses_with_the_strict_loader() {
         back.spec.isolation.minimum,
         mvf_contract::IsolationLevel::Sandbox
     );
+}
+
+#[test]
+fn the_allowlist_denies_by_default_and_never_allows_a_denylisted_syscall() {
+    let deny = spec(&contract(""), vec![], None);
+    assert_eq!(deny["linux"]["seccomp"]["defaultAction"], "SCMP_ACT_ALLOW");
+    let mut c = contract("");
+    c.spec.isolation.syscalls = mvf_contract::SyscallPolicy::Allowlist;
+    let allow = spec(&c, vec![], None);
+    let seccomp = &allow["linux"]["seccomp"];
+    assert_eq!(seccomp["defaultAction"], "SCMP_ACT_ERRNO");
+    assert_eq!(seccomp["defaultErrnoRet"], 1);
+    let names = mvf_container::seccomp::allowed_names(seccomp);
+    for needed in [
+        "read",
+        "write",
+        "openat",
+        "mmap",
+        "futex",
+        "execve",
+        "exit_group",
+        "clone",
+    ] {
+        assert!(
+            names.iter().any(|n| n == needed),
+            "{needed} must be allowed"
+        );
+    }
+    for denied in DENIED_SYSCALLS {
+        assert!(
+            !names.iter().any(|n| n == denied),
+            "{denied} is on the denylist"
+        );
+    }
+    for privileged in [
+        "reboot",
+        "syslog",
+        "acct",
+        "chroot",
+        "unshare",
+        "setns",
+        "io_uring_setup",
+    ] {
+        assert!(
+            !names.iter().any(|n| n == privileged),
+            "{privileged} needs a capability or is not allowed"
+        );
+    }
+    // Argument filters survive: `personality` is only allowed for a few values.
+    let personality = seccomp["syscalls"]
+        .as_array()
+        .expect("rules")
+        .iter()
+        .filter(|r| {
+            r["names"]
+                .as_array()
+                .is_some_and(|n| n.iter().any(|x| x == "personality"))
+        })
+        .count();
+    assert!(personality > 1, "personality keeps its per-value rules");
+    // clone3 answers ENOSYS so libc falls back to clone (as in Docker's profile).
+    assert!(
+        seccomp["syscalls"]
+            .as_array()
+            .expect("rules")
+            .iter()
+            .any(|r| r["names"] == serde_json::json!(["clone3"]) && r["errnoRet"] == 38)
+    );
+}
+
+#[test]
+fn the_allowlist_is_specialised_per_architecture() {
+    let amd64 = mvf_container::seccomp::allowed_names(
+        &mvf_container::seccomp::allowlist("amd64").expect("amd64"),
+    );
+    let arm64 = mvf_container::seccomp::allowed_names(
+        &mvf_container::seccomp::allowlist("arm64").expect("arm64"),
+    );
+    assert!(amd64.iter().any(|n| n == "arch_prctl") && !arm64.iter().any(|n| n == "arch_prctl"));
+    assert!(
+        arm64.iter().any(|n| n == "arm_fadvise64_64")
+            && !amd64.iter().any(|n| n == "arm_fadvise64_64")
+    );
+}
+
+#[test]
+fn a_host_security_module_profile_lands_in_the_process() {
+    let c = contract("");
+    let input_spec = |lsm| {
+        runtime_spec(&SpecInput {
+            rootfs: Path::new("/r"),
+            arena: Path::new("/a"),
+            image: &image(),
+            contract: &c,
+            args: None,
+            extra_env: vec![],
+            devices: vec![],
+            userns: None,
+            hostname: "h".into(),
+            syscalls: Default::default(),
+            lsm,
+        })
+        .expect("spec")
+    };
+    let a = input_spec(Some(Lsm::AppArmor("mvf-node".into())));
+    assert_eq!(a["process"]["apparmorProfile"], "mvf-node");
+    let s = input_spec(Some(Lsm::SeLinux(
+        "system_u:system_r:container_t:s0".into(),
+    )));
+    assert_eq!(
+        s["process"]["selinuxLabel"],
+        "system_u:system_r:container_t:s0"
+    );
+    assert!(input_spec(None)["process"].get("apparmorProfile").is_none());
 }

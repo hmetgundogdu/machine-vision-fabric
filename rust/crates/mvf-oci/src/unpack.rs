@@ -81,6 +81,66 @@ fn unpack_into(store: &ContentStore, record: &ImageRecord, root: &Path) -> Resul
     let config = read_config(store, record)?;
     let mut report = UnpackReport::default();
     for (i, layer) in record.layers.iter().enumerate() {
+        let expected = config
+            .rootfs
+            .diff_ids
+            .get(i)
+            .ok_or_else(|| OciError::Malformed("fewer diff_ids than layers".into()))?;
+        unpack_layer_into(
+            store,
+            layer,
+            expected,
+            root,
+            &mut report,
+            &mut Whiteouts::Apply,
+        )?;
+    }
+    Ok(report)
+}
+
+/// A whiteout seen in a layer: `name: None` is an opaque directory marker for `parent`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Whiteout {
+    /// Directory components (relative to the rootfs).
+    pub parent: Vec<String>,
+    /// Hidden entry, or `None` for `.wh..wh..opq`.
+    pub name: Option<String>,
+}
+
+/// A hard link whose target is in a lower layer (resolved when layers are composed).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeferredLink {
+    /// The link's path components.
+    pub path: Vec<String>,
+    /// The target's path components.
+    pub target: Vec<String>,
+}
+
+/// What a layer unpacked alone could not apply: whiteouts and hard links refer to lower layers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LayerOps {
+    /// Whiteouts, in layer order.
+    pub whiteouts: Vec<Whiteout>,
+    /// Hard links into lower layers.
+    pub links: Vec<DeferredLink>,
+}
+
+/// Applied while unpacking a whole image; recorded when a layer is unpacked alone.
+pub(crate) enum Whiteouts<'a> {
+    Apply,
+    Record(&'a mut LayerOps),
+}
+
+/// Applies one layer onto `root`, verifying its uncompressed digest against `expected`.
+pub(crate) fn unpack_layer_into(
+    store: &ContentStore,
+    layer: &crate::model::Descriptor,
+    expected: &Digest,
+    root: &Path,
+    report: &mut UnpackReport,
+    whiteouts: &mut Whiteouts<'_>,
+) -> Result<()> {
+    {
         let blob = store.open_blob(&layer.digest)?;
         let decompressed: Box<dyn Read> = match layer.media_type.as_str() {
             media::OCI_LAYER_GZIP | media::DOCKER_LAYER_GZIP => Box::new(GzDecoder::new(blob)),
@@ -98,17 +158,12 @@ fn unpack_into(store: &ContentStore, record: &ImageRecord, root: &Path) -> Resul
                 .map_err(OciError::io(format!("read layer {}", layer.digest)))?
             {
                 let entry = entry.map_err(OciError::io(format!("read layer {}", layer.digest)))?;
-                apply(store, root, entry, &mut report)?;
+                apply(store, root, entry, report, whiteouts)?;
             }
         }
         // Hash any trailing padding so the digest covers the whole uncompressed stream.
         io::copy(&mut hashing, &mut io::sink()).map_err(OciError::io("drain layer"))?;
         let diff_id = Digest::from_hasher(hashing.hasher);
-        let expected = config
-            .rootfs
-            .diff_ids
-            .get(i)
-            .ok_or_else(|| OciError::Malformed("fewer diff_ids than layers".into()))?;
         if &diff_id != expected {
             return Err(OciError::DigestMismatch {
                 expected: expected.to_string(),
@@ -117,7 +172,7 @@ fn unpack_into(store: &ContentStore, record: &ImageRecord, root: &Path) -> Resul
         }
         report.layers += 1;
     }
-    Ok(report)
+    Ok(())
 }
 
 /// Normalizes an entry path into relative components; rejects absolute paths and NULs.
@@ -159,7 +214,7 @@ fn unsafe_entry(path: &Path, reason: &str) -> OciError {
 
 /// Resolves `components` inside `root`, following symlinks in every component (absolute link
 /// targets restart at `root`, `..` is clamped at `root`). Returns a path inside `root`.
-fn secure_join(root: &Path, components: &[String]) -> Result<PathBuf> {
+pub(crate) fn secure_join(root: &Path, components: &[String]) -> Result<PathBuf> {
     let mut pending: VecDeque<String> = components.iter().cloned().collect();
     let mut resolved: Vec<String> = Vec::new();
     let mut links = 0;
@@ -210,7 +265,7 @@ fn secure_join(root: &Path, components: &[String]) -> Result<PathBuf> {
 /// Creates every directory of `components` inside `root` (following in-root symlinks) and returns
 /// the resolved directory. Every existing component of the resolved path is a real directory
 /// (`secure_join` followed the symlinks), so creating the missing tail cannot follow a link.
-fn ensure_dir(root: &Path, components: &[String]) -> Result<PathBuf> {
+pub(crate) fn ensure_dir(root: &Path, components: &[String]) -> Result<PathBuf> {
     let dir = secure_join(root, components)?;
     match fs::symlink_metadata(&dir) {
         Ok(m) if m.is_dir() => {}
@@ -226,7 +281,7 @@ fn ensure_dir(root: &Path, components: &[String]) -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn remove_any(path: &Path) -> Result<()> {
+pub(crate) fn remove_any(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(m) if m.is_dir() => {
             fs::remove_dir_all(path).map_err(OciError::io(format!("remove {}", path.display())))
@@ -237,22 +292,22 @@ fn remove_any(path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) {
+pub(crate) fn set_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     // Drop setuid/setgid/sticky: an unprivileged unpack must not create privileged binaries.
     let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o777));
 }
 
 #[cfg(not(unix))]
-fn set_mode(_: &Path, _: u32) {}
+pub(crate) fn set_mode(_: &Path, _: u32) {}
 
 #[cfg(unix)]
-fn symlink(target: &Path, link: &Path) -> io::Result<()> {
+pub(crate) fn symlink(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
 #[cfg(not(unix))]
-fn symlink(_: &Path, _: &Path) -> io::Result<()> {
+pub(crate) fn symlink(_: &Path, _: &Path) -> io::Result<()> {
     Err(io::Error::other("symlinks need a Unix host"))
 }
 
@@ -261,6 +316,7 @@ fn apply<R: Read>(
     root: &Path,
     mut entry: tar::Entry<'_, R>,
     report: &mut UnpackReport,
+    whiteouts: &mut Whiteouts<'_>,
 ) -> Result<()> {
     let limits = store.limits;
     report.entries += 1;
@@ -287,7 +343,20 @@ fn apply<R: Read>(
     let kind = entry.header().entry_type();
     let mode = entry.header().mode().unwrap_or(0o644);
 
-    // Whiteouts.
+    // Whiteouts: applied to the layers below, or recorded when the layer is unpacked alone.
+    if let Whiteouts::Record(ops) = whiteouts
+        && (name == ".wh..wh..opq" || name.starts_with(".wh."))
+    {
+        ops.whiteouts.push(Whiteout {
+            parent: parent.to_vec(),
+            name: name
+                .strip_prefix(".wh.")
+                .filter(|n| *n != ".wh..opq")
+                .map(str::to_string),
+        });
+        report.whiteouts += 1;
+        return Ok(());
+    }
     if name == ".wh..wh..opq" {
         let dir = secure_join(root, parent)?;
         if dir.is_dir() {
@@ -355,6 +424,16 @@ fn apply<R: Read>(
         let source = secure_join(root, link_parent)?.join(link_name);
         match fs::symlink_metadata(&source) {
             Ok(m) if m.is_file() => {}
+            _ if matches!(whiteouts, Whiteouts::Record(_)) => {
+                // Unpacked alone: the target may be in a lower layer; resolved at composition.
+                if let Whiteouts::Record(ops) = whiteouts {
+                    ops.links.push(DeferredLink {
+                        path: components.clone(),
+                        target: link_components.clone(),
+                    });
+                }
+                return Ok(());
+            }
             _ => {
                 return Err(unsafe_entry(
                     &raw,

@@ -9,7 +9,9 @@
 //! - only the standard runtime devices (null, zero, full, random, urandom, tty) plus explicit
 //!   grants; every other device access is denied by the device cgroup;
 //! - a seccomp **denylist** (module loading, kexec, mount, namespace and keyring syscalls, bpf,
-//!   ptrace, …) — not Docker's allowlist;
+//!   ptrace, …), or Docker's **allowlist** minus that denylist (`isolation.syscalls: allowlist`,
+//!   see [`crate::seccomp`]);
+//! - an AppArmor profile or SELinux label when the host configures one;
 //! - memory/cpu/pids cgroup limits from the contract;
 //! - the engine arena file is the only host path mounted (bind, `noexec,nosuid,nodev`).
 
@@ -118,6 +120,29 @@ pub struct SpecInput<'a> {
     pub userns: Option<IdMapping>,
     /// Hostname inside the sandbox.
     pub hostname: String,
+    /// Seccomp policy.
+    pub syscalls: mvf_contract::SyscallPolicy,
+    /// Security-module profile to apply.
+    pub lsm: Option<Lsm>,
+}
+
+/// A Linux security module profile the host provides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lsm {
+    /// An AppArmor profile already loaded on the host.
+    AppArmor(String),
+    /// An SELinux process label.
+    SeLinux(String),
+}
+
+impl Lsm {
+    /// The negotiation grant name (`apparmor:<profile>`, `selinux:<label>`).
+    pub fn grant(&self) -> String {
+        match self {
+            Lsm::AppArmor(p) => format!("apparmor:{p}"),
+            Lsm::SeLinux(l) => format!("selinux:{l}"),
+        }
+    }
 }
 
 /// Resolves the image `User` (`uid[:gid]` or names from the rootfs) to numeric ids.
@@ -210,10 +235,9 @@ pub fn runtime_spec(input: &SpecInput<'_>) -> Result<Value, String> {
             "/proc/timer_list", "/proc/timer_stats", "/proc/sched_debug", "/proc/scsi", "/sys/firmware"
         ],
         "readonlyPaths": ["/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"],
-        "seccomp": {
-            "defaultAction": "SCMP_ACT_ALLOW",
-            "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_AARCH64", "SCMP_ARCH_ARM"],
-            "syscalls": [{ "names": DENIED_SYSCALLS, "action": "SCMP_ACT_ERRNO", "errnoRet": 1 }],
+        "seccomp": match input.syscalls {
+            mvf_contract::SyscallPolicy::Denylist => crate::seccomp::denylist(),
+            mvf_contract::SyscallPolicy::Allowlist => crate::seccomp::allowlist(crate::seccomp::moby_arch())?,
         },
     });
     if let Some(m) = input.userns {
@@ -262,7 +286,7 @@ pub fn runtime_spec(input: &SpecInput<'_>) -> Result<Value, String> {
         json!({"destination": dest, "type": "bind", "source": src,
                "options": ["rbind", "rw", "nosuid", "nodev", "noexec"]})
     };
-    Ok(json!({
+    let mut spec = json!({
         "ociVersion": "1.0.2",
         "process": {
             "terminal": false,
@@ -288,5 +312,11 @@ pub fn runtime_spec(input: &SpecInput<'_>) -> Result<Value, String> {
             ro_bind(CONTAINER_ARENA, input.arena),
         ],
         "linux": linux,
-    }))
+    });
+    match &input.lsm {
+        Some(Lsm::AppArmor(profile)) => spec["process"]["apparmorProfile"] = json!(profile),
+        Some(Lsm::SeLinux(label)) => spec["process"]["selinuxLabel"] = json!(label),
+        None => {}
+    }
+    Ok(spec)
 }

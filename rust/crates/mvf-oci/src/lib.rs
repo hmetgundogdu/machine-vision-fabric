@@ -17,6 +17,7 @@
 pub mod build;
 pub mod export;
 pub mod import;
+pub mod layers;
 pub mod model;
 pub mod store;
 pub mod unpack;
@@ -24,9 +25,10 @@ pub mod unpack;
 pub use build::{FileEntry, LayerBlob, LayerBuilder, append_layer, create_image};
 pub use export::{ArchiveFormat, export};
 pub use import::{ImportSource, import, read_config};
+pub use layers::{CacheReport, LayerCache};
 pub use model::*;
 pub use store::{ContentStore, GcReport, Limits};
-pub use unpack::{UnpackReport, unpack};
+pub use unpack::{DeferredLink, LayerOps, UnpackReport, Whiteout, unpack};
 
 /// Errors from every OCI operation. Each variant is a refusal, never a silent fix-up.
 #[derive(Debug, thiserror::Error)]

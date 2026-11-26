@@ -62,6 +62,10 @@ pub struct GrantSupport {
     pub devices: Vec<String>,
     /// CDI device names resolvable on this host.
     pub cdi_devices: Vec<String>,
+    /// Security-module profiles the backend applies (`apparmor:<profile>`, `selinux:<label>`);
+    /// empty when the kernel has no LSM enabled or none is configured.
+    #[serde(default)]
+    pub lsm: Vec<String>,
 }
 
 /// A non-fatal deviation from a preference, surfaced to the operator.
@@ -388,6 +392,15 @@ fn evaluate(
                     format!("CDI device `{c}` is not resolvable on this host (no CDI spec)"),
                 ));
             }
+        }
+        if spec.isolation.lsm == crate::LsmRequirement::Required && caps.grants.lsm.is_empty() {
+            reasons.push(reason(
+                "negotiation.lsm-unavailable",
+                format!(
+                    "node requires an AppArmor/SELinux profile; backend `{}` has none on this host",
+                    caps.kind.as_str()
+                ),
+            ));
         }
     }
 

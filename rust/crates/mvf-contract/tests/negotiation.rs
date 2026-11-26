@@ -120,6 +120,7 @@ fn enforcing_sandbox_backend_is_accepted() {
             network: vec![NetworkPolicy::None],
             devices: vec![],
             cdi_devices: vec![],
+            lsm: vec![],
         },
         private_arenas: false,
     };
@@ -214,6 +215,7 @@ fn sandbox_permissions_are_default_deny_and_unavailable_grants_fail_closed() {
         network: vec![NetworkPolicy::None],
         devices: vec!["/dev/video0".into()],
         cdi_devices: vec![],
+        lsm: vec![],
     };
     assert!(
         negotiate(&contract, &[sandbox(none.clone())]).is_ok(),

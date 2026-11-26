@@ -30,8 +30,9 @@
   (in-process → Python worker → OCI image, with rollback) — the combination the thesis is about.
 - Two real limits shape the next step: GPU buffers do not cross process boundaries, and no tested
   host has OCI and a GPU together.
-- The rootfs cache is per image manifest (each packaged image unpacks its full base); layer-level
-  caching would cut candidate preparation time.
+- The rootfs cache was per image manifest (each packaged image unpacked its full base). It is
+  layer-level since #28 ([stage 15](stages/15.md)): a candidate on a cached base prepared in
+  152 ms instead of 597 ms on the Linux test host.
 
 ## Decision on proceeding
 

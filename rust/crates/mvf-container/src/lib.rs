@@ -11,6 +11,7 @@
 //! The sandbox policy is documented in [`spec`].
 
 pub mod package;
+pub mod seccomp;
 pub mod spec;
 
 use std::ffi::OsString;
@@ -28,7 +29,7 @@ use mvf_oci::{ContentStore, ImageRecord};
 use mvf_worker::process::LaunchSpec;
 use mvf_worker::{Launcher, worker_node};
 
-use crate::spec::{DeviceNode, IdMapping, SpecInput, runtime_spec};
+use crate::spec::{DeviceNode, IdMapping, Lsm, SpecInput, runtime_spec};
 
 /// A detected low-level OCI runtime and what this host lets it enforce.
 #[derive(Debug, Clone)]
@@ -112,12 +113,34 @@ fn grantable_devices() -> Vec<String> {
     Vec::new()
 }
 
+/// The host's security-module profile: `MVF_OCI_APPARMOR_PROFILE` when AppArmor is enabled in the
+/// kernel, else `MVF_OCI_SELINUX_LABEL` when SELinux is. Nothing is loaded by MVF: the profile must
+/// already exist, as with Docker's `--security-opt`.
+fn detect_lsm() -> Option<Lsm> {
+    let apparmor = std::fs::read_to_string("/sys/module/apparmor/parameters/enabled")
+        .is_ok_and(|v| v.trim_start().starts_with('Y'));
+    if apparmor && let Ok(profile) = std::env::var("MVF_OCI_APPARMOR_PROFILE") {
+        return Some(Lsm::AppArmor(profile));
+    }
+    let selinux = Path::new("/sys/fs/selinux/enforce").exists();
+    if selinux && let Ok(label) = std::env::var("MVF_OCI_SELINUX_LABEL") {
+        return Some(Lsm::SeLinux(label));
+    }
+    None
+}
+
 /// The OCI backend.
 #[derive(Debug, Clone)]
 pub struct OciBackend {
     runtime: OciRuntime,
     store: ContentStore,
     state_dir: PathBuf,
+    /// What composing the most recent rootfs did (layer reuse, links), for reports and tests.
+    last_rootfs: std::sync::Arc<std::sync::Mutex<Option<mvf_oci::CacheReport>>>,
+    /// Force the seccomp allowlist for every node (`MVF_OCI_SECCOMP=allowlist`).
+    allowlist: bool,
+    /// The security-module profile this host applies, when its kernel has the LSM enabled.
+    lsm: Option<Lsm>,
 }
 
 impl OciBackend {
@@ -128,7 +151,32 @@ impl OciBackend {
             runtime,
             store,
             state_dir: state_dir.into(),
+            last_rootfs: Default::default(),
+            allowlist: std::env::var("MVF_OCI_SECCOMP").is_ok_and(|v| v == "allowlist"),
+            lsm: detect_lsm(),
         }
+    }
+
+    /// Applies the seccomp allowlist to every node, whatever its contract says.
+    pub fn with_syscall_allowlist(mut self, on: bool) -> Self {
+        self.allowlist = on;
+        self
+    }
+
+    /// Overrides the security-module profile (`None` disables it). The profile must exist on the
+    /// host; the runtime refuses to start a container otherwise.
+    pub fn with_lsm(mut self, lsm: Option<Lsm>) -> Self {
+        self.lsm = lsm;
+        self
+    }
+
+    /// What composing the most recent rootfs did (`None` until one was composed; a rootfs already
+    /// in the cache is not composed again).
+    pub fn last_rootfs(&self) -> Option<mvf_oci::CacheReport> {
+        self.last_rootfs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Detects a runtime and returns a backend, or `None` when this host cannot run OCI images.
@@ -182,6 +230,7 @@ impl ExecutionBackend for OciBackend {
                 devices: grantable_devices(),
                 // CDI injection is not implemented: no CDI device is ever offered.
                 cdi_devices: vec![],
+                lsm: self.lsm.iter().map(Lsm::grant).collect(),
             },
             private_arenas: true,
         }
@@ -213,9 +262,12 @@ impl ExecutionBackend for OciBackend {
 
 static IDS: AtomicU64 = AtomicU64::new(0);
 
-/// Unpacks (once per manifest digest and id mapping) and returns the read-only rootfs. Mount points
-/// the sandbox needs are created here, while the cache is still writable, and with a user namespace
-/// the tree is owned by the mapped container root (as Docker's userns-remap does).
+/// Composes (once per manifest digest and id mapping) and returns the read-only rootfs. Layers come
+/// from the layer-level cache (`<state>/layers[-u<id>]/<diff_id>`): each is unpacked once, shared
+/// by every image built on it, and hard-linked into the rootfs — so a packaged node image on an
+/// already cached base unpacks only its own layers. Mount points the sandbox needs are created
+/// here, while the tree is still writable, and with a user namespace the tree is owned by the
+/// mapped container root (as Docker's userns-remap does).
 fn ensure_rootfs(
     backend: &OciBackend,
     record: &ImageRecord,
@@ -255,7 +307,24 @@ fn ensure_rootfs(
         std::process::id(),
         IDS.fetch_add(1, Ordering::Relaxed)
     ));
-    mvf_oci::unpack(&backend.store, record, &tmp).map_err(|e| fail(format!("unpack: {e}")))?;
+    let layers = mvf_oci::LayerCache::new(backend.state_dir.join(match userns {
+        Some(m) => format!("layers-u{}", m.host_id),
+        None => "layers".into(),
+    }));
+    let owner = userns.map(|m| m.host_id);
+    let chown_layer = |root: &Path| -> std::io::Result<()> {
+        match userns {
+            Some(m) => chown_tree(root, m.host_id),
+            None => Ok(()),
+        }
+    };
+    let report = layers
+        .materialize(&backend.store, record, &tmp, &chown_layer, owner)
+        .map_err(|e| fail(format!("compose rootfs: {e}")))?;
+    *backend
+        .last_rootfs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
     let prepared = prepare_rootfs(&tmp, userns).map_err(|e| fail(format!("prepare rootfs: {e}")));
     if let Err(e) = prepared {
         let _ = std::fs::remove_dir_all(&tmp);
@@ -268,33 +337,48 @@ fn ensure_rootfs(
     Ok(rootfs)
 }
 
+/// Creates the sandbox's mount points in a composed rootfs. Layer content already has its owner
+/// (set once per cached layer), so only what is created here is chowned.
 fn prepare_rootfs(root: &Path, userns: Option<IdMapping>) -> std::io::Result<()> {
+    let mut created = Vec::new();
     for d in ["proc", "sys", "dev", "tmp", "mvf"] {
         let p = root.join(d);
         if std::fs::symlink_metadata(&p).is_err() {
             std::fs::create_dir_all(&p)?;
+            created.push(p);
         }
     }
     let arena = root.join("mvf/arena");
     if std::fs::symlink_metadata(&arena).is_err() {
         std::fs::write(&arena, [])?;
+        created.push(arena);
     }
     #[cfg(unix)]
     if let Some(m) = userns {
-        fn walk(p: &Path, id: u32) -> std::io::Result<()> {
-            std::os::unix::fs::lchown(p, Some(id), Some(id))?;
-            let meta = std::fs::symlink_metadata(p)?;
-            if meta.is_dir() {
-                for e in std::fs::read_dir(p)? {
-                    walk(&e?.path(), id)?;
-                }
-            }
-            Ok(())
+        std::os::unix::fs::lchown(root, Some(m.host_id), Some(m.host_id))?;
+        for p in created {
+            std::os::unix::fs::lchown(&p, Some(m.host_id), Some(m.host_id))?;
         }
-        walk(root, m.host_id)?;
     }
     #[cfg(not(unix))]
-    let _ = userns;
+    let _ = (userns, created);
+    Ok(())
+}
+
+/// Gives a whole tree to the mapped container root (one cached layer, once).
+fn chown_tree(p: &Path, id: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::lchown(p, Some(id), Some(id))?;
+        let meta = std::fs::symlink_metadata(p)?;
+        if meta.is_dir() {
+            for e in std::fs::read_dir(p)? {
+                chown_tree(&e?.path(), id)?;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (p, id);
     Ok(())
 }
 
@@ -394,6 +478,12 @@ impl OciLauncher {
             devices,
             userns,
             hostname: "mvf-node".into(),
+            syscalls: if self.backend.allowlist {
+                mvf_contract::SyscallPolicy::Allowlist
+            } else {
+                self.contract.spec.isolation.syscalls
+            },
+            lsm: self.backend.lsm.clone(),
         })
         .map_err(fail)?;
         let bundle = self.backend.state_dir.join("bundles").join(&id);

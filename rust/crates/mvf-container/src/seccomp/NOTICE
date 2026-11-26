@@ -1,0 +1,6 @@
+moby-default.json is Docker's default seccomp profile, vendored unchanged from
+https://github.com/moby/moby at tag docker-v29.10.1,
+path vendor/github.com/moby/profiles/seccomp/default.json (git blob 6e5e47e242892aaa290f916ba1045f9213ef0b84).
+
+Copyright Docker, Inc. Licensed under the Apache License, Version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0).

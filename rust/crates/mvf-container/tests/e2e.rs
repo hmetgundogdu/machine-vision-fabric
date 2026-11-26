@@ -594,3 +594,196 @@ fn granted_device_is_visible_with_only_the_granted_access() {
     let without = sh(e, "test -e /dev/kmsg && echo present || echo absent", "");
     assert!(without.stdout.contains("absent"), "{without:?}");
 }
+
+// ------------------------------------------------------------------------------- #28 hardening
+
+/// Calls `io_uring_setup` (425 on every architecture): allowed by the denylist, absent from
+/// Docker's allowlist — a syscall that distinguishes the two profiles from inside the sandbox.
+fn io_uring_probe(backend: &OciBackend, e: &Env) -> WorkloadOutput {
+    let script = "import ctypes\nlibc = ctypes.CDLL(None, use_errno=True)\nparams = (ctypes.c_char * 120)()\nfd = libc.syscall(425, 1, params)\nprint('io_uring', fd, ctypes.get_errno())\nprint('done')\n";
+    let mut contract = sandbox_contract("");
+    contract.spec.artifacts = vec![mvf_contract::Artifact::Oci {
+        image: "python".into(),
+        digest: e.python.manifest.digest.to_string(),
+        targets: None,
+    }];
+    run_workload(
+        backend,
+        &e.python,
+        &contract,
+        Some(vec!["python3".into(), "-c".into(), script.into()]),
+        Duration::from_secs(60),
+    )
+    .expect("workload")
+}
+
+fn probe_result(out: &WorkloadOutput) -> (i64, i64) {
+    let line = out
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("io_uring "))
+        .unwrap_or_else(|| panic!("no probe output: {out:?}"));
+    let mut it = line
+        .split_whitespace()
+        .map(|v| v.parse::<i64>().unwrap_or(i64::MIN));
+    (it.next().unwrap_or(i64::MIN), it.next().unwrap_or(i64::MIN))
+}
+
+#[test]
+fn the_syscall_allowlist_denies_what_the_denylist_allows() {
+    let e = need_env!();
+    let deny = io_uring_probe(&e.backend, e);
+    assert!(deny.stdout.contains("done"), "{deny:?}");
+    let (fd, _) = probe_result(&deny);
+    assert!(fd >= 0, "denylist: io_uring_setup is allowed ({deny:?})");
+    let strict = e.backend.clone().with_syscall_allowlist(true);
+    let allow = io_uring_probe(&strict, e);
+    assert!(
+        allow.stdout.contains("done"),
+        "python itself must run under the allowlist: {allow:?}"
+    );
+    assert_eq!(
+        probe_result(&allow),
+        (-1, 1),
+        "allowlist: EPERM ({allow:?})"
+    );
+}
+
+#[test]
+fn a_python_node_runs_unchanged_under_the_allowlist() {
+    let e = need_env!();
+    let (_, contract) = node_image(
+        e,
+        "mvf-e2e/invert-allowlist:1",
+        &repo().join("modules/py-invert-transformer"),
+        "transformer.py",
+    );
+    let file = contract
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let text = format!(
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: oci }}\nspec:\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ frames: 6, arena: true }} }}\n    - {{ id: proc, contract: {file} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: proc.frame }}\n      - {{ from: proc.frame, to: sink.frame }}\n"
+    );
+    let graph = build_graph(&text, &HostResolver::new(e.work.join("contracts"))).expect("graph");
+    let services = HostServices::default();
+    let registry = default_backends().with(e.backend.clone().with_syscall_allowlist(true));
+    let r = Engine::build(graph, &registry, &services)
+        .expect("build")
+        .run(&RunOptions::default(), &mut NullObserver);
+    assert_eq!(
+        r.end,
+        EndReason::SourceExhausted { node: "cam".into() },
+        "{:?}",
+        services.logs.events()
+    );
+    let checksums: Vec<String> = services
+        .recorder
+        .records()
+        .into_iter()
+        .filter_map(|r| match r.value {
+            RecordedValue::Frame { checksum, .. } => Some(checksum),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(checksums, (1..=6).map(inverted).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_second_node_image_on_the_same_base_unpacks_only_its_own_layer() {
+    let e = need_env!();
+    // A copy of the invert module with one changed byte: same base, a different module layer.
+    let module = e.work.join("invert-copy");
+    std::fs::create_dir_all(&module).expect("dir");
+    for f in ["node.yaml", "transformer.py"] {
+        std::fs::copy(
+            repo().join("modules/py-invert-transformer").join(f),
+            module.join(f),
+        )
+        .expect("copy");
+    }
+    let mut source = std::fs::read_to_string(module.join("transformer.py")).expect("read");
+    source.push_str("\n# variant\n");
+    std::fs::write(module.join("transformer.py"), source).expect("write");
+    let (a, _) = node_image(
+        e,
+        "mvf-e2e/layer-a:1",
+        &repo().join("modules/py-invert-transformer"),
+        "transformer.py",
+    );
+    let (b, _) = node_image(e, "mvf-e2e/layer-b:1", &module, "transformer.py");
+    assert_eq!(a.layers.len(), b.layers.len());
+    // A fresh state directory, so nothing is cached yet.
+    let backend = OciBackend::new(
+        e.backend.runtime().clone(),
+        e.store.clone(),
+        e.work.join(format!("state-layers-{}", std::process::id())),
+    );
+    let contract = |record: &ImageRecord| {
+        let mut c = sandbox_contract("");
+        c.spec.artifacts = vec![mvf_contract::Artifact::Oci {
+            image: "node".into(),
+            digest: record.manifest.digest.to_string(),
+            targets: None,
+        }];
+        c
+    };
+    let time = |record: &ImageRecord| {
+        let t0 = std::time::Instant::now();
+        let out = run_workload(
+            &backend,
+            record,
+            &contract(record),
+            Some(vec!["true".into()]),
+            Duration::from_secs(60),
+        )
+        .expect("workload");
+        assert_eq!(out.exit_code, Some(0), "{out:?}");
+        (t0.elapsed(), backend.last_rootfs().expect("composed"))
+    };
+    let (cold, first) = time(&a);
+    let (warm, second) = time(&b);
+    eprintln!("rootfs: first image {cold:?} {first:?}");
+    eprintln!("rootfs: second image {warm:?} {second:?}");
+    assert_eq!(
+        (first.layers_unpacked, first.layers_reused),
+        (a.layers.len(), 0)
+    );
+    assert_eq!(
+        (second.layers_unpacked, second.layers_reused),
+        (1, b.layers.len() - 1),
+        "only the module layer is new"
+    );
+    assert!(
+        second.unpack.bytes * 20 < first.unpack.bytes,
+        "the base was not unpacked again"
+    );
+    assert!(second.linked > 1000 && second.copied == 0, "{second:?}");
+    assert!(
+        warm < cold,
+        "reusing the base is faster: {warm:?} vs {cold:?}"
+    );
+}
+
+#[test]
+fn a_contract_that_requires_a_security_module_fails_closed_without_one() {
+    let e = need_env!();
+    let mut c = sandbox_contract("");
+    c.spec.isolation.lsm = mvf_contract::LsmRequirement::Required;
+    let caps = e.backend.capabilities();
+    let placed = mvf_contract::negotiate(&c, std::slice::from_ref(&caps));
+    if caps.grants.lsm.is_empty() {
+        let err = placed.expect_err("no LSM on this host");
+        assert!(
+            err.rejections
+                .iter()
+                .flat_map(|r| r.reasons.iter())
+                .any(|r| r.code == "negotiation.lsm-unavailable"),
+            "{err:?}"
+        );
+        eprintln!("LSM enforcement BLOCKED on this host: no AppArmor/SELinux profile available");
+    } else {
+        assert!(placed.is_ok(), "host offers {:?}", caps.grants.lsm);
+    }
+}
