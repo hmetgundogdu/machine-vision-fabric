@@ -334,3 +334,43 @@ fn switch_and_fork_output_names_must_be_port_names() {
     );
     assert!(codes(&text).contains(&"graph.primitive.invalid-port"));
 }
+
+#[test]
+fn network_bindings_may_only_publish_declared_listeners() {
+    let mut fx = fixtures();
+    let listener = parse_contract(
+        "apiVersion: mvf.dev/v1alpha1\nkind: NodeContract\nmetadata: { id: ftp, version: 1.0.0 }\nspec:\n  ports: { outputs: [ { name: frame, channel: data, type: frame } ] }\n  artifacts: [ { backend: in-process, builtin: ftp } ]\n  isolation: { minimum: sandbox }\n  permissions:\n    network:\n      mode: restricted\n      inbound: [ { protocol: tcp, port: 2121 }, { protocol: tcp, portRange: 50000-50009 } ]\n",
+    )
+    .expect("contract");
+    fx.0.insert("ftp", listener);
+    let codes = |network: &str| match build_graph(
+        &pipeline(
+            &format!("{{ id: cam, builtin: ftp, network: {network} }}"),
+            "",
+            "",
+            "",
+        ),
+        &fx,
+    ) {
+        Ok(_) => Vec::new(),
+        Err(GraphError::Invalid(issues)) => issues.iter().map(|i| i.code).collect(),
+        Err(e) => panic!("{e}"),
+    };
+    assert!(codes("{ hostIp: 192.168.77.1, advertise: 192.168.77.1, ports: [ { protocol: tcp, port: 2121, hostPort: 21021 } ] }").is_empty());
+    assert!(
+        codes("{ ports: [ { protocol: tcp, port: 50005, hostPort: 50005 } ] }").is_empty(),
+        "inside the declared range"
+    );
+    assert_eq!(
+        codes("{ ports: [ { protocol: tcp, port: 8080, hostPort: 8080 } ] }"),
+        ["graph.network.unbound-port"]
+    );
+    assert_eq!(
+        codes("{ ports: [ { protocol: udp, port: 2121, hostPort: 2121 } ] }"),
+        ["graph.network.unbound-port"]
+    );
+    assert_eq!(
+        codes("{ hostIp: not-an-ip }"),
+        ["graph.network.invalid-address"]
+    );
+}

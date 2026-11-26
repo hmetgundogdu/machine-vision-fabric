@@ -361,18 +361,34 @@ fn evaluate(
         }
     }
 
+    let network = spec.permissions.network.mode();
+    if caps.isolation < IsolationLevel::Sandbox && network == crate::NetworkPolicy::Restricted {
+        reasons.push(reason(
+            "negotiation.network-not-enforceable",
+            format!(
+                "restricted networking needs a sandbox backend; `{}` shares the host network",
+                caps.kind.as_str()
+            ),
+        ));
+    }
     if caps.isolation >= IsolationLevel::Sandbox {
         let p = &spec.permissions;
-        if !caps.grants.network.contains(&p.network) {
+        if !caps.grants.network.contains(&network) {
             reasons.push(reason(
                 "negotiation.permission-unsupported",
                 format!(
                     "network policy {:?} cannot be enforced by backend `{}`",
-                    p.network,
+                    network,
                     caps.kind.as_str()
                 )
                 .to_lowercase(),
             ));
+        } else if network == crate::NetworkPolicy::Host {
+            notes.push(PlacementNote {
+                code: "placement.host-network",
+                message: "the node shares the host network: everything but networking is sandboxed"
+                    .into(),
+            });
         }
         for d in &p.devices {
             if !caps.grants.devices.contains(&d.path) {

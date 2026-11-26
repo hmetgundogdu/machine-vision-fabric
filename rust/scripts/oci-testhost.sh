@@ -41,7 +41,7 @@ docker run --rm --platform "$PLATFORM" --privileged --cgroupns=host --shm-size=5
   -v "$REPO":/src:ro -v mvf-linux-target:/target:ro -v "$OUT/fixtures":/fixtures:ro \
   -e MVF_OCI_E2E=1 -e MVF_REQUIRE_OCI=1 -e MVF_REQUIRE_NO_HOST_RUNTIME=1 -e MVF_OCI_FIXTURES=/fixtures \
   debian:bookworm-slim bash -ec '
-    apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends runc >/dev/null
+    apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends runc iproute2 nftables >/dev/null
     echo "kernel: $(uname -srm)"; echo "cgroup: $(cat /sys/fs/cgroup/cgroup.controllers)"
     runc --version | head -3
     command -v python3 >/dev/null && { echo "python3 present on test host"; exit 1; } || echo "python3: absent (good)"

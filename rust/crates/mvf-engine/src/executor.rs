@@ -225,6 +225,8 @@ pub(crate) struct NodeSlot {
     pub(crate) config: serde_json::Map<String, serde_json::Value>,
     pub(crate) on_error: mvf_graph::FailurePolicy,
     pub(crate) backpressure: mvf_graph::Backpressure,
+    /// Deployment-time network binding.
+    pub(crate) network: Option<mvf_contract::NetworkBinding>,
     /// `resident` nodes start with the run; `on-demand` ones the first time they run.
     pub(crate) on_demand: bool,
     /// Whether the active handle has been started.
@@ -317,6 +319,7 @@ impl Engine {
                     config: &config,
                     generation: 1,
                     services,
+                    network: node.network.as_ref(),
                 })
                 .map_err(|error| BuildError {
                     node: node.id.clone(),
@@ -329,6 +332,7 @@ impl Engine {
                 config,
                 on_error: node.on_error.clone(),
                 backpressure: node.backpressure,
+                network: node.network.clone(),
                 on_demand: node.contract.spec.lifecycle.activation
                     == mvf_contract::Activation::OnDemand,
                 activated: false,

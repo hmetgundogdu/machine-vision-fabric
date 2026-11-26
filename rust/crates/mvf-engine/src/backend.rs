@@ -28,6 +28,8 @@ pub struct InstantiateRequest<'a> {
     pub generation: u64,
     /// Host services.
     pub services: &'a HostServices,
+    /// Deployment-time network binding of this node (published ports, advertised address).
+    pub network: Option<&'a mvf_contract::NetworkBinding>,
 }
 
 /// One execution backend.

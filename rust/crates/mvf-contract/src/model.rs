@@ -72,9 +72,9 @@ pub struct NodeSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Permissions {
-    /// Network access.
+    /// Network access: a mode (`none`, `loopback`, `host`) or restricted rules.
     #[serde(default)]
-    pub network: NetworkPolicy,
+    pub network: NetworkPermission,
     /// Host device nodes made visible to the node.
     #[serde(default)]
     pub devices: Vec<DeviceGrant>,
@@ -83,7 +83,8 @@ pub struct Permissions {
     pub cdi_devices: Vec<String>,
 }
 
-/// Network policy.
+/// Network mode. Only a sandbox backend *enforces* a mode; trusted backends (in-process, worker)
+/// share the host network whatever the contract says, which negotiation reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NetworkPolicy {
@@ -92,6 +93,249 @@ pub enum NetworkPolicy {
     None,
     /// Loopback only.
     Loopback,
+    /// The host's network, unisolated (trusted workloads; never reported as sandboxed).
+    Host,
+    /// An isolated namespace with explicit inbound and outbound rules (default deny).
+    Restricted,
+}
+
+/// `permissions.network`: a bare mode, or `{ mode: restricted, inbound, outbound }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NetworkPermission {
+    /// `none`, `loopback`, `host` (or `restricted` with no rules: deny everything).
+    Mode(NetworkPolicy),
+    /// Restricted networking with rules.
+    Rules(NetworkRules),
+}
+
+impl Default for NetworkPermission {
+    fn default() -> Self {
+        NetworkPermission::Mode(NetworkPolicy::None)
+    }
+}
+
+impl From<NetworkPolicy> for NetworkPermission {
+    fn from(mode: NetworkPolicy) -> Self {
+        NetworkPermission::Mode(mode)
+    }
+}
+
+impl NetworkPermission {
+    /// The mode.
+    pub fn mode(&self) -> NetworkPolicy {
+        match self {
+            NetworkPermission::Mode(m) => *m,
+            NetworkPermission::Rules(r) => r.mode,
+        }
+    }
+
+    /// Inbound rules (empty unless restricted).
+    pub fn inbound(&self) -> &[InboundRule] {
+        match self {
+            NetworkPermission::Rules(r) => &r.inbound,
+            NetworkPermission::Mode(_) => &[],
+        }
+    }
+
+    /// Outbound rules (`[]` = deny all new outbound connections).
+    pub fn outbound(&self) -> &[OutboundRule] {
+        match self {
+            NetworkPermission::Rules(NetworkRules {
+                outbound: Outbound::Allow(rules),
+                ..
+            }) => rules,
+            _ => &[],
+        }
+    }
+}
+
+/// Restricted networking: default deny, explicit inbound listeners and outbound destinations.
+/// Return traffic of a permitted session always flows (stateful), even when new outbound
+/// connections are denied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NetworkRules {
+    /// Must be `restricted`.
+    pub mode: NetworkPolicy,
+    /// Listeners reachable from outside.
+    #[serde(default)]
+    pub inbound: Vec<InboundRule>,
+    /// `deny` (default) or the destinations the node may open connections to.
+    #[serde(default)]
+    pub outbound: Outbound,
+}
+
+/// Transport protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Protocol {
+    /// TCP.
+    Tcp,
+    /// UDP.
+    Udp,
+}
+
+impl Protocol {
+    /// `tcp` / `udp`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Protocol::Tcp => "tcp",
+            Protocol::Udp => "udp",
+        }
+    }
+}
+
+/// A listener the node offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct InboundRule {
+    /// Protocol.
+    pub protocol: Protocol,
+    /// One port (inside the node)...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// ...or a range `lo-hi` (e.g. passive FTP data ports).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_range: Option<String>,
+    /// Who may connect (CIDR); default anyone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// New outbound connections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Outbound {
+    /// `deny`.
+    Deny(DenyKeyword),
+    /// Allowed destinations.
+    Allow(Vec<OutboundRule>),
+}
+
+impl Default for Outbound {
+    fn default() -> Self {
+        Outbound::Deny(DenyKeyword::Deny)
+    }
+}
+
+/// The keyword `deny`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DenyKeyword {
+    /// `deny`.
+    Deny,
+}
+
+/// A destination the node may connect to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OutboundRule {
+    /// Protocol.
+    pub protocol: Protocol,
+    /// Destination (CIDR).
+    pub destination: String,
+    /// One port; absent = any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Or a range `lo-hi`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_range: Option<String>,
+}
+
+/// An IP network (`192.168.1.10/32`, `10.0.0.0/8`, `fd00::/8`); a bare address is a single host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Cidr {
+    /// Network address.
+    pub addr: std::net::IpAddr,
+    /// Prefix length.
+    pub prefix: u8,
+}
+
+impl Cidr {
+    /// Parses `addr[/prefix]`.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let (addr, prefix) = match text.split_once('/') {
+            Some((a, p)) => (a, Some(p)),
+            None => (text, None),
+        };
+        let addr: std::net::IpAddr = addr
+            .trim()
+            .parse()
+            .map_err(|_| format!("`{text}` is not an IP address or CIDR"))?;
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            None => max,
+            Some(p) => p
+                .trim()
+                .parse::<u8>()
+                .ok()
+                .filter(|p| *p <= max)
+                .ok_or_else(|| format!("`{text}`: prefix must be 0..={max}"))?,
+        };
+        Ok(Self { addr, prefix })
+    }
+
+    /// `true` for IPv4.
+    pub fn is_ipv4(&self) -> bool {
+        self.addr.is_ipv4()
+    }
+}
+
+impl std::fmt::Display for Cidr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.addr, self.prefix)
+    }
+}
+
+/// Parses `lo-hi` (inclusive, `lo <= hi`, at most 4096 ports).
+pub fn parse_port_range(text: &str) -> Result<(u16, u16), String> {
+    let (lo, hi) = text
+        .split_once('-')
+        .ok_or_else(|| format!("`{text}` is not a port range `lo-hi`"))?;
+    let lo: u16 = lo
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{text}`: bad port"))?;
+    let hi: u16 = hi
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{text}`: bad port"))?;
+    if lo == 0 || lo > hi || hi - lo >= 4096 {
+        return Err(format!(
+            "`{text}`: need 1 <= lo <= hi and at most 4096 ports"
+        ));
+    }
+    Ok((lo, hi))
+}
+
+/// Deployment-time network binding of one node instance (operator side, not part of the portable
+/// contract): which host address and ports expose the node's inbound listeners, and the address
+/// the node advertises to clients (e.g. in passive FTP replies).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NetworkBinding {
+    /// Host address the listeners are published on (default all: `0.0.0.0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_ip: Option<String>,
+    /// Host port per node port (default: the same port).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<PortBinding>,
+    /// Address handed to the node as `MVF_ADVERTISE_IP`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise: Option<String>,
+}
+
+/// One published port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PortBinding {
+    /// Protocol.
+    pub protocol: Protocol,
+    /// Port inside the node.
+    pub port: u16,
+    /// Port on the host.
+    pub host_port: u16,
 }
 
 /// One device grant.

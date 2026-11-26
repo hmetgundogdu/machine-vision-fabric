@@ -5,4 +5,4 @@ metadata: { id: net.host, version: 1.0.0 }
 spec:
   ports: { inputs: [ { name: frame, channel: data, type: frame } ] }
   artifacts: [ { backend: in-process, builtin: x } ]
-  permissions: { network: host }
+  permissions: { network: internet }

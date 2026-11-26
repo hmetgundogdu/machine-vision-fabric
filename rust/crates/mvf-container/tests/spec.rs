@@ -44,6 +44,7 @@ fn spec(
         hostname: "mvf-node".into(),
         syscalls: c.spec.isolation.syscalls,
         lsm: None,
+        netns: None,
     })
     .expect("spec")
 }
@@ -203,7 +204,7 @@ fn resource_limits_map_to_cgroups() {
 #[test]
 fn unsupported_network_policy_fails_closed() {
     let mut c = contract("");
-    c.spec.permissions.network = NetworkPolicy::Loopback;
+    c.spec.permissions.network = NetworkPolicy::Loopback.into();
     assert!(
         runtime_spec(&SpecInput {
             rootfs: Path::new("/r"),
@@ -217,6 +218,7 @@ fn unsupported_network_policy_fails_closed() {
             hostname: "h".into(),
             syscalls: Default::default(),
             lsm: None,
+            netns: None,
         })
         .is_err()
     );
@@ -358,6 +360,7 @@ fn a_host_security_module_profile_lands_in_the_process() {
             hostname: "h".into(),
             syscalls: Default::default(),
             lsm,
+            netns: None,
         })
         .expect("spec")
     };

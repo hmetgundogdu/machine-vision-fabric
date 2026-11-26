@@ -10,6 +10,7 @@
 //! `None`, the backend is not registered, and contracts that need it are rejected by negotiation.
 //! The sandbox policy is documented in [`spec`].
 
+pub mod network;
 pub mod package;
 pub mod seccomp;
 pub mod spec;
@@ -46,7 +47,18 @@ pub struct OciRuntime {
     pub seccomp: bool,
 }
 
-fn first_on_path(names: &[&str]) -> Option<PathBuf> {
+pub(crate) fn running_as_root() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(2).map(|e| e == "0"))
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn first_on_path(names: &[&str]) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
@@ -64,14 +76,7 @@ impl OciRuntime {
             .or_else(|| first_on_path(&["runc", "crun"]))?;
         let out = Command::new(&path).arg("--version").output().ok()?;
         let text = String::from_utf8_lossy(&out.stdout).to_string();
-        let root = std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find(|l| l.starts_with("Uid:"))
-                    .and_then(|l| l.split_whitespace().nth(2).map(|e| e == "0"))
-            })
-            .unwrap_or(false);
+        let root = running_as_root();
         let controllers = std::fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
             .map(|s| s.split_whitespace().map(str::to_string).collect())
             .unwrap_or_default();
@@ -141,6 +146,8 @@ pub struct OciBackend {
     allowlist: bool,
     /// The security-module profile this host applies, when its kernel has the LSM enabled.
     lsm: Option<Lsm>,
+    /// Enforced per-node networking (`network: restricted`), when this host can provide it.
+    network: Option<network::NetworkSupport>,
 }
 
 impl OciBackend {
@@ -154,6 +161,7 @@ impl OciBackend {
             last_rootfs: Default::default(),
             allowlist: std::env::var("MVF_OCI_SECCOMP").is_ok_and(|v| v == "allowlist"),
             lsm: detect_lsm(),
+            network: network::NetworkSupport::detect(),
         }
     }
 
@@ -226,7 +234,13 @@ impl ExecutionBackend for OciBackend {
             enforces_pids_limit: self.runtime.enforces("pids"),
             replacement: vec![Replacement::Stateless],
             grants: GrantSupport {
-                network: vec![NetworkPolicy::None],
+                network: {
+                    let mut modes = vec![NetworkPolicy::None, NetworkPolicy::Host];
+                    if self.network.is_some() {
+                        modes.push(NetworkPolicy::Restricted);
+                    }
+                    modes
+                },
                 devices: grantable_devices(),
                 // CDI injection is not implemented: no CDI device is ever offered.
                 cdi_devices: vec![],
@@ -255,6 +269,13 @@ impl ExecutionBackend for OciBackend {
             name: format!("{}-g{}", request.node_id, request.generation),
             args: None,
             container: None,
+            binding: request.network.cloned(),
+            network: None,
+            logs: Some((
+                request.services.clone(),
+                request.node_id.to_string(),
+                request.generation,
+            )),
         };
         worker_node(request, Box::new(launcher), false)
     }
@@ -424,9 +445,63 @@ struct OciLauncher {
     name: String,
     args: Option<Vec<String>>,
     container: Option<(String, PathBuf)>,
+    /// Deployment-time network binding.
+    binding: Option<mvf_contract::NetworkBinding>,
+    /// The enforced network, while the container exists.
+    network: Option<network::NodeNetwork>,
+    /// Where the effective policy and counters are reported.
+    logs: Option<(mvf_engine::HostServices, String, u64)>,
 }
 
 impl OciLauncher {
+    fn log(&self, message: String) {
+        if let Some((services, node, generation)) = &self.logs {
+            services.log(node, *generation, "supervisor", message);
+        }
+    }
+
+    /// Prepares the enforced network of `network: restricted` (fails closed when unavailable).
+    fn prepare_network(&mut self, id: &str) -> Result<Option<PathBuf>, NodeError> {
+        let fail = |m: String| NodeError::new(NodeErrorKind::StartFailed, m);
+        match self.contract.spec.permissions.network.mode() {
+            NetworkPolicy::Restricted => {
+                let support = self.backend.network.clone().ok_or_else(|| {
+                    fail("`network: restricted` needs root, `ip` and `nft` on this host".into())
+                })?;
+                let policy = network::Policy::resolve(
+                    &self.contract.spec.permissions.network,
+                    self.binding.as_ref(),
+                )
+                .map_err(fail)?;
+                let net =
+                    network::NodeNetwork::setup(&support, &self.backend.state_dir, id, policy)
+                        .map_err(|e| fail(format!("network: {e}")))?;
+                self.log(net.describe());
+                let path = net.netns_path();
+                self.network = Some(net);
+                Ok(Some(path))
+            }
+            NetworkPolicy::Host => {
+                self.log("network: host (the host's network, not isolated)".into());
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn release_network(&mut self) {
+        if let Some(mut net) = self.network.take() {
+            let counters = net.counters();
+            if !counters.is_empty() {
+                let text: Vec<String> = counters
+                    .iter()
+                    .map(|(k, p, b)| format!("{k}={p}p/{b}B"))
+                    .collect();
+                self.log(format!("network counters: {}", text.join(" ")));
+            }
+            net.teardown();
+        }
+    }
     fn bundle(&mut self, arena: &Path) -> Result<LaunchSpec, NodeError> {
         let fail = |m: String| NodeError::new(NodeErrorKind::StartFailed, m);
         let userns = (self.backend.runtime.root
@@ -465,16 +540,21 @@ impl OciLauncher {
             std::process::id(),
             IDS.fetch_add(1, Ordering::Relaxed)
         );
+        let netns = self.prepare_network(&id)?;
+        let mut extra_env = vec![
+            "PYTHONUNBUFFERED=1".to_string(),
+            "PYTHONDONTWRITEBYTECODE=1".to_string(),
+        ];
+        if let Some(ip) = self.binding.as_ref().and_then(|b| b.advertise.clone()) {
+            extra_env.push(format!("MVF_ADVERTISE_IP={ip}"));
+        }
         let spec = runtime_spec(&SpecInput {
             rootfs: &rootfs,
             arena,
             image: &config,
             contract: &self.contract,
             args: self.args.clone(),
-            extra_env: vec![
-                "PYTHONUNBUFFERED=1".into(),
-                "PYTHONDONTWRITEBYTECODE=1".into(),
-            ],
+            extra_env,
             devices,
             userns,
             hostname: "mvf-node".into(),
@@ -484,8 +564,12 @@ impl OciLauncher {
                 self.contract.spec.isolation.syscalls
             },
             lsm: self.backend.lsm.clone(),
+            netns,
         })
-        .map_err(fail)?;
+        .map_err(|e| {
+            self.release_network();
+            fail(e)
+        })?;
         let bundle = self.backend.state_dir.join("bundles").join(&id);
         std::fs::create_dir_all(&bundle).map_err(|e| fail(format!("{}: {e}", bundle.display())))?;
         std::fs::write(bundle.join("config.json"), spec.to_string())
@@ -518,6 +602,7 @@ impl Launcher for OciLauncher {
             delete_container(&self.backend, &id);
             let _ = std::fs::remove_dir_all(bundle);
         }
+        self.release_network();
     }
 }
 
@@ -570,6 +655,18 @@ pub fn run_workload(
     args: Option<Vec<String>>,
     timeout: Duration,
 ) -> Result<WorkloadOutput, NodeError> {
+    run_workload_with(backend, record, contract, args, timeout, None)
+}
+
+/// [`run_workload`] with a deployment-time network binding (published ports, advertised address).
+pub fn run_workload_with(
+    backend: &OciBackend,
+    record: &ImageRecord,
+    contract: &NodeContract,
+    args: Option<Vec<String>>,
+    timeout: Duration,
+    binding: Option<&mvf_contract::NetworkBinding>,
+) -> Result<WorkloadOutput, NodeError> {
     let scratch = backend.state_dir.join("workload-arenas");
     std::fs::create_dir_all(&scratch).map_err(|e| NodeError::failed(e.to_string()))?;
     let arena = scratch.join(format!(
@@ -585,6 +682,9 @@ pub fn run_workload(
         name: "workload".into(),
         args,
         container: None,
+        binding: binding.cloned(),
+        network: None,
+        logs: None,
     };
     let spec = launcher.bundle(&arena)?;
     let mut child = Command::new(&spec.program)

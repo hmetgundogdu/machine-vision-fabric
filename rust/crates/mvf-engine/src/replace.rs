@@ -566,6 +566,7 @@ impl Engine {
         let services: HostServices = self.services.clone();
         let req = request.clone();
         let node_id = self.slots[i].id.clone();
+        let network = self.slots[i].network.clone();
         let run_cancel = run_cancel.clone();
         let thread = std::thread::spawn(move || {
             let t0 = Instant::now();
@@ -577,6 +578,7 @@ impl Engine {
                     config: &req.config,
                     generation,
                     services: &services,
+                    network: network.as_ref(),
                 })
                 .and_then(|(mut handle, _)| {
                     let budget =

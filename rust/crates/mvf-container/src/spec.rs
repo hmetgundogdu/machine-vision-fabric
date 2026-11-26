@@ -124,6 +124,8 @@ pub struct SpecInput<'a> {
     pub syscalls: mvf_contract::SyscallPolicy,
     /// Security-module profile to apply.
     pub lsm: Option<Lsm>,
+    /// For `network: restricted`: the prepared namespace the container joins.
+    pub netns: Option<std::path::PathBuf>,
 }
 
 /// A Linux security module profile the host provides.
@@ -222,11 +224,20 @@ pub fn runtime_spec(input: &SpecInput<'_>) -> Result<Value, String> {
         json!({"type": "mount"}),
         json!({"type": "cgroup"}),
     ];
-    // An empty network namespace is the default and only enforceable network policy here.
-    if input.contract.spec.permissions.network == NetworkPolicy::None {
-        namespaces.push(json!({"type": "network"}));
-    } else {
-        return Err("only `network: none` is supported by this backend".into());
+    // `none`: a fresh, empty namespace. `restricted`: the namespace MVF prepared and enforces.
+    // `host`: no network namespace at all (the host's network, unisolated).
+    match (input.contract.spec.permissions.network.mode(), &input.netns) {
+        (NetworkPolicy::None, _) => namespaces.push(json!({"type": "network"})),
+        (NetworkPolicy::Restricted, Some(path)) => {
+            namespaces.push(json!({"type": "network", "path": path}))
+        }
+        (NetworkPolicy::Restricted, None) => {
+            return Err("`network: restricted` needs a prepared network namespace".into());
+        }
+        (NetworkPolicy::Host, _) => {}
+        (NetworkPolicy::Loopback, _) => {
+            return Err("`network: loopback` is not supported by this backend".into());
+        }
     }
     let mut linux = json!({
         "namespaces": namespaces,
@@ -282,6 +293,14 @@ pub fn runtime_spec(input: &SpecInput<'_>) -> Result<Value, String> {
         .clone()
         .filter(|w| w.starts_with('/'))
         .unwrap_or_else(|| "/".into());
+    // A joined network namespace belongs to the host's user namespace (so the node holds no
+    // capability over its own interface), and sysfs can only be mounted by the namespace owner: such
+    // a node gets an empty /sys instead of the host's sysfs.
+    let sys_mount = if input.netns.is_some() {
+        json!({"destination": "/sys", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec", "nodev", "mode=555", "size=1024k"]})
+    } else {
+        json!({"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid", "noexec", "nodev", "ro"]})
+    };
     let ro_bind = |dest: &str, src: &Path| {
         json!({"destination": dest, "type": "bind", "source": src,
                "options": ["rbind", "rw", "nosuid", "nodev", "noexec"]})
@@ -306,7 +325,7 @@ pub fn runtime_spec(input: &SpecInput<'_>) -> Result<Value, String> {
             {"destination": "/dev/pts", "type": "devpts", "source": "devpts", "options": ["nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"]},
             {"destination": "/dev/shm", "type": "tmpfs", "source": "shm", "options": ["nosuid", "noexec", "nodev", "mode=1777", "size=65536k"]},
             {"destination": "/dev/mqueue", "type": "mqueue", "source": "mqueue", "options": ["nosuid", "noexec", "nodev"]},
-            {"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid", "noexec", "nodev", "ro"]},
+            sys_mount,
             {"destination": "/sys/fs/cgroup", "type": "cgroup", "source": "cgroup", "options": ["nosuid", "noexec", "nodev", "relatime", "ro"]},
             {"destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=65536k"]},
             ro_bind(CONTAINER_ARENA, input.arena),

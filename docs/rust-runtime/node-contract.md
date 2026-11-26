@@ -56,6 +56,7 @@ spec:
 | `isolation.minimum` | `none`, `process`, `sandbox`, `vm` | `none` | Replaces the ambiguous `isolation.required: true` (rejected as an unknown field). |
 | `memory.domain` | `host`, `device` | `host` | `device` requires `target: gpu`. |
 | `memory.zeroCopy` | `required`, `preferred`, `disabled` | `preferred` | `required` fails negotiation on a copying backend. |
+| `permissions.network` | `none`, `loopback`, `host`, `restricted`, or `{ mode: restricted, inbound: [...], outbound: deny \| [...] }` | `none` | Enforced only by a sandbox backend; trusted backends share the host network (logged). `restricted` needs `isolation.minimum: sandbox`. See [stage 16](stages/16.md). |
 | `isolation.syscalls` | `denylist`, `allowlist` | `denylist` | Sandbox seccomp policy; `allowlist` is Docker's default profile minus the denylist. Needs `isolation.minimum: sandbox`. |
 | `isolation.lsm` | `optional`, `required` | `optional` | `required` fails negotiation unless the host applies an AppArmor/SELinux profile. Needs `minimum: sandbox`. |
 | `memory.arena` | `shared`, `private` | `shared` | `private`: the node's process maps an arena of its own (no other node's payload is visible to it); inputs are copied in. Needs a backend with private arenas (worker, OCI); incompatible with `zeroCopy: required`. |

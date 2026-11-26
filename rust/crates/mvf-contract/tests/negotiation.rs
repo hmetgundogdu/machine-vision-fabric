@@ -222,7 +222,7 @@ fn sandbox_permissions_are_default_deny_and_unavailable_grants_fail_closed() {
         "no grants requested"
     );
 
-    contract.spec.permissions.network = NetworkPolicy::Loopback;
+    contract.spec.permissions.network = NetworkPolicy::Loopback.into();
     contract.spec.permissions.devices = vec![
         DeviceGrant {
             path: "/dev/video0".into(),
@@ -310,5 +310,108 @@ fn contradictory_memory_and_parallelism_requests_are_invalid() {
     assert!(
         codes("  execution: { maxParallelism: 4 }\n  lifecycle: { replacement: stateless }\n")
             .is_empty()
+    );
+}
+
+fn network_contract(isolation: &str, network: &str) -> Result<NodeContract, ContractError> {
+    parse_contract(&format!(
+        "apiVersion: mvf.dev/v1alpha1\nkind: NodeContract\nmetadata: {{ id: test.net, version: 1.0.0 }}\nspec:\n  ports:\n    inputs: [ {{ name: frame, channel: data, type: frame }} ]\n  artifacts: [ {{ backend: oci, image: x, digest: \"sha256:{}\" }} ]\n  isolation: {{ minimum: {isolation} }}\n  permissions:\n    network:\n{network}",
+        "0".repeat(64)
+    ))
+}
+
+#[test]
+fn network_rules_are_validated() {
+    let codes = |isolation: &str, network: &str| match network_contract(isolation, network) {
+        Ok(_) => Vec::new(),
+        Err(ContractError::Invalid(issues)) => issues.iter().map(|i| i.code).collect(),
+        Err(e) => panic!("{e}"),
+    };
+    let ok = "      mode: restricted\n      inbound: [ { protocol: tcp, port: 2121, source: 192.168.1.10/32 }, { protocol: tcp, portRange: 50000-50100 } ]\n      outbound: [ { protocol: tcp, destination: 10.0.0.5, port: 502 } ]\n";
+    assert!(codes("sandbox", ok).is_empty());
+    assert_eq!(codes("process", ok), ["contract.isolation.needs-sandbox"]);
+    assert_eq!(
+        codes(
+            "sandbox",
+            "      mode: none\n      inbound: [ { protocol: tcp, port: 1 } ]\n"
+        ),
+        ["contract.permissions.network-rules-need-restricted"]
+    );
+    assert_eq!(
+        codes(
+            "sandbox",
+            "      mode: restricted\n      inbound: [ { protocol: tcp, port: 21, portRange: 1-2 } ]\n"
+        ),
+        ["contract.permissions.invalid-port"]
+    );
+    assert_eq!(
+        codes(
+            "sandbox",
+            "      mode: restricted\n      inbound: [ { protocol: tcp, portRange: 9-3 } ]\n"
+        ),
+        ["contract.permissions.invalid-port"]
+    );
+    assert_eq!(
+        codes(
+            "sandbox",
+            "      mode: restricted\n      inbound: [ { protocol: tcp, port: 21, source: 300.1.1.1/8 } ]\n"
+        ),
+        ["contract.permissions.invalid-cidr"]
+    );
+    assert_eq!(
+        codes(
+            "sandbox",
+            "      mode: restricted\n      outbound: [ { protocol: udp, destination: 10.0.0.0/33 } ]\n"
+        ),
+        ["contract.permissions.invalid-cidr"]
+    );
+    assert!(
+        network_contract("sandbox", "      mode: restricted\n      outbound: allow\n").is_err(),
+        "only `deny` or a list"
+    );
+}
+
+#[test]
+fn restricted_networking_needs_an_enforcing_backend_and_host_networking_is_reported() {
+    let rules = "      mode: restricted\n      inbound: [ { protocol: tcp, port: 2121 } ]\n";
+    let restricted = network_contract("sandbox", rules).expect("valid");
+    let mut grants = GrantSupport {
+        network: vec![NetworkPolicy::None, NetworkPolicy::Host],
+        devices: vec![],
+        cdi_devices: vec![],
+        lsm: vec![],
+    };
+    let err = negotiate(&restricted, &[sandbox(grants.clone())]).expect_err("no restricted grant");
+    assert!(
+        err.rejections
+            .iter()
+            .flat_map(|r| r.reasons.iter())
+            .any(|r| r.code == "negotiation.permission-unsupported")
+    );
+    grants.network.push(NetworkPolicy::Restricted);
+    assert!(negotiate(&restricted, &[sandbox(grants.clone())]).is_ok());
+    // A trusted backend shares the host network: restricted rules fail closed there.
+    let mut on_worker = restricted.clone();
+    on_worker.spec.artifacts = vec![Artifact::Worker {
+        runtime: WorkerRuntime::Python,
+        entry: "m.py".into(),
+        protocol: 1,
+        targets: None,
+    }];
+    let err = negotiate(&on_worker, &[worker()]).expect_err("not enforceable");
+    assert!(
+        err.rejections
+            .iter()
+            .flat_map(|r| r.reasons.iter())
+            .any(|r| r.code == "negotiation.network-not-enforceable")
+    );
+    // Host networking on a sandbox is allowed, and said out loud.
+    let host = network_contract("sandbox", "      host\n").expect("valid");
+    let placed = negotiate(&host, &[sandbox(grants)]).expect("placed");
+    assert!(
+        placed
+            .notes
+            .iter()
+            .any(|n| n.code == "placement.host-network")
     );
 }

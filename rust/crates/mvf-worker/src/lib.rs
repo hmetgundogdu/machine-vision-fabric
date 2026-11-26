@@ -218,6 +218,7 @@ impl ExecutionBackend for WorkerBackend {
             self.verify_inputs,
             private,
             recipe,
+            true,
         )
     }
 }
@@ -255,7 +256,7 @@ pub fn worker_node(
     launcher: Box<dyn Launcher>,
     verify_inputs: bool,
 ) -> Result<Box<dyn NodeHandle>, NodeError> {
-    build_worker_node(request, launcher, verify_inputs, false, None)
+    build_worker_node(request, launcher, verify_inputs, false, None, false)
 }
 
 fn build_worker_node(
@@ -264,7 +265,9 @@ fn build_worker_node(
     verify_inputs: bool,
     private: bool,
     recipe: Option<PoolRecipe>,
+    trusted_network: bool,
 ) -> Result<Box<dyn NodeHandle>, NodeError> {
+    let recipe_marker = trusted_network;
     Ok(Box::new(WorkerNode {
         node_id: request.node_id.to_string(),
         generation: request.generation,
@@ -288,6 +291,15 @@ fn build_worker_node(
         private: private
             || request.contract.spec.memory.arena == mvf_contract::ArenaSharing::Private,
         private_arena: None,
+        network_note: recipe_marker.then(|| {
+            format!(
+                "network: shares the host network (isolation `process`; `{:?}` is not enforced)",
+                request.contract.spec.permissions.network.mode()
+            )
+            .replace("None", "none")
+            .replace("Loopback", "loopback")
+            .replace("Host", "host")
+        }),
         recipe,
         pool: None,
     }))
@@ -399,6 +411,8 @@ struct WorkerNode {
     /// Warm-spare recipe (process launchers with `MVF_WARM_SPARES` > 0).
     recipe: Option<PoolRecipe>,
     pool: Option<std::sync::Arc<pool::WarmPool>>,
+    /// Logged once started: what the node's network actually is (trusted workers share the host's).
+    network_note: Option<String>,
 }
 
 impl WorkerNode {
@@ -721,6 +735,9 @@ impl NodeHandle for WorkerNode {
             self.capability,
             started.elapsed().as_millis()
         ));
+        if let Some(note) = self.network_note.clone() {
+            self.log(note);
+        }
         Ok(())
     }
 

@@ -351,6 +351,82 @@ fn check_targets(targets: Option<&[Target]>, path: &str, issues: &mut Issues) {
     }
 }
 
+fn validate_network(spec: &NodeSpec, issues: &mut Issues) {
+    use crate::{NetworkPermission, NetworkPolicy};
+    let network = &spec.permissions.network;
+    if let NetworkPermission::Rules(r) = network
+        && r.mode != NetworkPolicy::Restricted
+    {
+        issues.push(
+            "contract.permissions.network-rules-need-restricted",
+            "spec.permissions.network.mode".to_string(),
+            "inbound/outbound rules belong to `mode: restricted`",
+        );
+    }
+    if network.mode() == NetworkPolicy::Restricted
+        && spec.isolation.minimum < crate::IsolationLevel::Sandbox
+    {
+        issues.push(
+            "contract.isolation.needs-sandbox",
+            "spec.permissions.network".to_string(),
+            "restricted networking is enforced by a sandbox: set `isolation.minimum: sandbox`",
+        );
+    }
+    let ports = |path: String,
+                 port: Option<u16>,
+                 range: &Option<String>,
+                 required: bool,
+                 issues: &mut Issues| {
+        match (port, range) {
+            (Some(0), _) => issues.push(
+                "contract.permissions.invalid-port",
+                path,
+                "port 0 is not a port",
+            ),
+            (Some(_), Some(_)) => issues.push(
+                "contract.permissions.invalid-port",
+                path,
+                "give `port` or `portRange`, not both",
+            ),
+            (None, Some(r)) => {
+                if let Err(e) = crate::parse_port_range(r) {
+                    issues.push("contract.permissions.invalid-port", path, e);
+                }
+            }
+            (None, None) if required => issues.push(
+                "contract.permissions.invalid-port",
+                path,
+                "an inbound rule needs `port` or `portRange`",
+            ),
+            _ => {}
+        }
+    };
+    for (i, rule) in network.inbound().iter().enumerate() {
+        let path = format!("spec.permissions.network.inbound[{i}]");
+        ports(path.clone(), rule.port, &rule.port_range, true, issues);
+        if let Some(source) = &rule.source
+            && let Err(e) = crate::Cidr::parse(source)
+        {
+            issues.push(
+                "contract.permissions.invalid-cidr",
+                format!("{path}.source"),
+                e,
+            );
+        }
+    }
+    for (i, rule) in network.outbound().iter().enumerate() {
+        let path = format!("spec.permissions.network.outbound[{i}]");
+        ports(path.clone(), rule.port, &rule.port_range, false, issues);
+        if let Err(e) = crate::Cidr::parse(&rule.destination) {
+            issues.push(
+                "contract.permissions.invalid-cidr",
+                format!("{path}.destination"),
+                e,
+            );
+        }
+    }
+}
+
 fn validate_policy(spec: &NodeSpec, issues: &mut Issues) {
     let sandbox = spec.isolation.minimum >= crate::IsolationLevel::Sandbox;
     if !sandbox && spec.isolation.syscalls == crate::SyscallPolicy::Allowlist {
@@ -500,6 +576,7 @@ fn validate_policy(spec: &NodeSpec, issues: &mut Issues) {
             );
         }
     }
+    validate_network(spec, issues);
     for (i, name) in spec.permissions.cdi_devices.iter().enumerate() {
         let valid = name.split_once('=').is_some_and(|(kind, dev)| {
             kind.split_once('/')

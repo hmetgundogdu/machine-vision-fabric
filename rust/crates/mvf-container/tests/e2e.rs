@@ -9,6 +9,7 @@
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -786,4 +787,379 @@ fn a_contract_that_requires_a_security_module_fails_closed_without_one() {
     } else {
         assert!(placed.is_ok(), "host offers {:?}", caps.grants.lsm);
     }
+}
+
+// ------------------------------------------------------------------------------- #23 network
+
+const LAN_HOST: &str = "192.168.77.1";
+const ALLOWED: &str = "192.168.77.10";
+const DENIED: &str = "192.168.77.20";
+
+fn ip(args: &[&str]) -> bool {
+    Command::new("ip")
+        .args(args)
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// A simulated factory LAN: bridge `mvflan0` (192.168.77.1/24) on the test host, and two client
+/// namespaces, `ext1` (.10, the allowed camera/PLC) and `ext2` (.20, a stranger). Once per run.
+fn factory_lan() -> bool {
+    static LAN: OnceLock<bool> = OnceLock::new();
+    *LAN.get_or_init(|| {
+        let _ = ip(&["link", "del", "mvflan0"]);
+        let mut ok = ip(&["link", "add", "mvflan0", "type", "bridge"])
+            && ip(&["addr", "add", &format!("{LAN_HOST}/24"), "dev", "mvflan0"])
+            && ip(&["link", "set", "mvflan0", "up"]);
+        for (ns, addr) in [("ext1", ALLOWED), ("ext2", DENIED)] {
+            let _ = ip(&["netns", "del", ns]);
+            let (a, b) = (format!("{ns}a"), format!("{ns}b"));
+            ok = ok
+                && ip(&["netns", "add", ns])
+                && ip(&["link", "add", &a, "type", "veth", "peer", "name", &b])
+                && ip(&["link", "set", &a, "master", "mvflan0", "up"])
+                && ip(&["link", "set", &b, "netns", ns])
+                && ip(&["-n", ns, "addr", "add", &format!("{addr}/24"), "dev", &b])
+                && ip(&["-n", ns, "link", "set", &b, "up"])
+                && ip(&["-n", ns, "link", "set", "lo", "up"])
+                && ip(&["-n", ns, "route", "add", "default", "via", LAN_HOST]);
+        }
+        ok
+    })
+}
+
+macro_rules! need_net {
+    () => {{
+        let e = need_env!();
+        if !e
+            .backend
+            .capabilities()
+            .grants
+            .network
+            .contains(&mvf_contract::NetworkPolicy::Restricted)
+        {
+            assert!(
+                std::env::var_os("MVF_REQUIRE_OCI").is_none(),
+                "restricted networking unavailable (root, ip, nft)"
+            );
+            eprintln!("NOT RUN: restricted networking unavailable");
+            return;
+        }
+        assert!(factory_lan(), "factory LAN setup");
+        e
+    }};
+}
+
+/// Runs this test binary as a network client/server inside namespace `ns`.
+fn in_ns(ns: &str, op: &str) -> std::process::Child {
+    Command::new("ip")
+        .args(["netns", "exec", ns])
+        .arg(std::env::current_exe().expect("exe"))
+        .args([
+            "net_helper",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("MVF_NET_HELPER", op)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("helper")
+}
+
+fn helper_says(mut child: std::process::Child) -> String {
+    let mut out = String::new();
+    if let Some(s) = child.stdout.as_mut() {
+        let _ = std::io::Read::read_to_string(s, &mut out);
+    }
+    let _ = child.wait();
+    out.lines()
+        .filter_map(|l| l.split("NET:").nth(1))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Network helper (runs inside a client namespace): `tcp <ip> <port> <msg>`, `udp <ip> <port>
+/// <msg>`, `serve <port> <count>` (TCP, replies `pong`).
+#[test]
+#[ignore = "helper process for the network tests"]
+fn net_helper() {
+    use std::io::{BufRead, Write};
+    let Ok(op) = std::env::var("MVF_NET_HELPER") else {
+        return;
+    };
+    let parts: Vec<&str> = op.split_whitespace().collect();
+    let timeout = Duration::from_secs(3);
+    match parts.as_slice() {
+        ["tcp", ip, port, msg] => {
+            let addr: std::net::SocketAddr = format!("{ip}:{port}").parse().expect("addr");
+            for _ in 0..40 {
+                match std::net::TcpStream::connect_timeout(&addr, timeout) {
+                    Ok(mut s) => {
+                        let _ = s.set_read_timeout(Some(timeout));
+                        let _ = writeln!(s, "{msg}");
+                        let mut line = String::new();
+                        let _ = std::io::BufReader::new(&s).read_line(&mut line);
+                        println!("NET: reply {}", line.trim());
+                        return;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    Err(e) => {
+                        println!("NET: error {:?}", e.kind());
+                        return;
+                    }
+                }
+            }
+            println!("NET: error refused");
+        }
+        ["udp", ip, port, msg] => {
+            let s = std::net::UdpSocket::bind("0.0.0.0:0").expect("udp");
+            let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
+            let mut buf = [0u8; 256];
+            for _ in 0..12 {
+                let _ = s.send_to(msg.as_bytes(), format!("{ip}:{port}"));
+                if let Ok((n, _)) = s.recv_from(&mut buf) {
+                    println!("NET: reply {}", String::from_utf8_lossy(&buf[..n]).trim());
+                    return;
+                }
+            }
+            println!("NET: error timeout");
+        }
+        ["serve", port, count] => {
+            let l = std::net::TcpListener::bind(format!("0.0.0.0:{port}")).expect("listen");
+            println!("NET: listening");
+            for _ in 0..count.parse::<u32>().unwrap_or(1) {
+                if let Ok((mut s, peer)) = l.accept() {
+                    let _ = writeln!(s, "pong {}", peer.ip());
+                }
+            }
+        }
+        _ => panic!("unknown helper op {op}"),
+    }
+}
+
+fn python_net_contract(e: &Env, network: &str) -> NodeContract {
+    let mut c = sandbox_contract(&format!("  permissions:\n    network:\n{network}"));
+    c.spec.artifacts = vec![mvf_contract::Artifact::Oci {
+        image: "python".into(),
+        digest: e.python.manifest.digest.to_string(),
+        targets: None,
+    }];
+    c
+}
+
+fn python(
+    e: &Env,
+    contract: NodeContract,
+    script: &str,
+    binding: Option<mvf_contract::NetworkBinding>,
+) -> std::thread::JoinHandle<WorkloadOutput> {
+    let backend = e.backend.clone();
+    let record = e.python.clone();
+    let script = script.to_string();
+    std::thread::spawn(move || {
+        mvf_container::run_workload_with(
+            &backend,
+            &record,
+            &contract,
+            Some(vec!["python3".into(), "-c".into(), script]),
+            Duration::from_secs(60),
+            binding.as_ref(),
+        )
+        .expect("workload")
+    })
+}
+
+const SERVER: &str = "import socket\ns = socket.socket()\ns.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\ns.bind(('0.0.0.0', 2121))\ns.listen(4)\nu = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\nu.bind(('0.0.0.0', 2122))\nu.settimeout(20)\ndata, peer = u.recvfrom(256)\nu.sendto(b'udp-hello ' + peer[0].encode(), peer)\nprint('udp from', peer[0], flush=True)\nfor _ in range(2):\n    c, peer = s.accept()\n    c.recv(64)\n    c.sendall(('hello ' + peer[0] + '\\n').encode())\n    c.close()\n    print('accepted', peer[0], flush=True)\nprint('done')\n";
+
+#[test]
+fn restricted_inbound_admits_only_the_declared_source_and_return_traffic_flows() {
+    let e = need_net!();
+    let contract = python_net_contract(
+        e,
+        &format!(
+            "      mode: restricted\n      inbound:\n        - {{ protocol: tcp, port: 2121, source: {ALLOWED}/32 }}\n        - {{ protocol: udp, port: 2122, source: {ALLOWED}/32 }}\n      outbound: deny\n"
+        ),
+    );
+    let server = python(e, contract, SERVER, None);
+    // UDP first (the server waits for it), from the stranger and then from the allowed client.
+    let stranger_udp = helper_says(in_ns("ext2", &format!("udp {LAN_HOST} 2122 hi")));
+    let allowed_udp = helper_says(in_ns("ext1", &format!("udp {LAN_HOST} 2122 hi")));
+    let stranger = helper_says(in_ns("ext2", &format!("tcp {LAN_HOST} 2121 ping")));
+    let first = helper_says(in_ns("ext1", &format!("tcp {LAN_HOST} 2121 ping")));
+    let second = helper_says(in_ns("ext1", &format!("tcp {LAN_HOST} 2121 ping")));
+    let out = server.join().expect("server");
+    eprintln!("server: {out:?}");
+    assert_eq!(
+        allowed_udp,
+        format!("reply udp-hello {ALLOWED}"),
+        "UDP from the allowed source, reply delivered"
+    );
+    assert!(
+        stranger_udp.starts_with("error"),
+        "UDP from a stranger is dropped: {stranger_udp}"
+    );
+    assert_eq!(
+        first,
+        format!("reply hello {ALLOWED}"),
+        "the node sees the real client address; return traffic flows"
+    );
+    assert_eq!(second, format!("reply hello {ALLOWED}"));
+    assert!(
+        stranger.starts_with("error"),
+        "TCP from a stranger is not admitted: {stranger}"
+    );
+    assert!(out.stdout.contains("done"), "{out:?}");
+    assert_eq!(
+        out.stdout.matches(&format!("accepted {ALLOWED}")).count(),
+        2
+    );
+}
+
+#[test]
+fn restricted_outbound_reaches_only_the_declared_destination() {
+    let e = need_net!();
+    let plc = in_ns("ext1", "serve 5020 1");
+    let other = in_ns("ext2", "serve 5020 1");
+    std::thread::sleep(Duration::from_millis(500));
+    let script = format!(
+        "import socket\ndef probe(host, port):\n    try:\n        s = socket.create_connection((host, port), timeout=3)\n        return s.recv(64).decode().strip()\n    except Exception as e:\n        return 'blocked ' + type(e).__name__\nprint('plc', probe('{ALLOWED}', 5020), flush=True)\nprint('other', probe('{DENIED}', 5020), flush=True)\nprint('host', probe('{LAN_HOST}', 22), flush=True)\n"
+    );
+    let contract = python_net_contract(
+        e,
+        &format!(
+            "      mode: restricted\n      outbound:\n        - {{ protocol: tcp, destination: {ALLOWED}/32, port: 5020 }}\n"
+        ),
+    );
+    let out = python(e, contract, &script, None).join().expect("client");
+    for mut c in [plc, other] {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    assert!(
+        out.stdout.contains("plc pong"),
+        "the allowed PLC endpoint is reachable: {out:?}"
+    );
+    assert!(
+        out.stdout.contains("other blocked"),
+        "an undeclared destination is not: {out:?}"
+    );
+    assert!(
+        out.stdout.contains("host blocked"),
+        "the host itself is not: {out:?}"
+    );
+}
+
+#[test]
+fn a_host_port_is_published_once_and_every_resource_is_cleaned_up() {
+    let e = need_net!();
+    let net = |port: u16| {
+        format!("      mode: restricted\n      inbound: [ {{ protocol: tcp, port: {port} }} ]\n")
+    };
+    let holder = python(
+        e,
+        python_net_contract(e, &net(2131)),
+        "import time\ntime.sleep(4)\nprint('held')\n",
+        None,
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    let second = mvf_container::run_workload_with(
+        &e.backend,
+        &e.python,
+        &python_net_contract(e, &net(2131)),
+        Some(vec!["true".into()]),
+        Duration::from_secs(30),
+        None,
+    );
+    let err = second.expect_err("the port is taken");
+    assert!(
+        err.message
+            .contains("already published by another MVF node"),
+        "{err}"
+    );
+    // A port held by any other process on the host is detected too.
+    let squatter = std::net::TcpListener::bind("0.0.0.0:2132").expect("squat");
+    let third = mvf_container::run_workload_with(
+        &e.backend,
+        &e.python,
+        &python_net_contract(e, &net(2132)),
+        Some(vec!["true".into()]),
+        Duration::from_secs(30),
+        None,
+    );
+    assert!(
+        third
+            .expect_err("in use")
+            .message
+            .contains("in use by another process")
+    );
+    drop(squatter);
+    assert!(holder.join().expect("holder").stdout.contains("held"));
+    let netns = String::from_utf8_lossy(
+        &Command::new("ip")
+            .args(["netns", "list"])
+            .output()
+            .expect("ip")
+            .stdout,
+    )
+    .to_string();
+    let tables = String::from_utf8_lossy(
+        &Command::new("nft")
+            .args(["list", "tables"])
+            .output()
+            .expect("nft")
+            .stdout,
+    )
+    .to_string();
+    let links = String::from_utf8_lossy(
+        &Command::new("ip")
+            .args(["-o", "link"])
+            .output()
+            .expect("ip")
+            .stdout,
+    )
+    .to_string();
+    assert!(!netns.contains("mvf-"), "{netns}");
+    assert!(!tables.contains("mvf_"), "{tables}");
+    assert!(!links.contains("mvfh"), "{links}");
+}
+
+#[test]
+fn networks_left_by_a_dead_host_are_swept_before_the_next_allocation() {
+    let e = need_net!();
+    let support = mvf_container::network::NetworkSupport::detect().expect("support");
+    let state = e
+        .work
+        .join(format!("state-net-sweep-{}", std::process::id()));
+    std::fs::create_dir_all(state.join("net/leases")).expect("dir");
+    std::fs::create_dir_all(state.join("net/ports")).expect("dir");
+    // A lease of a process that no longer exists, with its namespace and interface still there.
+    std::fs::write(state.join("net/leases/9000"), "999999999 ghost").expect("lease");
+    std::fs::write(state.join("net/ports/tcp-2141"), "999999999 ghost").expect("port lease");
+    assert!(ip(&["netns", "add", "mvf-9000"]));
+    assert!(ip(&["link", "add", "mvfh2328", "type", "dummy"]));
+    let permission: mvf_contract::NetworkPermission =
+        mvf_contract::NetworkPolicy::Restricted.into();
+    let policy = mvf_container::network::Policy::resolve(&permission, None).expect("policy");
+    let net = mvf_container::network::NodeNetwork::setup(&support, &state, "fresh", policy)
+        .expect("setup");
+    let netns = String::from_utf8_lossy(
+        &Command::new("ip")
+            .args(["netns", "list"])
+            .output()
+            .expect("ip")
+            .stdout,
+    )
+    .to_string();
+    assert!(
+        !netns.contains("mvf-9000"),
+        "stale namespace swept: {netns}"
+    );
+    assert!(!state.join("net/leases/9000").exists() && !state.join("net/ports/tcp-2141").exists());
+    drop(net);
 }

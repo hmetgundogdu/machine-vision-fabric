@@ -100,6 +100,9 @@ pub struct NodeRef {
     /// Instances the pipelined executor runs side by side (≤ the contract's `maxParallelism`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// Deployment-time network binding (host address, published ports, advertised address).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<mvf_contract::NetworkBinding>,
     /// Instance configuration handed to the implementation (validated by it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Map<String, serde_json::Value>>,
@@ -345,6 +348,9 @@ pub struct GraphNode {
     pub bindings: ModuleBindings,
     /// Instances in the pipelined executor (1 = no replication).
     pub parallelism: u32,
+    /// Deployment-time network binding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<mvf_contract::NetworkBinding>,
 }
 
 impl GraphNode {
@@ -765,6 +771,9 @@ pub fn build_from_document(
                 ),
             );
         }
+        if let (Some((_, contract)), Some(binding)) = (&resolved, &node.network) {
+            validate_binding(contract, binding, &format!("{path}.network"), &mut issue);
+        }
         if let Some((origin, contract)) = resolved {
             let role_default = if primitive.is_none() && contract.spec.ports.inputs.is_empty() {
                 &spec.run.on_error.sources
@@ -788,6 +797,7 @@ pub fn build_from_document(
                 primitive,
                 bindings,
                 parallelism: node.parallelism.unwrap_or(1),
+                network: node.network.clone(),
             });
         }
     }
@@ -1076,6 +1086,65 @@ pub fn build_from_document(
         loop_spec,
         loop_edges,
     })
+}
+
+/// A deployment binding may only publish ports the contract declares as inbound listeners.
+fn validate_binding(
+    contract: &NodeContract,
+    binding: &mvf_contract::NetworkBinding,
+    path: &str,
+    issue: &mut impl FnMut(&'static str, String, String),
+) {
+    for (field, value) in [
+        ("hostIp", &binding.host_ip),
+        ("advertise", &binding.advertise),
+    ] {
+        if let Some(v) = value
+            && v.parse::<std::net::IpAddr>().is_err()
+        {
+            issue(
+                "graph.network.invalid-address",
+                format!("{path}.{field}"),
+                format!("`{v}` is not an IP address"),
+            );
+        }
+    }
+    let inbound = contract.spec.permissions.network.inbound();
+    for (i, b) in binding.ports.iter().enumerate() {
+        let declared = inbound.iter().any(|r| {
+            r.protocol == b.protocol
+                && (r.port == Some(b.port)
+                    || r.port_range
+                        .as_deref()
+                        .and_then(|t| mvf_contract::parse_port_range(t).ok())
+                        .is_some_and(|(lo, hi)| (lo..=hi).contains(&b.port)))
+        });
+        if !declared {
+            issue(
+                "graph.network.unbound-port",
+                format!("{path}.ports[{i}]"),
+                format!(
+                    "{} port {} is not an inbound listener of the node's contract",
+                    b.protocol.as_str(),
+                    b.port
+                ),
+            );
+        }
+        if b.host_port == 0 {
+            issue(
+                "graph.network.invalid-port",
+                format!("{path}.ports[{i}].hostPort"),
+                "host port 0 is not a port".into(),
+            );
+        }
+    }
+    if !binding.ports.is_empty() && inbound.is_empty() {
+        issue(
+            "graph.network.unbound-port",
+            format!("{path}.ports"),
+            "the node's contract declares no inbound listener".into(),
+        );
+    }
 }
 
 /// Configuration rules of `value`, `select` and `loop` (the .NET `pipeline.node.*` value codes).
