@@ -228,6 +228,24 @@ fn ensure_rootfs(
         None => record.manifest.digest.hex().to_string(),
     };
     let rootfs = dir.join(&key);
+    #[cfg(unix)]
+    if userns.is_some() {
+        // The remapped container root must be able to traverse every ancestor of the rootfs.
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = Some(dir.as_path());
+        while let Some(d) = p {
+            if let Ok(m) = std::fs::metadata(d)
+                && m.permissions().mode() & 0o001 == 0
+            {
+                return Err(fail(format!(
+                    "{} is not traversable by the user-namespace root (mode {:o}); put the OCI state directory elsewhere (MVF_OCI_STATE) or set MVF_OCI_USERNS=0",
+                    d.display(),
+                    m.permissions().mode() & 0o777
+                )));
+            }
+            p = d.parent();
+        }
+    }
     if rootfs.is_dir() {
         return Ok(rootfs);
     }

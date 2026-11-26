@@ -53,6 +53,11 @@ demo. Windows: `pwsh rust/scripts/gate-a.ps1`. Baseline against the .NET engine:
 
 ## Documents
 
+- [p0-report.md](p0-report.md) / [gate-b-report.json](gate-b-report.json) — P0 verdicts (Gate B)
+- [adr-0002-p0-runtime.md](adr-0002-p0-runtime.md) — OCI, GPU and the decision after Gate B
+- [p0-thresholds.md](p0-thresholds.md) — go/no-go thresholds fixed before the final runs
+- [competitive-landscape.md](competitive-landscape.md) — closest alternatives, pinned versions
+
 - [gate-a-report.md](gate-a-report.md) / [gate-a-report.json](gate-a-report.json) — Gate A result
 - [adr-0001-gate-a-foundation.md](adr-0001-gate-a-foundation.md) — contract, execution and memory boundaries
 - [node-contract.md](node-contract.md) — Universal Node Contract v1alpha1 specification

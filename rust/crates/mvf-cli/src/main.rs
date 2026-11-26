@@ -177,11 +177,26 @@ fn host_backends() -> BackendRegistry {
         registry = registry.with(mvf_compute::ComputeBackend::new(gpu));
     }
     let store_root = image::default_store();
+    // The rootfs cache must be traversable by the user-namespace root, which `/root` is not.
+    let state = std::env::var_os("MVF_OCI_STATE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let root = std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("Uid:"))
+                        .map(|l| l.split_whitespace().nth(2) == Some("0"))
+                })
+                .unwrap_or(false);
+            if root {
+                PathBuf::from("/var/lib/mvf/oci")
+            } else {
+                store_root.parent().unwrap_or(Path::new(".")).join("state")
+            }
+        });
     if let Ok(store) = mvf_oci::ContentStore::open(&store_root)
-        && let Some(oci) = mvf_container::OciBackend::detect(
-            store,
-            store_root.parent().unwrap_or(Path::new(".")).join("state"),
-        )
+        && let Some(oci) = mvf_container::OciBackend::detect(store, state)
     {
         registry = registry.with(oci);
     }

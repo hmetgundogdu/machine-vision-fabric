@@ -1,0 +1,44 @@
+{
+  "gate": "B",
+  "status": "NOT ACHIEVED",
+  "date": "2026-11-26",
+  "branch": "research/rust-runtime",
+  "thresholdsCommit": "15d832c",
+  "hosts": {
+    "macos": "macOS 26.6.2, Apple M4 (Metal, integrated GPU), rustc 1.95.0, wgpu 30.0.2, Python 3.9.6",
+    "linux": "Docker Desktop VM, Linux 6.10.14-linuxkit aarch64, debian:bookworm-slim, runc 1.1.5+ds1 (seccomp), cgroup v2, root, no Python, no Docker daemon inside",
+    "ci": ["ubuntu-latest", "windows-latest", "macos-latest"]
+  },
+  "gates": [
+    {"id": "P0.1", "name": "Pure Rust graph execution", "status": "FAIL",
+     "reason": "checkpoint/restore and stall/drop backpressure not ported; typed graph, control/data edges, cycles, bounded admission and no-CLR are met"},
+    {"id": "P0.2", "name": "Daemonless OCI execution", "status": "PASS", "scope": "Linux",
+     "blocked": [{"item": "Windows OCI", "reason": "needs WSL2 or HCS; not implemented"}, {"item": "GPU device grant to OCI", "reason": "no GPU in the Linux VM; CDI not implemented"}]},
+    {"id": "P0.3", "name": "CPU and GPU zero-copy data plane", "status": "PASS", "scope": "CPU on all CI hosts; GPU on Apple M4/Metal, same device, in-process",
+     "notSupported": ["cross-process GPU buffers", "cross-device zero copy"]},
+    {"id": "P0.4", "name": "Live node replacement", "status": "PASS", "scope": "in-process, Python worker and OCI candidates; stateless (stateful in-process)"},
+    {"id": "integrated", "name": "All four P0 capabilities on one host", "status": "BLOCKED",
+     "reason": "no available host has both Linux OCI execution and a GPU"}
+  ],
+  "runs": [
+    {"host": "macos", "command": "mvf-rs run examples/p0/pipeline-gpu.yaml --updates examples/p0/updates-local.yaml --verify --expect-promotions 2 --expect-rollbacks 1 --max-cutover-us 1000 --require-gpu",
+     "verify": "PASS", "cycles": 900, "fps": 78.0, "cycleMs": {"p50": 12.994, "p95": 13.386, "p99": 13.862, "max": 15.866},
+     "replacements": [{"kind": "promoted", "cycle": 56, "prepMs": 50.2, "cutoverUs": 4}, {"kind": "rejected", "cycle": 457, "code": "replace.readiness-failed"}, {"kind": "promoted", "cycle": 503, "prepMs": 31.4, "cutoverUs": 3}, {"kind": "rolled-back", "cycle": 503, "cutoverUs": 26}],
+     "dataPlane": {"copiesIn": 0, "copiesOut": 0, "inUse": 0},
+     "gpu": {"uploads": 900, "uploadBytes": 829440000, "downloads": 900, "downloadBytes": 230400, "deviceHandoffs": 1800, "dispatches": 2700, "allocatedAfter": 0, "peakAllocatedBytes": 4608256},
+     "process": {"wallS": 11.96, "userS": 6.26, "sysS": 0.44, "peakRssMB": 29.4}},
+    {"host": "linux", "command": "rust/scripts/p0-testhost.sh",
+     "verify": "PASS", "cycles": 2400, "fps": 50.1, "cycleMs": {"p50": 20.018, "p95": 21.75, "p99": 22.654, "max": 29.095},
+     "replacements": [{"kind": "promoted", "cycle": 87, "prepMs": 533.3, "cutoverUs": 67}, {"kind": "rejected", "cycle": 812, "code": "replace.readiness-failed"}, {"kind": "promoted", "cycle": 1532, "prepMs": 597.3, "cutoverUs": 88}, {"kind": "rolled-back", "cycle": 1532, "cutoverUs": 180}],
+     "dataPlane": {"copiesIn": 0, "copiesOut": 0, "inUse": 0},
+     "process": {"wallS": 47.92, "userS": 19.12, "sysS": 1.71, "peakRssMB": 23.0}}
+  ],
+  "thresholds": {"T1": "PASS", "T2": "PASS", "T3": "PASS", "T4": "PASS", "T5": "PASS", "T6": "PASS", "T7": "PASS", "T8": "PASS", "T9": "PASS", "T10": "PASS", "T11": "PASS", "T12": "PASS", "T13": "PASS"},
+  "gpuBenchmark": [
+    {"frame": "640x480", "cpuFps": 2720.6, "gpuFps": 1454.0},
+    {"frame": "1920x1080", "cpuFps": 411.0, "gpuFps": 782.6},
+    {"frame": "3840x2160", "cpuFps": 101.7, "gpuFps": 217.4}
+  ],
+  "notImplemented": ["shadow evaluation", "GPU overlap admission", "cross-process GPU buffers", "CDI injection", "Windows OCI", "WASM backend", "checkpoint/restore", "stall/drop backpressure", "graph primitives", "pipelined executor"],
+  "decision": "Keep the .NET engine as shipping implementation and reference; continue Rust runtime research; no main merge, release or retirement."
+}

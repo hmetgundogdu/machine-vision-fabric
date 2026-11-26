@@ -58,3 +58,16 @@ Updated by every slice; the stage reports carry the details.
 | Node failure policy (fail / restart) | `NodeResilienceTests`, `SourceFailureTests` | — | not yet |
 | Live config (`configure`) | `LiveConfigureTests` | — | not yet |
 | Egress / TUI / web studio | `Egress*Tests`, `GlyphsAsciiTests` | — | out of scope (adapters at the edges) |
+
+## New in Gate B (no .NET equivalent)
+
+| Behaviour | Rust | Status |
+|---|---|---|
+| OCI image store (import/verify/export, Docker interop) | `mvf-oci`, `mvf-rs image …` | new — stage 07 |
+| Daemonless OCI node execution, default-deny sandbox, `spec.permissions` | `mvf-container` | new — Linux only (stage 08) |
+| GPU compute nodes, device-resident payloads | `mvf-compute` | new — tested on Apple M4/Metal (stage 09) |
+| PLC simulator with duplicate-commit detection | `plc-sim` builtin | new — stage 10 |
+
+Still missing for P0.1 parity (follow-up issues): epoch checkpoint/restore, stall/drop backpressure,
+graph primitives (fork/if/switch/select/value/loop), joins and the pipelined executor, node restart
+policy and warm worker pool.
