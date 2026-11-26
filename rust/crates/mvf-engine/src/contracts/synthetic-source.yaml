@@ -1,0 +1,14 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.synthetic-source
+  version: 1.0.0
+  description: Deterministic synthetic camera (simulator-first). pixel[i] = seed + 7*sequence + i (mod 256).
+spec:
+  ports:
+    outputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - { backend: in-process, builtin: synthetic-source }
+  lifecycle:
+    activation: resident

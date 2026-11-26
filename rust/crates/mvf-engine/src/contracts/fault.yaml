@@ -1,0 +1,16 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.fault
+  version: 1.0.0
+  description: Test fixture. Pass-through that can fail, panic, stall or fail readiness on demand.
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - { backend: in-process, builtin: fault }
+  lifecycle:
+    replacement: stateless

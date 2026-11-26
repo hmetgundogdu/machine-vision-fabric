@@ -1,0 +1,17 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.brightness-gate
+  version: 1.0.0
+  description: Mean-byte classifier emitting a classification and a `bright` control signal.
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: class, channel: data, type: classification }
+      - { name: bright, channel: control, type: signal }
+  artifacts:
+    - { backend: in-process, builtin: brightness-gate }
+  lifecycle:
+    replacement: stateless

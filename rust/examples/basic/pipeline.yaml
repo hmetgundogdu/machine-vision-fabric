@@ -1,0 +1,22 @@
+# source -> processor -> sink, bounded to 5 cycles. Run:
+#   cargo run -p mvf-cli -- run examples/basic/pipeline.yaml
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: basic
+  description: Deterministic synthetic camera, inverted in-process, recorded by a sink.
+spec:
+  nodes:
+    - id: cam
+      builtin: synthetic-source
+      config: { width: 4, height: 2, frames: 100 }
+    - id: invert
+      builtin: invert
+    - id: sink
+      builtin: record
+  edges:
+    data:
+      - { from: cam.frame, to: invert.frame }
+      - { from: invert.frame, to: sink.frame }
+  run:
+    maxCycles: 5

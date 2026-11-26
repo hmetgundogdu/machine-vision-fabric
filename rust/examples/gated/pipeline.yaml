@@ -1,0 +1,22 @@
+# Control flow is a separate edge list: the brightness gate's `bright` signal enables the sink.
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: gated
+spec:
+  nodes:
+    - id: cam
+      builtin: synthetic-source
+      config: { width: 2, height: 2, frames: 40, seed: 0 }
+    - id: gate
+      builtin: brightness-gate
+      config: { threshold: 128 }
+    - id: sink
+      builtin: record
+  edges:
+    data:
+      - { from: cam.frame, to: gate.frame }
+      - { from: cam.frame, to: sink.frame }
+      - { from: gate.class, to: sink.class }
+    control:
+      - { from: gate.bright, to: sink.enable }

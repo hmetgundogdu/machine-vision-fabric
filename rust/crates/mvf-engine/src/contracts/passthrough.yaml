@@ -1,0 +1,18 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.passthrough
+  version: 1.0.0
+  description: Forwards its input frame unchanged (shares the payload, no byte copy).
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - { backend: in-process, builtin: passthrough }
+  memory:
+    zeroCopy: required
+  lifecycle:
+    replacement: stateless

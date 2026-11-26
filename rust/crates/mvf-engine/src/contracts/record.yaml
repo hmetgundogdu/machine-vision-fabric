@@ -1,0 +1,15 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.record
+  version: 1.0.0
+  description: Records what arrives (frames are fingerprinted). Gated by the optional `enable` control input.
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame, required: false }
+      - { name: class, channel: data, type: classification, required: false }
+      - { name: json, channel: data, type: json, required: false }
+      - { name: enable, channel: control, type: signal, required: false }
+  artifacts:
+    - { backend: in-process, builtin: record }

@@ -31,10 +31,11 @@ Updated by every slice; the stage reports carry the details.
 
 | .NET code | Rust | Status |
 |---|---|---|
-| `pipeline.node.duplicate-id`, `missing-id` | — | not yet (#12) |
-| `pipeline.edge.missing-source-node/port`, `missing-target-node/port` | — | not yet (#12) |
-| `pipeline.edge.data-type-mismatch` | — | not yet (#12) |
-| `pipeline.edge.source-channel-mismatch`, `target-channel-mismatch` | — | not yet (#12) |
+| `pipeline.node.duplicate-id`, `missing-id` | `graph.node.duplicate-id`, `graph.node.invalid-id` | ported |
+| `pipeline.edge.missing-source-node/port`, `missing-target-node/port` | same names under `graph.edge.*` | ported |
+| `pipeline.edge.data-type-mismatch` | `graph.edge.type-mismatch` | ported |
+| `pipeline.edge.source-channel-mismatch`, `target-channel-mismatch` | `graph.edge.channel-mismatch` (edge lists are per channel) | ported |
+| — | `graph.cycle`, `graph.input.multiple-edges`, `graph.input.unconnected-required`, `graph.edge.duplicate`, `graph.node.no-source` | new (stricter) |
 | `pipeline.port.duplicate-name`, `missing-name` | `contract.port.duplicate-name`, `contract.port.invalid-name` | ported (at contract level) |
 | `pipeline.node.invalid-activation-mode` | closed enum → `yaml.schema` | ported |
 | `pipeline.node.invalid-backpressure`, `invalid-parallelism` | — | not yet |
@@ -45,7 +46,7 @@ Updated by every slice; the stage reports carry the details.
 
 | Behaviour | .NET tests | Rust | Status |
 |---|---|---|---|
-| Topological serial execution | `GraphTopologySorterTests`, `PipelineGraphExecutorTests` | — | not yet (#12) |
+| Topological serial execution | `GraphTopologySorterTests`, `PipelineGraphExecutorTests` | `mvf-engine` executor | partial — DAG, sources-first, control gating; no primitives |
 | Fork / if / switch / select / value / loop primitives | `*PrimitiveNodeRunnerTests` | — | not yet |
 | Pipelined executor, joins, per-node parallelism | `PipelinedGraphExecutorTests` | — | not yet (out of Gate A) |
 | Shared-memory arena, refcounts, fan-out | `SharedMemoryArenaTests`, `PipelineGraphExecutorDataPlaneTests` | — | not yet (#14) |
