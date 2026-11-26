@@ -1,0 +1,14 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.folder-source
+  version: 1.0.0
+  description: Replays the files of a folder (sorted, loaded once) as raw byte frames; optional loop. Counterpart of the .NET mvf.folder-source.
+spec:
+  ports:
+    outputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - { backend: in-process, builtin: folder-source }
+  lifecycle:
+    activation: resident

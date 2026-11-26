@@ -36,6 +36,12 @@ struct PipelineArgs {
     /// directory above the pipeline, plus `MVF_MODULE_PATH`.
     #[arg(long = "modules")]
     modules: Vec<PathBuf>,
+    /// Shared-memory arena slot size in bytes, header included (default 4 MiB).
+    #[arg(long)]
+    arena_slot_size: Option<usize>,
+    /// Number of shared-memory arena slots (default 16).
+    #[arg(long)]
+    arena_slots: Option<usize>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -63,6 +69,16 @@ enum Command {
         /// Live-update plan (`kind: UpdatePlan`) applied while the pipeline runs.
         #[arg(long)]
         updates: Option<PathBuf>,
+        /// Verify the run: normal end, every cycle delivered exactly once and in order to each
+        /// recording sink (frame sequence == cycle), no leaked arena slot. Exit code 3 on failure.
+        #[arg(long)]
+        verify: bool,
+        /// With --verify: required number of promoted replacements.
+        #[arg(long)]
+        expect_promotions: Option<usize>,
+        /// With --verify: required number of rollbacks.
+        #[arg(long)]
+        expect_rollbacks: Option<usize>,
     },
     /// List the builtins and backends this host provides.
     Host,
@@ -78,7 +94,19 @@ fn main() -> ExitCode {
             max_cycles,
             json,
             updates,
-        } => run(&args, max_cycles, json, updates.as_deref()),
+            verify,
+            expect_promotions,
+            expect_rollbacks,
+        } => run(
+            &args,
+            max_cycles,
+            json,
+            updates.as_deref(),
+            verify.then_some(Expectations {
+                promotions: expect_promotions,
+                rollbacks: expect_rollbacks,
+            }),
+        ),
         Command::Host => host(),
     }
 }
@@ -141,6 +169,29 @@ fn resolver(args: &PipelineArgs) -> HostResolver {
     resolver
 }
 
+/// Host services for a pipeline: package directory and arena sizing from the arguments.
+fn services_for(args: &PipelineArgs, base: HostServices) -> HostServices {
+    let mut services = base;
+    services.package_dir = args
+        .pipeline
+        .parent()
+        .map(|p| {
+            if p.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                p
+            }
+        })
+        .and_then(|p| std::fs::canonicalize(p).ok());
+    if let Some(size) = args.arena_slot_size {
+        services.arena_config.slot_size = size;
+    }
+    if let Some(n) = args.arena_slots {
+        services.arena_config.slot_count = n;
+    }
+    services
+}
+
 fn load_engine(args: &PipelineArgs, services: &HostServices) -> Result<Engine, ExitCode> {
     let text = std::fs::read_to_string(&args.pipeline)
         .map_err(|e| fail(2, format!("{}: {e}", args.pipeline.display())))?;
@@ -149,7 +200,7 @@ fn load_engine(args: &PipelineArgs, services: &HostServices) -> Result<Engine, E
 }
 
 fn validate(args: &PipelineArgs) -> ExitCode {
-    let engine = match load_engine(args, &HostServices::default()) {
+    let engine = match load_engine(args, &services_for(args, HostServices::default())) {
         Ok(e) => e,
         Err(code) => return code,
     };
@@ -207,11 +258,13 @@ fn print_report(report: &RunReport, json: bool) {
         return;
     }
     eprintln!(
-        "run `{}` ended: {} after {} cycles in {:.1} ms",
+        "run `{}` ended: {} after {} cycles in {:.1} ms (startup {:.1} ms, cycles {:.1} ms)",
         report.pipeline,
         serde_json::to_string(&report.end).unwrap_or_default(),
         report.cycles_completed,
-        report.wall_time_ms
+        report.wall_time_ms,
+        report.startup_ms,
+        report.cycles_ms
     );
     for n in &report.nodes {
         eprintln!(
@@ -279,16 +332,105 @@ fn load_plan(path: &Path, args: &PipelineArgs) -> Result<Vec<(u64, PlannedComman
         .map_err(|e| fail(2, format!("{}: {e}", path.display())))
 }
 
+/// What `--verify` requires besides the always-on checks.
+#[derive(Debug, Clone, Copy)]
+struct Expectations {
+    promotions: Option<usize>,
+    rollbacks: Option<usize>,
+}
+
+fn verify(report: &RunReport, services: &HostServices, expect: Expectations, json: bool) -> bool {
+    use mvf_engine::{RecordedValue, ReplacementEventKind};
+    let mut checks: Vec<(&str, bool, String)> = Vec::new();
+    let normal = matches!(
+        report.end,
+        EndReason::CycleLimit { .. } | EndReason::SourceExhausted { .. }
+    );
+    checks.push((
+        "normal-end",
+        normal,
+        serde_json::to_string(&report.end).unwrap_or_default(),
+    ));
+
+    let mut per_sink: std::collections::BTreeMap<String, Vec<(u64, u64)>> = Default::default();
+    for r in services.recorder.records() {
+        if let RecordedValue::Frame { sequence, .. } = r.value {
+            per_sink
+                .entry(format!("{}.{}", r.node, r.port))
+                .or_default()
+                .push((r.cycle, sequence));
+        }
+    }
+    let expected: Vec<(u64, u64)> = (1..=report.cycles_completed).map(|c| (c, c)).collect();
+    checks.push((
+        "recorded-sink",
+        !per_sink.is_empty(),
+        format!("{} recording sink port(s)", per_sink.len()),
+    ));
+    for (sink, seen) in &per_sink {
+        checks.push((
+            "every-cycle-exactly-once-in-order",
+            *seen == expected,
+            format!(
+                "{sink}: {} records for {} cycles",
+                seen.len(),
+                report.cycles_completed
+            ),
+        ));
+    }
+    let in_use = report.data_plane.arena.map(|a| a.in_use).unwrap_or(0);
+    checks.push((
+        "no-leaked-arena-slot",
+        in_use == 0,
+        format!("inUse={in_use}"),
+    ));
+    let count =
+        |k: ReplacementEventKind| report.replacements.iter().filter(|e| e.kind == k).count();
+    if let Some(n) = expect.promotions {
+        let got = count(ReplacementEventKind::Promoted);
+        checks.push(("promotions", got == n, format!("expected {n}, got {got}")));
+    }
+    if let Some(n) = expect.rollbacks {
+        let got = count(ReplacementEventKind::RolledBack);
+        checks.push(("rollbacks", got == n, format!("expected {n}, got {got}")));
+    }
+    let pass = checks.iter().all(|(_, ok, _)| *ok);
+    if json {
+        let list: Vec<_> = checks
+            .iter()
+            .map(|(name, ok, detail)| serde_json::json!({"check": name, "pass": ok, "detail": detail}))
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({ "verify": { "pass": pass, "checks": list } })
+        );
+    } else {
+        for (name, ok, detail) in &checks {
+            eprintln!(
+                "  verify {:<36} {} {detail}",
+                name,
+                if *ok { "PASS" } else { "FAIL" }
+            );
+        }
+        eprintln!("VERIFY {}", if pass { "PASS" } else { "FAIL" });
+    }
+    pass
+}
+
 fn run(
     args: &PipelineArgs,
     max_cycles: Option<u64>,
     json: bool,
     updates: Option<&Path>,
+    expect: Option<Expectations>,
 ) -> ExitCode {
-    let services = HostServices {
-        logs: Logs::streaming(move |e| print_log(e, json)),
-        ..HostServices::with_recorder(Recorder::streaming(move |r| print_record(r, json)))
-    };
+    let services = services_for(
+        args,
+        HostServices {
+            logs: Logs::streaming(move |e| print_log(e, json)),
+            ..HostServices::with_recorder(Recorder::streaming(move |r| print_record(r, json)))
+        },
+    );
     let mut engine = match load_engine(args, &services) {
         Ok(e) => e,
         Err(code) => return code,
@@ -307,6 +449,11 @@ fn run(
     };
     let report = engine.run(&RunOptions { max_cycles, cancel }, &mut driver);
     print_report(&report, json);
+    if let Some(expect) = expect
+        && !verify(&report, &services, expect, json)
+    {
+        return ExitCode::from(3);
+    }
     match report.end {
         EndReason::NodeFailed { .. } | EndReason::StartFailed { .. } => ExitCode::from(1),
         _ => ExitCode::SUCCESS,

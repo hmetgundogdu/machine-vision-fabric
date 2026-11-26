@@ -1,0 +1,13 @@
+# Rust-runtime twin of pipeline-numpy.json: same frames, same Python module, no sink.
+# Run by rust/scripts/bench-baseline.sh.
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: bench-numpy
+spec:
+  nodes:
+    - { id: cam, builtin: folder-source, config: { sourceFolder: assets/frames, loop: true, arena: true } }
+    - { id: bench, module: py.bench-numpy }
+  edges:
+    data:
+      - { from: cam.frame, to: bench.frame }

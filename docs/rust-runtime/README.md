@@ -38,8 +38,20 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
+## Gate A in one command
+
+```bash
+rust/scripts/gate-a.sh
+```
+
+Runs fmt, clippy, the C++ SDK interop fixture build, all tests and the self-verifying live-update
+demo. Windows: `pwsh rust/scripts/gate-a.ps1`. Baseline against the .NET engine:
+`rust/scripts/bench-baseline.sh`.
+
 ## Documents
 
+- [gate-a-report.md](gate-a-report.md) / [gate-a-report.json](gate-a-report.json) — Gate A result
+- [adr-0001-gate-a-foundation.md](adr-0001-gate-a-foundation.md) — contract, execution and memory boundaries
 - [node-contract.md](node-contract.md) — Universal Node Contract v1alpha1 specification
 - [parity-matrix.md](parity-matrix.md) — existing .NET behaviour vs the Rust runtime
 - [stages/](stages/) — one report per slice with commands, results and PASS/FAIL/BLOCKED

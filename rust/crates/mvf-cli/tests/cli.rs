@@ -114,3 +114,81 @@ fn node_failure_exits_with_code_1() {
     assert_eq!(last["report"]["end"]["cycle"], 2);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn gate_a_demo_verifies_ordered_output_replacement_and_rollback() {
+    let out = mvf()
+        .args([
+            "run",
+            "--json",
+            "--verify",
+            "--expect-promotions",
+            "2",
+            "--expect-rollbacks",
+            "1",
+        ])
+        .arg(examples().join("live-update/pipeline.yaml"))
+        .arg("--updates")
+        .arg(examples().join("live-update/updates.yaml"))
+        .output()
+        .expect("spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "exit {:?}\n{}\n{}",
+        out.status.code(),
+        stdout.lines().last().unwrap_or_default(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json line"))
+        .collect();
+    let verify = &lines.last().expect("verify")["verify"];
+    assert_eq!(verify["pass"], true, "{verify}");
+    let report = &lines[lines.len() - 2]["report"];
+    let kinds: Vec<&str> = report["replacements"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "requested",
+            "promoted",
+            "committed",
+            "requested",
+            "promoted",
+            "rolled-back"
+        ]
+    );
+    let rolled = &report["replacements"][5];
+    assert_eq!(rolled["cycle"], 70);
+    assert_eq!(
+        rolled["toGeneration"], 2,
+        "rolled back to the Python worker generation"
+    );
+    assert_eq!(report["dataPlane"]["arena"]["copiesIn"], 0);
+    assert_eq!(report["dataPlane"]["arena"]["copiesOut"], 0);
+    assert_eq!(report["cyclesCompleted"], 120);
+}
+
+#[test]
+fn verify_fails_with_exit_code_3_when_expectations_are_not_met() {
+    let out = mvf()
+        .args(["run", "--json", "--verify", "--expect-rollbacks", "1"])
+        .arg(examples().join("basic/pipeline.yaml"))
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(3));
+    let last: serde_json::Value = serde_json::from_str(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .expect("verify"),
+    )
+    .expect("json");
+    assert_eq!(last["verify"]["pass"], false);
+}

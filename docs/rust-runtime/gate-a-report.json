@@ -1,0 +1,64 @@
+{
+  "gate": "A",
+  "status": "PASS",
+  "date": "2026-11-26",
+  "branch": "research/rust-runtime",
+  "environment": {
+    "local": "macOS 26.6.2 (25G83), Apple M4, arm64",
+    "rustc": "1.95.0 (59807616e 2026-04-14)",
+    "python": "3.9.6",
+    "numpy": "1.26.4",
+    "dotnet": "10.0.101",
+    "ci": ["ubuntu-latest", "windows-latest", "macos-latest"]
+  },
+  "stages": [
+    {"stage": "01", "issue": 11, "commit": "8bd2c71", "status": "PASS", "ci": "PASS (linux, windows, macos)"},
+    {"stage": "02", "issue": 12, "commit": "692f464", "status": "PASS", "ci": "PASS (linux, windows, macos)"},
+    {"stage": "03", "issue": 13, "commit": "37f91e4", "status": "PASS", "ci": "PASS (linux, windows, macos)"},
+    {"stage": "04", "issue": 14, "commit": "b68f43b", "status": "PASS", "ci": "PASS (linux, windows, macos)"},
+    {"stage": "05", "issue": 15, "commit": "7a5e07c", "status": "PASS", "ci": "see issue comment"},
+    {"stage": "06", "issue": 16, "commit": "this commit", "status": "PASS", "ci": "see issue comment"}
+  ],
+  "checks": [
+    {"id": "fmt", "command": "cargo fmt --all -- --check", "status": "PASS"},
+    {"id": "clippy", "command": "cargo clippy --workspace --all-targets --locked -- -D warnings", "status": "PASS"},
+    {"id": "tests", "command": "cargo test --workspace --locked", "status": "PASS", "passed": 110, "failed": 0},
+    {"id": "demo", "command": "cargo run --release -p mvf-cli -- run examples/live-update/pipeline.yaml --updates examples/live-update/updates.yaml --verify --expect-promotions 2 --expect-rollbacks 1", "status": "PASS",
+     "observed": {"cycles": 120, "everyCycleExactlyOnce": true, "promotions": 2, "rollbacks": 1, "copiesIn": 0, "copiesOut": 0, "arenaInUseAfterRun": 0}},
+    {"id": "dotnet-unchanged", "command": "git diff main -- src tests Mvf.slnx", "status": "PASS", "note": "no .NET source changed; only node.yaml contracts and Rust bench pipelines were added next to existing modules/packages"}
+  ],
+  "acceptance": [
+    {"criterion": "One documented command runs source -> processor -> sink, triggers live replacement and verifies ordered output plus rollback", "status": "PASS"},
+    {"criterion": "All prior required tests pass; existing .NET files and deployment behaviour intact", "status": "PASS"},
+    {"criterion": "Build/test commands, exact commits, environment, limitations and actual baseline results documented", "status": "PASS"},
+    {"criterion": "Machine-readable/text gate report with PASS/FAIL/BLOCKED and reasons", "status": "PASS"}
+  ],
+  "baseline": {
+    "procedure": "rust/scripts/bench-baseline.sh, CYCLES=2000, serial executors, same frames/modules/topology",
+    "caveat": "publish paths differ by design (.NET: stream -> MemoryStream -> ToArray -> arena copy; Rust: cached files, one counted arena copy); single runs; no latency percentiles",
+    "rows": [
+      {"engine": ".NET", "mode": "touch", "frameMB": 0.06, "engineSeconds": 0.26, "fps": 7692, "nodeMs": 0.04, "processSeconds": 0.42, "rssMB": 72},
+      {"engine": "Rust", "mode": "touch", "frameMB": 0.06, "engineSeconds": 0.09, "fps": 23027, "nodeMs": 0.019, "processSeconds": 0.09, "rssMB": 11},
+      {"engine": ".NET", "mode": "numpy", "frameMB": 0.06, "engineSeconds": 0.55, "fps": 3636, "nodeMs": 0.17, "processSeconds": 0.68, "rssMB": 74},
+      {"engine": "Rust", "mode": "numpy", "frameMB": 0.06, "engineSeconds": 0.31, "fps": 6370, "nodeMs": 0.135, "processSeconds": 0.31, "rssMB": 29},
+      {"engine": ".NET", "mode": "touch", "frameMB": 1.0, "engineSeconds": 0.83, "fps": 2410, "nodeMs": 0.04, "processSeconds": 0.96, "rssMB": 83},
+      {"engine": "Rust", "mode": "touch", "frameMB": 1.0, "engineSeconds": 0.10, "fps": 19619, "nodeMs": 0.017, "processSeconds": 0.10, "rssMB": 14},
+      {"engine": ".NET", "mode": "numpy", "frameMB": 1.0, "engineSeconds": 1.56, "fps": 1282, "nodeMs": 0.46, "processSeconds": 1.70, "rssMB": 86},
+      {"engine": "Rust", "mode": "numpy", "frameMB": 1.0, "engineSeconds": 1.01, "fps": 1981, "nodeMs": 0.467, "processSeconds": 1.01, "rssMB": 30},
+      {"engine": ".NET", "mode": "touch", "frameMB": 6.0, "engineSeconds": 4.60, "fps": 435, "nodeMs": 0.07, "processSeconds": 4.74, "rssMB": 159},
+      {"engine": "Rust", "mode": "touch", "frameMB": 6.0, "engineSeconds": 0.28, "fps": 7267, "nodeMs": 0.016, "processSeconds": 0.28, "rssMB": 44},
+      {"engine": ".NET", "mode": "numpy", "frameMB": 6.0, "engineSeconds": 7.40, "fps": 270, "nodeMs": 2.08, "processSeconds": 7.53, "rssMB": 144},
+      {"engine": "Rust", "mode": "numpy", "frameMB": 6.0, "engineSeconds": 4.49, "fps": 446, "nodeMs": 2.093, "processSeconds": 4.49, "rssMB": 44}
+    ],
+    "notMeasured": ["p95/p99 latency", "jitter", "CPU utilisation", "binary size", ".NET pipelined executor", "long-running stability", "variance across runs"]
+  },
+  "decision": "Proceed to Gate B (P0) on the research branch only. No main merge, release or retirement of the .NET host.",
+  "unresolved": [
+    "graph primitive/join/pipelined/checkpoint parity",
+    "worker restart policy and warm pool",
+    "orphan prevention when the host is SIGKILLed",
+    "arena confidentiality between workers; single slot size",
+    "source replacement; stateful replacement for workers; shadow evaluation",
+    "contract v1alpha1 not frozen"
+  ]
+}

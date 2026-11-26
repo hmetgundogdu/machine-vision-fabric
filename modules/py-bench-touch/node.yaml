@@ -1,0 +1,17 @@
+# Universal Node Contract for the Rust runtime (issue #10). The .NET engine keeps using module.json.
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: py.bench-touch
+  version: 1.0.0
+  description: Data-plane benchmark module (same module the .NET bench rig uses).
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: class, channel: data, type: classification }
+  artifacts:
+    - { backend: worker, runtime: python, entry: classifier.py, protocol: 1 }
+  isolation:
+    minimum: process

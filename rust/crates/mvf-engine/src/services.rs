@@ -88,6 +88,8 @@ pub struct HostServices {
     pub arena_config: ArenaConfig,
     /// The arena, created on first use.
     pub arena_cell: Arc<OnceLock<Arc<Arena>>>,
+    /// Pipeline package directory; builtins resolve relative config paths against it.
+    pub package_dir: Option<std::path::PathBuf>,
 }
 
 impl HostServices {

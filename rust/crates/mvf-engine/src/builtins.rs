@@ -156,6 +156,11 @@ const BUILTINS: &[Builtin] = &[
         contract: include_str!("contracts/counter.yaml"),
         factory: Counter::create,
     },
+    Builtin {
+        name: "folder-source",
+        contract: include_str!("contracts/folder-source.yaml"),
+        factory: FolderSource::create,
+    },
 ];
 
 /// Names of every builtin this host provides.
@@ -620,6 +625,112 @@ impl NodeHandle for Fault {
         Ok(Execution::Produced(
             Outputs::new().with("frame", Value::Frame(frame.clone())),
         ))
+    }
+}
+
+// ---------------------------------------------------------------- folder-source
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct FolderSourceConfig {
+    /// Folder of frame files, relative to the pipeline package directory.
+    source_folder: String,
+    /// Start over after the last file instead of reporting exhaustion.
+    #[serde(default)]
+    r#loop: bool,
+    /// Publish each frame into the shared-memory arena (one counted copy, like the .NET arena
+    /// publish). Default: share the cached heap buffer.
+    #[serde(default)]
+    arena: bool,
+}
+
+/// Replays files as raw byte frames (`blob`, u8). Files are read once at activation, so the run
+/// measures the data plane, not the disk.
+#[derive(Debug)]
+pub struct FolderSource {
+    frames: Vec<std::sync::Arc<[u8]>>,
+    looping: bool,
+    arena: bool,
+    next: u64,
+    services: HostServices,
+}
+
+impl FolderSource {
+    fn create(
+        config: &serde_json::Map<String, serde_json::Value>,
+        services: &HostServices,
+    ) -> Result<Box<dyn NodeHandle>, NodeError> {
+        let c: FolderSourceConfig = parse_config(config)?;
+        let folder = services
+            .package_dir
+            .as_deref()
+            .unwrap_or(std::path::Path::new("."))
+            .join(&c.source_folder);
+        let mut files: Vec<_> = std::fs::read_dir(&folder)
+            .map_err(|e| {
+                NodeError::new(
+                    NodeErrorKind::InvalidConfig,
+                    format!("{}: {e}", folder.display()),
+                )
+            })?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+        let frames = files
+            .iter()
+            .map(|f| std::fs::read(f).map(std::sync::Arc::<[u8]>::from))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| NodeError::new(NodeErrorKind::InvalidConfig, e.to_string()))?;
+        if frames.is_empty() {
+            return Err(NodeError::new(
+                NodeErrorKind::InvalidConfig,
+                format!("{} contains no files", folder.display()),
+            ));
+        }
+        Ok(Box::new(Self {
+            frames,
+            looping: c.r#loop,
+            arena: c.arena,
+            next: 0,
+            services: services.clone(),
+        }))
+    }
+}
+
+impl NodeHandle for FolderSource {
+    fn execute(&mut self, ctx: &ExecContext<'_>, _: &Inputs) -> Result<Execution, NodeError> {
+        let count = self.frames.len() as u64;
+        if !self.looping && self.next >= count {
+            return Ok(Execution::Exhausted);
+        }
+        let bytes = &self.frames[(self.next % count) as usize];
+        self.next += 1;
+        let descriptor = Descriptor::blob(bytes.len() as u64);
+        let payload = if self.arena {
+            let arena = self
+                .services
+                .arena()
+                .map_err(|e| NodeError::new(NodeErrorKind::Resource, e.to_string()))?;
+            Payload::arena(
+                arena
+                    .publish_copy(&descriptor, bytes)
+                    .map_err(|e| NodeError::new(NodeErrorKind::Resource, e.to_string()))?,
+            )
+        } else {
+            Payload::heap(descriptor, bytes.clone()).map_err(NodeError::failed)?
+        };
+        Ok(Execution::Produced(Outputs::new().with(
+            "frame",
+            Value::Frame(Frame {
+                meta: FrameMeta {
+                    source: ctx.node_id.to_string(),
+                    sequence: self.next,
+                },
+                payload,
+            }),
+        )))
     }
 }
 

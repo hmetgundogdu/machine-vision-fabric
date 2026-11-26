@@ -135,6 +135,10 @@ pub struct RunReport {
     pub cycles_completed: u64,
     /// Wall time of the run (start → stop), milliseconds.
     pub wall_time_ms: f64,
+    /// Time spent starting nodes (activation + readiness), milliseconds.
+    pub startup_ms: f64,
+    /// Time spent running cycles (excluding start and shutdown), milliseconds.
+    pub cycles_ms: f64,
     /// Per-node statistics.
     pub nodes: Vec<NodeStats>,
     /// Payload deliveries and shared-memory copy accounting.
@@ -200,6 +204,8 @@ pub struct Engine {
     pub(crate) control_tx: Sender<ControlCommand>,
     pub(crate) control_rx: Receiver<ControlCommand>,
     pub(crate) replacement_log: Vec<ReplacementEvent>,
+    /// (startup ms, cycle loop ms) of the last run.
+    timings: (f64, f64),
 }
 
 impl std::fmt::Debug for Engine {
@@ -289,6 +295,7 @@ impl Engine {
             control_tx,
             control_rx,
             replacement_log: Vec::new(),
+            timings: (0.0, 0.0),
         })
     }
 
@@ -350,13 +357,18 @@ impl Engine {
     /// Starts, runs cycles until an end condition, and shuts down.
     pub fn run(&mut self, options: &RunOptions, observer: &mut dyn Observer) -> RunReport {
         let started_at = Instant::now();
-        let end = match self.start(&options.cancel) {
+        let started = self.start(&options.cancel);
+        self.timings.0 = started_at.elapsed().as_secs_f64() * 1e3;
+        let end = match started {
             Err((node, error)) => EndReason::StartFailed { node, error },
             Ok(()) => {
                 let cancel = options.cancel.clone();
-                self.run_cycles(options, observer, &mut |e: &mut Engine| {
+                let t0 = Instant::now();
+                let end = self.run_cycles(options, observer, &mut |e: &mut Engine| {
                     e.on_boundary(&cancel)
-                })
+                });
+                self.timings.1 = t0.elapsed().as_secs_f64() * 1e3;
+                end
             }
         };
         self.shutdown(&options.cancel);
@@ -369,6 +381,8 @@ impl Engine {
             end,
             cycles_completed: self.next_cycle - 1,
             wall_time_ms: started_at.elapsed().as_secs_f64() * 1e3,
+            startup_ms: self.timings.0,
+            cycles_ms: self.timings.1,
             nodes: self.stats(),
             data_plane: self.data_plane(),
             replacements: self.replacement_log.clone(),

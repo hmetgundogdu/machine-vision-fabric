@@ -1,0 +1,13 @@
+# Rust-runtime twin of pipeline-touch.json: same frames, same Python module, no sink.
+# Run by rust/scripts/bench-baseline.sh.
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: bench-touch
+spec:
+  nodes:
+    - { id: cam, builtin: folder-source, config: { sourceFolder: assets/frames, loop: true, arena: true } }
+    - { id: bench, module: py.bench-touch }
+  edges:
+    data:
+      - { from: cam.frame, to: bench.frame }
