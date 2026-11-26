@@ -163,3 +163,62 @@ fn stateful_worker_is_live_replaced_without_losing_its_count() {
         "count continued across processes"
     );
 }
+
+/// Sends commands at the boundary before a cycle.
+struct Script(ControlHandle, Vec<(u64, &'static str)>);
+
+impl Observer for Script {
+    fn cycle_completed(&mut self, cycle: u64) {
+        for (at, label) in &self.1 {
+            if *at == cycle + 1 {
+                self.0.configure("w", "label", serde_json::json!(label));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_worker_takes_a_bound_config_field_live_and_is_reopened_when_it_refuses() {
+    let s = HostServices::default();
+    let text = pipeline(
+        "contract: configurable.yaml, config: { label: a }, bindings: { label: { type: string, binding: w.label } }",
+        6,
+        "",
+    );
+    let mut e = engine(&text, &s);
+    let mut script = Script(e.control(), vec![(3, "b"), (5, "refuse")]);
+    let r = e.run(&RunOptions::default(), &mut script);
+    assert_eq!(
+        r.end,
+        EndReason::SourceExhausted { node: "cam".into() },
+        "{:?}",
+        s.logs.events()
+    );
+    let seen: Vec<(String, u64)> = s
+        .recorder
+        .records()
+        .into_iter()
+        .filter_map(|r| match r.value {
+            RecordedValue::Classification(c) => {
+                Some((c.label, c.measurement.unwrap_or(0.0) as u64))
+            }
+            _ => None,
+        })
+        .collect();
+    let labels: Vec<&str> = seen.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(labels, ["a", "a", "b", "b", "refuse", "refuse"]);
+    assert_eq!(seen[1].1, seen[2].1, "live: the same process took `b`");
+    assert_ne!(
+        seen[3].1, seen[4].1,
+        "refused live: reopened as a new process"
+    );
+    let kinds: Vec<_> = r.live.iter().map(|e| e.kind).collect();
+    assert_eq!(
+        kinds,
+        [LiveEventKind::Reconfigured, LiveEventKind::Reopened]
+    );
+    assert_eq!(
+        r.nodes.iter().find(|n| n.id == "w").map(|n| n.generation),
+        Some(2)
+    );
+}

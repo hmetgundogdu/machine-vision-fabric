@@ -1,0 +1,13 @@
+# Scripted live operation of the loop demo (each step is applied at the boundary before `atCycle`).
+apiVersion: mvf.dev/v1alpha1
+kind: UpdatePlan
+spec:
+  updates:
+    # Pause the whole graph for 300 ms: nothing runs, nothing is counted, the nodes stay warm.
+    - { node: cycle, atCycle: 6, action: pause, forMs: 300 }
+    # A `value` edit lands next cycle with no restart (persisted to .mvf/bindings.json).
+    - { node: threshold, atCycle: 8, action: set, value: 55 }
+    # An ill-typed edit is refused before it reaches the graph.
+    - { node: threshold, atCycle: 9, action: set, value: 999 }
+    # A module binding edit reopens the source with the new interval (it restarts at frame 0).
+    - { node: cam, atCycle: 10, action: configure, field: frameIntervalMs, value: 0 }

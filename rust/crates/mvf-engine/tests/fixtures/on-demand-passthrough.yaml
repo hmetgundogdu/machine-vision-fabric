@@ -1,0 +1,16 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: test.on-demand-passthrough
+  version: 1.0.0
+  description: A short helper activated only when a frame reaches it.
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - { backend: in-process, builtin: passthrough }
+  lifecycle:
+    activation: on-demand

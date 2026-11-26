@@ -8,11 +8,21 @@
 //! caller-supplied [`ContractResolver`], and validates the graph. It does not execute anything and has
 //! no host dependencies. The engine (`mvf-engine`) owns execution.
 //!
-//! Supported semantics (Gate A): DAG only (no loop primitive); one edge per input port (no implicit
-//! join); fan-out from one output to many inputs; deterministic topological order with ties broken by
-//! declaration order.
+//! Supported semantics: the data/control graph is a DAG; one edge per input port (no implicit join);
+//! fan-out from one output to many inputs; deterministic topological order with ties broken by
+//! declaration order. Graph primitives ([`primitive`]) get synthesized contracts; iteration is owned
+//! by an optional `loop` primitive, closed by node-level `loop` edges that move no value (#25).
+
+pub mod primitive;
+pub mod values;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+pub use primitive::{
+    Direction, LoopConfig, LoopMode, ModuleBinding, ModuleBindings, PrimitiveKind, PrimitiveSpec,
+    SelectConfig, SelectMode, ValueConfig,
+};
+pub use values::{ElemType, Shape, ValueType};
 
 use mvf_contract::yaml::{self, YamlError, YamlLimits};
 use mvf_contract::{Channel, ContractError, NodeContract, Port, PortType};
@@ -81,6 +91,12 @@ pub struct NodeRef {
     /// A node contract file, relative to the pipeline file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contract: Option<String>,
+    /// A graph primitive (`fork`, `if`, `switch`, `select`, `value`, `loop`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primitive: Option<PrimitiveKind>,
+    /// Live-editable config fields, persisted under a binding key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<ModuleBindings>,
     /// Instance configuration handed to the implementation (validated by it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Map<String, serde_json::Value>>,
@@ -228,6 +244,20 @@ pub struct Edges {
     /// Decision edges between control ports.
     #[serde(default)]
     pub control: Vec<EdgeRef>,
+    /// Node-level edges closing the iteration into a `loop` primitive (`from: save, to: cycle`, ids
+    /// only). They move no value, so they have no ports and take no part in ordering.
+    #[serde(default, rename = "loop")]
+    pub loop_edges: Vec<LoopEdgeRef>,
+}
+
+/// `from: node` → `to: loop` (node ids, no ports).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LoopEdgeRef {
+    /// Closing node id.
+    pub from: String,
+    /// The `loop` node id.
+    pub to: String,
 }
 
 /// `from: node.port` → `to: node.port`.
@@ -266,6 +296,8 @@ pub enum ContractOrigin {
     Builtin(String),
     /// Contract file path, as resolved by the resolver.
     File(String),
+    /// A graph primitive; its contract is synthesized from config and edges.
+    Primitive(PrimitiveKind),
 }
 
 /// Resolves a node reference to its contract. Implemented by the host (builtins + files).
@@ -302,6 +334,12 @@ pub struct GraphNode {
     pub on_error: FailurePolicy,
     /// Effective backpressure policy.
     pub backpressure: Backpressure,
+    /// The primitive, when the node is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primitive: Option<PrimitiveSpec>,
+    /// Live-editable config fields.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: ModuleBindings,
 }
 
 impl GraphNode {
@@ -325,9 +363,15 @@ impl GraphNode {
             .find(|p| p.name == name)
     }
 
-    /// A source has no input ports.
+    /// A source is a non-primitive node without input ports (a `value` has none either, but it is
+    /// a constant, not a stream).
     pub fn is_source(&self) -> bool {
-        self.contract.spec.ports.inputs.is_empty()
+        self.primitive.is_none() && self.contract.spec.ports.inputs.is_empty()
+    }
+
+    /// True for the `loop` primitive (portless; owned by the executor, never executed).
+    pub fn is_loop(&self) -> bool {
+        matches!(self.primitive, Some(PrimitiveSpec::Loop(_)))
     }
 }
 
@@ -372,6 +416,24 @@ pub struct Graph {
     pub max_cycles: Option<u64>,
     /// Periodic checkpoints.
     pub checkpoint: CheckpointSpec,
+    /// The iteration authority, when the graph declares a `loop`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loop_spec: Option<LoopSpec>,
+    /// Node-level loop edges `(from, loop)` by node index.
+    pub loop_edges: Vec<(usize, usize)>,
+}
+
+/// The graph's `loop` primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopSpec {
+    /// Node index of the loop.
+    pub node: usize,
+    /// Termination policy.
+    pub mode: LoopMode,
+    /// Cycles for `count`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
 }
 
 impl Graph {
@@ -511,6 +573,17 @@ pub fn build_from_document(
         );
     }
 
+    // Output ports of `fork`/`switch` are the ones their outgoing data edges name (declaration order).
+    let mut edge_outputs: HashMap<&str, Vec<String>> = HashMap::new();
+    for edge in &spec.edges.data {
+        if let Some((node, port)) = split_endpoint(&edge.from) {
+            let ports = edge_outputs.entry(node).or_default();
+            if !ports.iter().any(|p| p == port) {
+                ports.push(port.to_string());
+            }
+        }
+    }
+
     // ---- nodes ----
     let mut nodes: Vec<GraphNode> = Vec::new();
     let mut ids: HashMap<&str, usize> = HashMap::new();
@@ -531,7 +604,75 @@ pub fn build_from_document(
             );
             continue;
         }
+        let mut primitive = None;
         let resolved = match (&node.builtin, &node.contract, &node.module) {
+            _ if node.primitive.is_some()
+                && (node.builtin.is_some() || node.contract.is_some() || node.module.is_some()) =>
+            {
+                issue(
+                    "graph.node.ambiguous-implementation",
+                    path.clone(),
+                    "a node must reference exactly one of `builtin`, `contract`, `module` or `primitive`"
+                        .into(),
+                );
+                None
+            }
+            (None, None, None) if node.primitive.is_some() => {
+                let kind = node.primitive.unwrap_or(PrimitiveKind::Fork);
+                let config = node.config.clone().unwrap_or_default();
+                match PrimitiveSpec::parse(kind, &config) {
+                    Err(e) => {
+                        issue(
+                            "graph.primitive.invalid-config",
+                            format!("{path}.config"),
+                            format!("`{}` config: {e}", kind.as_str()),
+                        );
+                        None
+                    }
+                    Ok(parsed) => {
+                        let outputs = if parsed.outputs_from_edges() {
+                            edge_outputs
+                                .get(node.id.as_str())
+                                .cloned()
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        let mut ok = true;
+                        for port in &outputs {
+                            if !mvf_contract::validate::is_valid_port_name(port) {
+                                issue(
+                                    "graph.primitive.invalid-port",
+                                    path.clone(),
+                                    format!(
+                                        "`{}` output `{port}` is not a valid port name",
+                                        node.id
+                                    ),
+                                );
+                                ok = false;
+                            }
+                        }
+                        validate_primitive(&parsed, &path, &mut issue);
+                        let contract = if ok {
+                            parsed.contract(&outputs)
+                        } else {
+                            Err(String::new())
+                        };
+                        match contract {
+                            Ok(c) => {
+                                primitive = Some(parsed);
+                                Some((ContractOrigin::Primitive(kind), c))
+                            }
+                            Err(e) => {
+                                if !e.is_empty() {
+                                    issue("graph.primitive.invalid-config", path.clone(), e);
+                                }
+                                None
+                            }
+                        }
+                    }
+                }
+            }
             (None, None, Some(id)) => match resolver.module(id) {
                 Ok((resolved_path, c)) => Some((ContractOrigin::File(resolved_path), c)),
                 Err(e) => {
@@ -569,13 +710,45 @@ pub fn build_from_document(
                 issue(
                     "graph.node.ambiguous-implementation",
                     path.clone(),
-                    "a node must reference exactly one of `builtin`, `contract` or `module`".into(),
+                    "a node must reference exactly one of `builtin`, `contract`, `module` or `primitive`"
+                        .into(),
                 );
                 None
             }
         };
+        let bindings = node.bindings.clone().unwrap_or_default();
+        for (field, binding) in &bindings {
+            let at = format!("{path}.bindings.{field}");
+            if binding.binding.trim().is_empty() {
+                issue(
+                    "graph.binding.invalid-key",
+                    at.clone(),
+                    "a module binding needs a non-empty `binding` key".into(),
+                );
+            }
+            if let Some(schema) = &binding.schema
+                && let Err(e) = values::validate_schema(schema)
+            {
+                issue("graph.binding.invalid-schema", at.clone(), e);
+            } else if let Some(current) = node.config.as_ref().and_then(|c| c.get(field))
+                && let Err(e) = binding.value_type().check(binding.schema.as_ref(), current)
+            {
+                issue(
+                    "graph.binding.config-type-mismatch",
+                    at,
+                    format!("config `{field}` does not match its binding: {e}"),
+                );
+            }
+        }
+        if node.primitive.is_some() && !bindings.is_empty() {
+            issue(
+                "graph.binding.on-primitive",
+                format!("{path}.bindings"),
+                "primitives have no module config to bind; tune a `value` node instead".into(),
+            );
+        }
         if let Some((origin, contract)) = resolved {
-            let role_default = if contract.spec.ports.inputs.is_empty() {
+            let role_default = if primitive.is_none() && contract.spec.ports.inputs.is_empty() {
                 &spec.run.on_error.sources
             } else {
                 &spec.run.on_error.nodes
@@ -594,6 +767,8 @@ pub fn build_from_document(
                 config: node.config.clone().unwrap_or_default(),
                 on_error,
                 backpressure: node.backpressure.unwrap_or(spec.run.backpressure),
+                primitive,
+                bindings,
             });
         }
     }
@@ -697,6 +872,34 @@ pub fn build_from_document(
                     );
                     ok = false;
                 }
+                // Between two typed-value primitives the refined type must agree as well
+                // (`select.criterion` carries the element type of `select.items`).
+                if ok {
+                    let produced = src
+                        .primitive
+                        .as_ref()
+                        .and_then(|p| p.refined(Direction::Out, from.1));
+                    let accepted = dst
+                        .primitive
+                        .as_ref()
+                        .and_then(|p| p.refined(Direction::In, to.1));
+                    if let (Some(produced), Some(accepted)) = (produced, accepted)
+                        && produced != accepted
+                    {
+                        issue(
+                            "graph.edge.value-type-mismatch",
+                            path.clone(),
+                            format!(
+                                "`{}` produces `{}` but `{}` accepts `{}`",
+                                edge.from,
+                                produced.describe(),
+                                edge.to,
+                                accepted.describe()
+                            ),
+                        );
+                        ok = false;
+                    }
+                }
                 if !seen_edges.insert((edge.from.clone(), edge.to.clone())) {
                     issue(
                         "graph.edge.duplicate",
@@ -757,6 +960,68 @@ pub fn build_from_document(
         }
     }
 
+    // ---- loop ----
+    let loops: Vec<&GraphNode> = nodes.iter().filter(|n| n.is_loop()).collect();
+    if loops.len() > 1 {
+        issue(
+            "graph.loop.multiple",
+            "spec.nodes".into(),
+            format!(
+                "a graph has at most one `loop` (the iteration authority); found {}",
+                loops.len()
+            ),
+        );
+    }
+    let loop_spec = loops.first().and_then(|n| match &n.primitive {
+        Some(PrimitiveSpec::Loop(c)) => Some(LoopSpec {
+            node: n.index,
+            mode: c.mode,
+            count: c.count,
+        }),
+        _ => None,
+    });
+    let mut loop_edges = Vec::new();
+    if all_resolved {
+        for (i, edge) in spec.edges.loop_edges.iter().enumerate() {
+            let path = format!("spec.edges.loop[{i}]");
+            let src = by_id.get(edge.from.as_str());
+            let dst = by_id.get(edge.to.as_str());
+            if src.is_none() {
+                issue(
+                    "graph.edge.missing-source-node",
+                    format!("{path}.from"),
+                    format!("no node `{}` (loop edges name nodes, not ports)", edge.from),
+                );
+            }
+            match dst {
+                None => issue(
+                    "graph.edge.missing-target-node",
+                    format!("{path}.to"),
+                    format!("no node `{}`", edge.to),
+                ),
+                Some(d) if !d.is_loop() => issue(
+                    "graph.edge.invalid-loop-target",
+                    format!("{path}.to"),
+                    format!("`{}` is not a `loop` primitive", edge.to),
+                ),
+                Some(d) => {
+                    if let Some(s) = src {
+                        if s.is_loop() {
+                            issue(
+                                "graph.edge.invalid-loop-source",
+                                format!("{path}.from"),
+                                "a loop edge closes a node into the loop, not the loop into itself"
+                                    .into(),
+                            );
+                        } else {
+                            loop_edges.push((s.index, d.index));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let edges_for_order: Vec<(usize, usize)> = data_edges
         .iter()
         .chain(control_edges.iter())
@@ -770,7 +1035,7 @@ pub fn build_from_document(
                 "graph.cycle",
                 "spec.edges".into(),
                 format!(
-                    "illegal cycle {}; loops are not supported in this executor",
+                    "illegal cycle {}; data and control edges must form a DAG (close iteration with a `loop` primitive)",
                     names.join(" -> ")
                 ),
             );
@@ -789,7 +1054,103 @@ pub fn build_from_document(
         order,
         max_cycles: spec.run.max_cycles,
         checkpoint: spec.run.checkpoint.clone(),
+        loop_spec,
+        loop_edges,
     })
+}
+
+/// Configuration rules of `value`, `select` and `loop` (the .NET `pipeline.node.*` value codes).
+fn validate_primitive(
+    spec: &PrimitiveSpec,
+    path: &str,
+    issue: &mut impl FnMut(&'static str, String, String),
+) {
+    match spec {
+        PrimitiveSpec::Value(c) => {
+            let schema_ok = match &c.schema {
+                Some(schema) => match values::validate_schema(schema) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        issue(
+                            "graph.value.invalid-schema",
+                            format!("{path}.config.schema"),
+                            e,
+                        );
+                        false
+                    }
+                },
+                None => true,
+            };
+            if schema_ok {
+                for (field, code, value) in [
+                    ("literal", "graph.value.literal-type-mismatch", &c.literal),
+                    ("default", "graph.value.default-type-mismatch", &c.default),
+                ] {
+                    if let Some(v) = value
+                        && let Err(e) = c.value_type().check(c.schema.as_ref(), v)
+                    {
+                        issue(
+                            code,
+                            format!("{path}.config.{field}"),
+                            format!("{field} is not a valid {}: {e}", c.value_type().describe()),
+                        );
+                    }
+                }
+            }
+            if c.literal.is_none() && c.binding.is_none() && c.default.is_none() {
+                issue(
+                    "graph.value.unresolvable",
+                    format!("{path}.config"),
+                    "a value needs a `literal`, a `binding` or a `default`; with none there is nowhere for it to come from"
+                        .into(),
+                );
+            }
+            if c.binding.as_deref().is_some_and(|b| b.trim().is_empty()) {
+                issue(
+                    "graph.binding.invalid-key",
+                    format!("{path}.config.binding"),
+                    "`binding` must not be empty".into(),
+                );
+            }
+        }
+        PrimitiveSpec::Select(c) => {
+            if let Some(criterion) = &c.criterion
+                && c.by.is_none()
+                && let Err(e) = ValueType::one(c.elem).check(None, criterion)
+                && !criterion.is_object()
+            {
+                issue(
+                    "graph.select.type-mismatch",
+                    format!("{path}.config.where"),
+                    format!(
+                        "`where` is not a {}: {e}",
+                        ValueType::one(c.elem).describe()
+                    ),
+                );
+            }
+            if c.by.as_deref().is_some_and(|b| b.trim().is_empty()) {
+                issue(
+                    "graph.select.invalid-by",
+                    format!("{path}.config.by"),
+                    "`by` must name a property".into(),
+                );
+            }
+        }
+        PrimitiveSpec::Loop(c) => match (c.mode, c.count) {
+            (LoopMode::Count, None | Some(0)) => issue(
+                "graph.loop.invalid-count",
+                format!("{path}.config.count"),
+                "mode `count` needs a positive `count`".into(),
+            ),
+            (LoopMode::UntilExhausted | LoopMode::Forever, Some(_)) => issue(
+                "graph.loop.invalid-count",
+                format!("{path}.config.count"),
+                "`count` applies only to mode `count`".into(),
+            ),
+            _ => {}
+        },
+        PrimitiveSpec::Fork | PrimitiveSpec::If | PrimitiveSpec::Switch => {}
+    }
 }
 
 /// Splits `node.port`. Node ids may contain dots, so the port is the last segment.

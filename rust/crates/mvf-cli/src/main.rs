@@ -44,6 +44,10 @@ struct PipelineArgs {
     /// Number of shared-memory arena slots (default 16).
     #[arg(long)]
     arena_slots: Option<usize>,
+    /// Machine-local binding store (`value`/`select`/module bindings). Default:
+    /// `<pipeline dir>/.mvf/bindings.json`. Environment `MVF_BINDING_<KEY>` answers too.
+    #[arg(long)]
+    bindings: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -289,6 +293,14 @@ fn services_for(args: &PipelineArgs, base: HostServices) -> HostServices {
     if let Some(n) = args.arena_slots {
         services.arena_config.slot_count = n;
     }
+    let store = args.bindings.clone().unwrap_or_else(|| {
+        services
+            .package_dir
+            .as_deref()
+            .unwrap_or(Path::new("."))
+            .join(".mvf/bindings.json")
+    });
+    services.bindings = std::sync::Arc::new(mvf_engine::Bindings::file(store));
     services
 }
 
@@ -370,6 +382,33 @@ fn print_report(report: &RunReport, json: bool) {
         eprintln!(
             "  {:<16} backend={:<10} gen={} executed={} skipped={} total={}us max={}us",
             n.id, n.backend, n.generation, n.executed, n.skipped, n.total_us, n.max_us
+        );
+    }
+    if let Some(it) = &report.iteration {
+        eprintln!(
+            "  loop mode={} rewinds={} pauses={} paused={:.1}ms",
+            serde_json::to_string(&it.mode)
+                .unwrap_or_default()
+                .trim_matches('"'),
+            it.rewinds,
+            it.pauses,
+            it.paused_ms
+        );
+    }
+    for e in &report.live {
+        eprintln!(
+            "  live {:<12} {:<14} at cycle {:<4} {}{}{}",
+            serde_json::to_string(&e.kind)
+                .unwrap_or_default()
+                .trim_matches('"'),
+            e.node.as_deref().unwrap_or("-"),
+            e.cycle,
+            e.field
+                .as_deref()
+                .map(|f| format!("field={f} "))
+                .unwrap_or_default(),
+            if e.persisted { "persisted " } else { "" },
+            e.message.as_deref().unwrap_or_default()
         );
     }
     for e in &report.replacements {

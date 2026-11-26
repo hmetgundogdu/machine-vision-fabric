@@ -111,6 +111,29 @@ pub enum ControlCommand {
         /// Node id.
         node: String,
     },
+    /// Set a `value` node's value or a `select`'s criterion.
+    SetValue {
+        /// Node id.
+        node: String,
+        /// The new value (type-checked before it is accepted).
+        value: serde_json::Value,
+    },
+    /// Edit a module config field declared in the node's `bindings`.
+    Configure {
+        /// Node id.
+        node: String,
+        /// Config field.
+        field: String,
+        /// The new value (type-checked before it is accepted).
+        value: serde_json::Value,
+    },
+    /// Pause the whole graph (requires a `loop`); resumes by itself after `for_ms` when given.
+    Pause {
+        /// Automatic resume after this many milliseconds.
+        for_ms: Option<u64>,
+    },
+    /// Resume a paused graph.
+    Resume,
 }
 
 /// Cloneable, thread-safe handle to send commands to a running engine.
@@ -147,6 +170,37 @@ impl ControlHandle {
                 node: node.to_string(),
             })
             .is_ok()
+    }
+
+    /// Sets a `value`/`select` node's live value at the next boundary; false if the engine is gone.
+    pub fn set_value(&self, node: &str, value: serde_json::Value) -> bool {
+        self.tx
+            .send(ControlCommand::SetValue {
+                node: node.to_string(),
+                value,
+            })
+            .is_ok()
+    }
+
+    /// Edits a bound module config field at the next boundary; false if the engine is gone.
+    pub fn configure(&self, node: &str, field: &str, value: serde_json::Value) -> bool {
+        self.tx
+            .send(ControlCommand::Configure {
+                node: node.to_string(),
+                field: field.to_string(),
+                value,
+            })
+            .is_ok()
+    }
+
+    /// Pauses the graph at the next boundary; false if the engine is gone.
+    pub fn pause(&self, for_ms: Option<u64>) -> bool {
+        self.tx.send(ControlCommand::Pause { for_ms }).is_ok()
+    }
+
+    /// Resumes a paused graph; false if the engine is gone.
+    pub fn resume(&self) -> bool {
+        self.tx.send(ControlCommand::Resume).is_ok()
     }
 }
 
@@ -278,34 +332,51 @@ impl Engine {
     }
 
     /// Runs at every cycle boundary: commands, ready candidates, finished probations.
-    pub(crate) fn on_boundary(&mut self, cancel: &CancellationToken) {
-        while let Ok(command) = self.control_rx.try_recv() {
-            match command {
-                ControlCommand::Replace(request) => self.begin_replacement(*request, cancel),
-                ControlCommand::Rollback { node } => match self.graph.index_of(&node) {
-                    Some(i) if self.slots[i].standby.is_some() => {
-                        self.rollback(i, "replace.operator-rollback", "rollback requested".into())
-                    }
-                    Some(i) => {
-                        let _ = self.event(
-                            i,
-                            ReplacementEventKind::Rejected,
-                            None,
-                            Some("replace.nothing-to-roll-back"),
-                            Some("no previous generation is warm for this node".into()),
-                        );
-                    }
-                    None => self.reject_unknown(&node, format!("no node `{node}`")),
-                },
-                ControlCommand::Commit { node } => {
-                    if let Some(i) = self.graph.index_of(&node) {
-                        self.commit(i);
-                    } else {
-                        self.reject_unknown(&node, format!("no node `{node}`"));
-                    }
+    /// Applies one control command (at a boundary, or while paused).
+    pub(crate) fn handle_command(&mut self, command: ControlCommand, cancel: &CancellationToken) {
+        match command {
+            ControlCommand::SetValue { node, value } => self.set_live_value(&node, value),
+            ControlCommand::Configure { node, field, value } => {
+                self.configure_live(&node, &field, value, cancel)
+            }
+            ControlCommand::Pause { for_ms } => self.pause(for_ms),
+            ControlCommand::Resume => self.resume(),
+            ControlCommand::Replace(request) => self.begin_replacement(*request, cancel),
+            ControlCommand::Rollback { node } => match self.graph.index_of(&node) {
+                Some(i) if self.slots[i].standby.is_some() => {
+                    self.rollback(i, "replace.operator-rollback", "rollback requested".into())
+                }
+                Some(i) => {
+                    let _ = self.event(
+                        i,
+                        ReplacementEventKind::Rejected,
+                        None,
+                        Some("replace.nothing-to-roll-back"),
+                        Some("no previous generation is warm for this node".into()),
+                    );
+                }
+                None => self.reject_unknown(&node, format!("no node `{node}`")),
+            },
+            ControlCommand::Commit { node } => {
+                if let Some(i) = self.graph.index_of(&node) {
+                    self.commit(i);
+                } else {
+                    self.reject_unknown(&node, format!("no node `{node}`"));
                 }
             }
         }
+    }
+
+    pub(crate) fn on_boundary(&mut self, cancel: &CancellationToken) {
+        while let Ok(command) = self.control_rx.try_recv() {
+            self.handle_command(command, cancel);
+        }
+        self.poll_candidates(cancel);
+        self.wait_while_paused(cancel);
+        self.poll_candidates(cancel);
+    }
+
+    fn poll_candidates(&mut self, cancel: &CancellationToken) {
         for i in 0..self.slots.len() {
             let ready = match &self.slots[i].pending {
                 None => continue,
@@ -793,6 +864,15 @@ pub struct UpdateStep {
     /// Rollback window in cycles (default 10).
     #[serde(default)]
     pub probation_cycles: Option<u64>,
+    /// `set`/`configure`: the new value.
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
+    /// `configure`: the bound config field.
+    #[serde(default)]
+    pub field: Option<String>,
+    /// `pause`: resume automatically after this many milliseconds.
+    #[serde(default)]
+    pub for_ms: Option<u64>,
 }
 
 /// Explicit actions.
@@ -805,6 +885,14 @@ pub enum UpdateAction {
     Rollback,
     /// Commit early.
     Commit,
+    /// Set a `value`/`select` node's live value (`value`).
+    Set,
+    /// Edit a bound module config field (`field`, `value`).
+    Configure,
+    /// Pause the graph (`node`: the loop; optional `forMs`).
+    Pause,
+    /// Resume the graph (`node`: the loop).
+    Resume,
 }
 
 /// A validated plan step ready to submit.
@@ -816,6 +904,14 @@ pub enum PlannedCommand {
     Rollback(String),
     /// Commit.
     Commit(String),
+    /// Live value.
+    SetValue(String, serde_json::Value),
+    /// Module binding edit.
+    Configure(String, String, serde_json::Value),
+    /// Pause, with an optional automatic resume.
+    Pause(Option<u64>),
+    /// Resume.
+    Resume,
 }
 
 impl PlannedCommand {
@@ -825,6 +921,10 @@ impl PlannedCommand {
             PlannedCommand::Replace(r) => control.replace((**r).clone()),
             PlannedCommand::Rollback(n) => control.rollback(n),
             PlannedCommand::Commit(n) => control.commit(n),
+            PlannedCommand::SetValue(n, v) => control.set_value(n, v.clone()),
+            PlannedCommand::Configure(n, f, v) => control.configure(n, f, v.clone()),
+            PlannedCommand::Pause(ms) => control.pause(*ms),
+            PlannedCommand::Resume => control.resume(),
         }
     }
 }
@@ -859,7 +959,46 @@ pub fn parse_update_plan(
                 ));
             }
         };
+        let live = (
+            step.value.is_some(),
+            step.field.is_some(),
+            step.for_ms.is_some(),
+        );
         let command = match (step.action, reference) {
+            (Some(UpdateAction::Set), None) if live.0 && !live.1 && !live.2 => {
+                PlannedCommand::SetValue(step.node.clone(), step.value.clone().unwrap_or_default())
+            }
+            (Some(UpdateAction::Configure), None) if live.0 && live.1 && !live.2 => {
+                PlannedCommand::Configure(
+                    step.node.clone(),
+                    step.field.clone().unwrap_or_default(),
+                    step.value.clone().unwrap_or_default(),
+                )
+            }
+            (Some(UpdateAction::Pause), None) if !live.0 && !live.1 => {
+                PlannedCommand::Pause(step.for_ms)
+            }
+            (Some(UpdateAction::Resume), None) if live == (false, false, false) => {
+                PlannedCommand::Resume
+            }
+            (
+                Some(
+                    UpdateAction::Set
+                    | UpdateAction::Configure
+                    | UpdateAction::Pause
+                    | UpdateAction::Resume,
+                ),
+                _,
+            ) => {
+                return Err(format!(
+                    "spec.updates[{n}]: `set` takes `value`; `configure` takes `field` and `value`; `pause` takes an optional `forMs`; `resume` takes nothing — and none takes a candidate"
+                ));
+            }
+            (_, _) if live != (false, false, false) => {
+                return Err(format!(
+                    "spec.updates[{n}]: `value`/`field`/`forMs` belong to `set`, `configure` and `pause`"
+                ));
+            }
             (Some(UpdateAction::Rollback), None) => PlannedCommand::Rollback(step.node.clone()),
             (Some(UpdateAction::Commit), None) => PlannedCommand::Commit(step.node.clone()),
             (None | Some(UpdateAction::Replace), Some(reference)) => {

@@ -8,7 +8,11 @@
 //! - a node runs when every *required* data input is present and every *connected* control input
 //!   is present and `true`; otherwise it is skipped and its outputs are absent this cycle (absence
 //!   propagates downstream). Optional data inputs may be absent;
-//! - a source returning `Exhausted` ends the run before any non-source node runs in that cycle;
+//! - a source returning `Exhausted` ends the run before any non-source node runs in that cycle —
+//!   unless the graph's `loop` is `forever`: then every rewindable source is rewound and the cycle
+//!   runs again from frame 0 (the empty exhaustion pass is not counted); `count` ends after N cycles;
+//! - an `on-demand` node is started the first time it runs (it has its inputs), not at run start;
+//! - live edits (`value`/`select` settings, module bindings, pause/resume) apply at cycle boundaries;
 //! - a node failure ends the run (`fail` policy) and is reported with the node, cycle and cause;
 //! - every emitted value is re-checked against the producer's declared output port and type.
 
@@ -22,6 +26,7 @@ use serde::Serialize;
 
 use crate::backend::{BackendRegistry, InstantiateRequest};
 use crate::builtins::HostServices;
+use crate::live::{IterationReport, LiveEvent};
 use crate::node::*;
 use crate::recovery::{CheckpointState, Recovery, RecoveryEvent};
 use crate::replace::{ControlCommand, Pending, ReplacementEvent, Standby};
@@ -99,6 +104,11 @@ pub enum EndReason {
         /// The failure.
         error: NodeError,
     },
+    /// The `loop` primitive's `count` was reached (a completed run, like an exhausted source).
+    LoopCompleted {
+        /// The count.
+        count: u64,
+    },
     /// A node could not be started.
     StartFailed {
         /// The node.
@@ -132,6 +142,9 @@ pub struct NodeStats {
     pub failures_skipped: u64,
     /// Cycles dropped by the `drop` backpressure policy.
     pub dropped: u64,
+    /// Cycle in which an `on-demand` node was first activated (absent: resident, or never needed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activated_at_cycle: Option<u64>,
 }
 
 /// Outcome of a run.
@@ -161,6 +174,11 @@ pub struct RunReport {
     /// Cycle restored from a durable checkpoint at start, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resumed_from_cycle: Option<u64>,
+    /// Live edits and pause/resume, in order.
+    pub live: Vec<LiveEvent>,
+    /// What the `loop` primitive did, when the graph has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<IterationReport>,
 }
 
 /// Data-plane accounting for a run. A *delivery* is one payload handed to one consuming node; it
@@ -203,6 +221,12 @@ pub(crate) struct NodeSlot {
     pub(crate) config: serde_json::Map<String, serde_json::Value>,
     pub(crate) on_error: mvf_graph::FailurePolicy,
     pub(crate) backpressure: mvf_graph::Backpressure,
+    /// `resident` nodes start with the run; `on-demand` ones the first time they run.
+    pub(crate) on_demand: bool,
+    /// Whether the active handle has been started.
+    pub(crate) activated: bool,
+    /// A restored state waiting for an on-demand node's activation.
+    pub(crate) pending_state: Option<StateBlob>,
     pub(crate) handle: Box<dyn NodeHandle>,
     pub(crate) generation: u64,
     pub(crate) stats: NodeStats,
@@ -233,6 +257,10 @@ pub struct Engine {
     pub(crate) replacement_log: Vec<ReplacementEvent>,
     pub(crate) recovery_log: Vec<RecoveryEvent>,
     pub(crate) checkpoint: CheckpointState,
+    pub(crate) live_log: Vec<LiveEvent>,
+    pub(crate) iteration: IterationReport,
+    /// Whole-graph pause (only with a `loop`), with an optional automatic resume.
+    pub(crate) paused: Option<Option<Instant>>,
     /// (startup ms, cycle loop ms) of the last run.
     timings: (f64, f64),
 }
@@ -266,12 +294,19 @@ impl Engine {
     ) -> Result<Self, BuildError> {
         let mut slots = Vec::with_capacity(graph.nodes.len());
         for node in &graph.nodes {
+            // Binding pre-pass for module config: a stored edit comes back on the next run.
+            let config = crate::live::overlay_bindings(node, &services.bindings).map_err(|e| {
+                BuildError {
+                    node: node.id.clone(),
+                    error: NodeError::new(NodeErrorKind::InvalidConfig, e),
+                }
+            })?;
             let (handle, backend) = backends
                 .instantiate(&InstantiateRequest {
                     node_id: &node.id,
                     contract: &node.contract,
                     origin: &node.origin,
-                    config: &node.config,
+                    config: &config,
                     generation: 1,
                     services,
                 })
@@ -283,9 +318,13 @@ impl Engine {
                 id: node.id.clone(),
                 contract: node.contract.clone(),
                 origin: node.origin.clone(),
-                config: node.config.clone(),
+                config,
                 on_error: node.on_error.clone(),
                 backpressure: node.backpressure,
+                on_demand: node.contract.spec.lifecycle.activation
+                    == mvf_contract::Activation::OnDemand,
+                activated: false,
+                pending_state: None,
                 handle,
                 generation: 1,
                 stats: NodeStats {
@@ -300,7 +339,14 @@ impl Engine {
                 probation: 0,
             });
         }
-        let mut exec_order: Vec<usize> = graph.order.clone();
+        crate::live::check_select_criteria(&graph, services)?;
+        // The loop is the iteration authority, not a dataflow node: it never executes.
+        let mut exec_order: Vec<usize> = graph
+            .order
+            .iter()
+            .copied()
+            .filter(|i| !graph.nodes[*i].is_loop())
+            .collect();
         exec_order.sort_by_key(|i| !graph.nodes[*i].is_source());
         // `sort_by_key` is stable: sources keep declaration order among themselves (they all have
         // in-degree zero, so the topological order lists them by declaration index), non-sources
@@ -315,6 +361,7 @@ impl Engine {
             })
             .collect();
         let (control_tx, control_rx) = mpsc::channel();
+        let iteration = IterationReport::for_graph(&graph);
         Ok(Self {
             graph,
             slots,
@@ -330,6 +377,9 @@ impl Engine {
             replacement_log: Vec::new(),
             recovery_log: Vec::new(),
             checkpoint: CheckpointState::default(),
+            live_log: Vec::new(),
+            iteration,
+            paused: None,
             timings: (0.0, 0.0),
         })
     }
@@ -359,6 +409,9 @@ impl Engine {
         }
         for &i in &self.exec_order {
             let slot = &mut self.slots[i];
+            if slot.on_demand {
+                continue; // started the first time it runs
+            }
             let budget = Duration::from_millis(slot.contract.spec.lifecycle.readiness_timeout_ms);
             let ctx = LifecycleContext {
                 node_id: &slot.id,
@@ -367,6 +420,7 @@ impl Engine {
                 cancel,
             };
             slot.handle.start(&ctx).map_err(|e| (slot.id.clone(), e))?;
+            slot.activated = true;
         }
         self.started = true;
         Ok(())
@@ -377,6 +431,10 @@ impl Engine {
         self.shutdown_replacements(cancel);
         for &i in self.exec_order.iter().rev() {
             let slot = &mut self.slots[i];
+            if !slot.activated {
+                continue;
+            }
+            slot.activated = false;
             let ctx = LifecycleContext {
                 node_id: &slot.id,
                 generation: slot.generation,
@@ -408,7 +466,10 @@ impl Engine {
                 end
             }
         };
-        if matches!(end, EndReason::SourceExhausted { .. }) {
+        if matches!(
+            end,
+            EndReason::SourceExhausted { .. } | EndReason::LoopCompleted { .. }
+        ) {
             // A cleanly, fully consumed run has nothing to resume.
             self.clear_checkpoints();
         }
@@ -429,6 +490,8 @@ impl Engine {
             replacements: self.replacement_log.clone(),
             recoveries: self.recovery_log.clone(),
             resumed_from_cycle: self.checkpoint.resumed_from,
+            live: self.live_log.clone(),
+            iteration: self.graph.loop_spec.map(|_| self.iteration.clone()),
         }
     }
 
@@ -441,6 +504,8 @@ impl Engine {
         boundary: &mut dyn FnMut(&mut Engine),
     ) -> EndReason {
         let limit = options.max_cycles.or(self.graph.max_cycles);
+        let loop_spec = self.graph.loop_spec;
+        let mut produced_since_rewind = false;
         loop {
             boundary(self);
             if options.cancel.is_cancelled() {
@@ -453,11 +518,29 @@ impl Engine {
             }
             let cycle = self.next_cycle;
             if let Some(end) = self.run_cycle(cycle, &options.cancel, observer) {
+                // `forever`: a finite source that ran dry is rewound and the cycle runs again. Only
+                // after a pass that produced frames, so an empty source cannot spin.
+                if let EndReason::SourceExhausted { .. } = &end
+                    && loop_spec.is_some_and(|l| l.mode == mvf_graph::LoopMode::Forever)
+                    && produced_since_rewind
+                    && self.rewind_sources()
+                {
+                    produced_since_rewind = false;
+                    continue;
+                }
                 return end;
             }
+            produced_since_rewind = true;
             self.next_cycle += 1;
             self.maybe_checkpoint(cycle);
             observer.cycle_completed(cycle);
+            if let Some(l) = loop_spec
+                && l.mode == mvf_graph::LoopMode::Count
+                && let Some(count) = l.count
+                && cycle >= count
+            {
+                return EndReason::LoopCompleted { count };
+            }
         }
     }
 
@@ -518,6 +601,25 @@ impl Engine {
 
             let is_source = self.graph.nodes[i].is_source();
             let mut attempts = 0u32;
+            // On-demand: started the first time it has what it needs to run.
+            if !self.slots[i].activated
+                && let Err(error) = self.activate(i, cycle, cancel)
+            {
+                match self.recover(i, cycle, error, &mut attempts, cancel) {
+                    Recovery::Retry => {}
+                    Recovery::Skip(reason) => {
+                        let slot = &self.slots[i];
+                        observer.node(
+                            cycle,
+                            &slot.id,
+                            slot.generation,
+                            &NodeOutcome::Skipped(reason),
+                        );
+                        continue 'nodes;
+                    }
+                    Recovery::End(end) => return Some(end),
+                }
+            }
             // Executes on the active generation. A candidate that fails during probation is rolled
             // back and the same inputs are re-executed on the restored generation (lossless).
             let (outputs, elapsed) = loop {

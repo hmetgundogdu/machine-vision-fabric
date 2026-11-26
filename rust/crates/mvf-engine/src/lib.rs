@@ -4,9 +4,13 @@
 //! it with deterministic cycle semantics (see [`executor`]).
 
 pub mod backend;
+pub mod bindings;
 pub mod builtins;
+mod dataset;
 pub mod executor;
+pub mod live;
 pub mod node;
+mod primitives;
 pub mod recovery;
 pub mod replace;
 pub mod resolver;
@@ -14,11 +18,13 @@ pub mod services;
 pub mod value;
 
 pub use backend::{BackendRegistry, ExecutionBackend, InProcessBackend, InstantiateRequest};
+pub use bindings::{Bindings, ValueSource};
 pub use builtins::{Record, RecordedValue, Recorder};
 pub use executor::{
     BuildError, DataPlaneReport, EndReason, Engine, NodeOutcome, NodeStats, NullObserver, Observer,
     RunOptions, RunReport, SkipReason,
 };
+pub use live::{IterationReport, LiveEvent, LiveEventKind};
 pub use node::*;
 pub use recovery::{RecoveryEvent, RecoveryKind};
 pub use replace::{

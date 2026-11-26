@@ -1,0 +1,43 @@
+# Rust twin of packages/loop-demo (issue #25): `cycle` owns iteration (mode forever — the folder
+# source is rewound when it runs dry, no `loop: true` flag on the source); the tail closes back into
+# the loop with a node-level edge (`save -> cycle`, ids only, it moves no value). `threshold` is a
+# live `value`; `cam.frameIntervalMs` is a live module binding (editing it reopens the source, which
+# restarts at frame 0). Pause/resume and edits are scripted with `--updates updates.yaml`.
+#
+#   mvf-rs run rust/examples/loop-demo/pipeline.yaml --max-cycles 200 --updates rust/examples/loop-demo/updates.yaml
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: loop-demo
+  description: Rust twin of packages/loop-demo — the loop primitive, live value and module binding.
+spec:
+  nodes:
+    - id: cycle
+      primitive: loop
+      config: { mode: forever }
+    - id: cam
+      builtin: folder-source
+      config:
+        sourceFolder: ../../../packages/multilang-demo/assets/frames
+        frameIntervalMs: 300
+        cameraId: sim-cam-1
+      bindings:
+        frameIntervalMs:
+          type: int
+          binding: cam.interval
+          schema: { type: integer, minimum: 0, maximum: 5000 }
+    - id: save
+      builtin: dataset-writer
+      config: { outputRoot: out, sessionPrefix: demo }
+    - id: threshold
+      primitive: value
+      config:
+        type: int
+        binding: brightness.threshold
+        literal: 40
+        schema: { type: integer, minimum: 0, maximum: 255 }
+  edges:
+    data:
+      - { from: cam.frame, to: save.frame }
+    loop:
+      - { from: save, to: cycle }

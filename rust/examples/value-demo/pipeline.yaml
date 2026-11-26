@@ -1,0 +1,57 @@
+# Rust twin of packages/value-demo (issue #25): `cameras` publishes a candidate list (a stand-in for a
+# discovery module); `pick-one` resolves its criterion from its own binding `camera.serial` (the .NET
+# CLI would ask an operator on the first run; this host is unattended, so bind it first:
+# `MVF_BINDING_CAMERA_SERIAL=DEF456` or `.mvf/bindings.json`); `pick-protocol` takes its criterion
+# from a `value` on an edge, which makes `wanted-protocol` the live tunable.
+#
+# The selections are recorded so the outputs can be compared with the .NET engine.
+#
+#   MVF_BINDING_CAMERA_SERIAL=DEF456 mvf-rs run rust/examples/value-demo/pipeline.yaml --max-cycles 4
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: value-demo
+  description: Rust twin of packages/value-demo — value and select primitives with bindings.
+spec:
+  nodes:
+    - id: cam
+      builtin: folder-source
+      config:
+        sourceFolder: ../../../packages/multilang-demo/assets/frames
+        loop: true
+        frameIntervalMs: 300
+        cameraId: sim-cam-1
+    - id: save
+      builtin: dataset-writer
+      config: { outputRoot: out, sessionPrefix: demo }
+    - id: cameras
+      primitive: value
+      config:
+        type: json
+        shape: list
+        binding: camera.candidates
+        prompt: Camera candidates
+        schema: { type: object, required: [serial, protocol] }
+        default:
+          - { serial: ABC123, protocol: gige, address: 10.0.0.4 }
+          - { serial: DEF456, protocol: gige, address: 10.0.0.5 }
+          - { serial: GHI789, protocol: usb, address: "usb://0" }
+    - id: pick-one
+      primitive: select
+      config: { mode: one, by: serial, binding: camera.serial, prompt: Select a camera }
+    - id: wanted-protocol
+      primitive: value
+      config: { type: json, literal: gige }
+    - id: pick-protocol
+      primitive: select
+      config: { mode: many, by: protocol }
+    - { id: chosen, builtin: record }
+    - { id: narrowed, builtin: record }
+  edges:
+    data:
+      - { from: cam.frame, to: save.frame }
+      - { from: cameras.value, to: pick-one.items }
+      - { from: cameras.value, to: pick-protocol.items }
+      - { from: wanted-protocol.value, to: pick-protocol.criterion }
+      - { from: pick-one.selected, to: chosen.json }
+      - { from: pick-protocol.selected, to: narrowed.json }

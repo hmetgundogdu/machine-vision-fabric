@@ -272,4 +272,30 @@ pub trait NodeHandle: Send {
             ),
         ))
     }
+
+    /// Restarts a finite stream from its beginning (the `loop` primitive's `forever` mode).
+    /// `Ok(false)` = not rewindable: `forever` then degrades to `until-exhausted` for this source.
+    fn rewind(&mut self) -> Result<bool, NodeError> {
+        Ok(false)
+    }
+
+    /// Replaces the node's live value (`value`, `select` criterion). Called at a cycle boundary;
+    /// the next cycle sees it. Must type-check before accepting.
+    fn set_value(&mut self, value: &serde_json::Value) -> Result<(), NodeError> {
+        let _ = value;
+        Err(NodeError::new(
+            NodeErrorKind::Unsupported,
+            "this node has no live value",
+        ))
+    }
+
+    /// Takes an edited config without reopening. `Ok(false)` = cannot (the engine then reopens the
+    /// node with the new config, the .NET re-activation model); an error also reopens it.
+    fn reconfigure(
+        &mut self,
+        config: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<bool, NodeError> {
+        let _ = config;
+        Ok(false)
+    }
 }

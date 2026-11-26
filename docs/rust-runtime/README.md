@@ -2,7 +2,7 @@
 
 Research branch `research/rust-runtime`. Implements the ordered backlog of
 [#10](https://github.com/hmetgundogdu/machine-vision-fabric/issues/10): Gate A (#11–#16) and Gate B
-(#17–#20), then the follow-ups #24–#28 (stage 11 on: #24). The shipping .NET engine is **unchanged** and remains the behavioural reference.
+(#17–#20), then the follow-ups #24–#28 (stage 11: #24; stages 12–13: #25). The shipping .NET engine is **unchanged** and remains the behavioural reference.
 
 ## Layout decision
 
@@ -16,7 +16,7 @@ mechanical change once the .NET host retires.
 | Crate | Slice | Purpose |
 |---|---|---|
 | `mvf-contract` | #11 | Universal Node Contract: strict YAML loader, typed model, validation, capability negotiation. No host dependencies. |
-| `mvf-graph` | #12 | Pipeline document, typed graph validation (separate data/control edges), deterministic order. Pure. |
+| `mvf-graph` | #12, #25 | Pipeline document, typed graph validation (separate data/control/loop edges), primitives with synthesized contracts, value types and JSON Schema subset, deterministic order. Pure. |
 | `mvf-engine` | #12– | Single scheduling authority: typed values, node handles, backends, builtins, executor, recovery (failure policy, backpressure, epoch checkpoints — #24). |
 | `mvf-memory` | #13–#14 | Descriptor codec (compatible with .NET/Python/C++), engine-owned file-backed arena, leases. |
 | `mvf-worker` | #13 | Supervised stdio worker backend (protocol v1): readiness, deadlines, kill, exit classification, logs. |
@@ -61,5 +61,6 @@ demo. Windows: `pwsh rust/scripts/gate-a.ps1`. Baseline against the .NET engine:
 - [gate-a-report.md](gate-a-report.md) / [gate-a-report.json](gate-a-report.json) — Gate A result
 - [adr-0001-gate-a-foundation.md](adr-0001-gate-a-foundation.md) — contract, execution and memory boundaries
 - [node-contract.md](node-contract.md) — Universal Node Contract v1alpha1 specification
+- [graph-primitives.md](graph-primitives.md) — fork/if/switch/select/value/loop, bindings, live operation, differences from .NET
 - [parity-matrix.md](parity-matrix.md) — existing .NET behaviour vs the Rust runtime
 - [stages/](stages/) — one report per slice with commands, results and PASS/FAIL/BLOCKED

@@ -229,6 +229,7 @@ pub fn worker_node(
         capability: Capability::Classifier,
         next_id: 1,
         verify_inputs,
+        features: Vec::new(),
     }))
 }
 
@@ -329,9 +330,41 @@ struct WorkerNode {
     capability: Capability,
     next_id: u64,
     verify_inputs: bool,
+    /// Features the running worker advertised in `hello`.
+    features: Vec<String>,
 }
 
 impl WorkerNode {
+    /// Sends `configure` and waits for `configured` (or the worker's error).
+    fn send_configure(
+        &mut self,
+        config: &serde_json::Map<String, serde_json::Value>,
+        deadline: Instant,
+        cancel: &mvf_engine::CancellationToken,
+    ) -> Result<(), NodeError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let line = serde_json::json!({"type": "configure", "id": id, "config": config}).to_string();
+        let reply = match self.process.as_mut() {
+            Some(p) => p.send(&line).and_then(|_| {
+                p.wait_for(Some(deadline), Some(cancel), |m| match m {
+                    ChildMessage::Other(t) => t == "configured",
+                    ChildMessage::Error { id: e, .. } => *e == Some(id),
+                    _ => false,
+                })
+            }),
+            None => Err(WaitError::Cancelled),
+        };
+        match reply {
+            Ok(ChildMessage::Error { message, .. }) => Err(NodeError::new(
+                NodeErrorKind::InvalidConfig,
+                format!("worker rejected config: {message}"),
+            )),
+            Ok(_) => Ok(()),
+            Err(e) => Err(self.fail(e, "configure")),
+        }
+    }
+
     fn log(&self, message: impl Into<String>) {
         self.services
             .log(&self.node_id, self.generation, "supervisor", message);
@@ -452,38 +485,19 @@ impl NodeHandle for WorkerNode {
                 return Err(self.fail(e, "readiness (waiting for ready)"));
             }
         }
+        self.features = features;
         if !self.config.is_empty() {
-            if !features.iter().any(|f| f == "configure") {
+            if !self.features.iter().any(|f| f == "configure") {
                 self.process.as_mut().map(WorkerProcess::kill);
                 return Err(NodeError::new(
                     NodeErrorKind::Unsupported,
                     "the node has config but the worker does not advertise the `configure` feature",
                 ));
             }
-            let id = self.next_id;
-            self.next_id += 1;
-            let line = serde_json::json!({"type": "configure", "id": id, "config": self.config})
-                .to_string();
-            let reply = match self.process.as_mut() {
-                Some(p) => p.send(&line).and_then(|_| {
-                    p.wait_for(Some(deadline), Some(ctx.cancel), |m| match m {
-                        ChildMessage::Other(t) => t == "configured",
-                        ChildMessage::Error { id: e, .. } => *e == Some(id),
-                        _ => false,
-                    })
-                }),
-                None => Err(WaitError::Cancelled),
-            };
-            match reply {
-                Ok(ChildMessage::Error { message, .. }) => {
-                    self.process.as_mut().map(WorkerProcess::kill);
-                    return Err(NodeError::new(
-                        NodeErrorKind::InvalidConfig,
-                        format!("worker rejected config: {message}"),
-                    ));
-                }
-                Ok(_) => {}
-                Err(e) => return Err(self.fail(e, "configure")),
+            let config = self.config.clone();
+            if let Err(e) = self.send_configure(&config, deadline, ctx.cancel) {
+                self.process.as_mut().map(WorkerProcess::kill);
+                return Err(e);
             }
         }
         self.log(format!(
@@ -704,6 +718,20 @@ impl NodeHandle for WorkerNode {
 
     /// `restore` → `restored`: the blob from [`export_state`] is placed in a slot by copy (it lives
     /// on the host between runs) and the module rehydrates from it.
+    fn reconfigure(
+        &mut self,
+        config: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<bool, NodeError> {
+        // Live only when the running worker speaks `configure`; otherwise the engine reopens it.
+        if self.process.is_none() || !self.features.iter().any(|f| f == "configure") {
+            return Ok(false);
+        }
+        let cancel = mvf_engine::CancellationToken::new();
+        self.send_configure(config, Instant::now() + Duration::from_secs(10), &cancel)?;
+        self.config = config.clone();
+        Ok(true)
+    }
+
     fn import_state(&mut self, state: &StateBlob) -> Result<(), NodeError> {
         let header = state.bytes.get(..mvf_memory::HEADER_SIZE).ok_or_else(|| {
             NodeError::new(

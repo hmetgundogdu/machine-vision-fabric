@@ -318,6 +318,8 @@ impl Engine {
         let mut old = std::mem::replace(&mut slot.handle, handle);
         let old_generation = std::mem::replace(&mut slot.generation, generation);
         slot.stats.generation = generation;
+        slot.activated = true;
+        slot.pending_state = None;
         old.stop(&LifecycleContext {
             node_id: &id,
             generation: old_generation,
@@ -368,6 +370,17 @@ impl Engine {
         let mut captured: Vec<(String, StateBlob)> = Vec::new();
         for i in 0..self.slots.len() {
             let id = self.slots[i].id.clone();
+            if !self.slots[i].activated {
+                // An on-demand node that has not run yet keeps whatever state it was restored with.
+                if let Some(state) = self.slots[i]
+                    .pending_state
+                    .clone()
+                    .or_else(|| self.checkpoint.last.get(&id).cloned())
+                {
+                    captured.push((id, state));
+                }
+                continue;
+            }
             match self.slots[i].handle.export_state() {
                 Ok(Some(state)) => captured.push((id, state)),
                 Ok(None) => {}
@@ -415,6 +428,12 @@ impl Engine {
             let Some(state) = states.get(&id) else {
                 continue;
             };
+            if !self.slots[i].activated {
+                // Restored the moment the on-demand node is first used (as in .NET).
+                self.slots[i].pending_state = Some(state.clone());
+                self.checkpoint.last.insert(id.clone(), state.clone());
+                continue;
+            }
             match self.slots[i].handle.import_state(state) {
                 Ok(()) => {
                     self.checkpoint.last.insert(id.clone(), state.clone());

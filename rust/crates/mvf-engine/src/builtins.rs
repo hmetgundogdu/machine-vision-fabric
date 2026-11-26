@@ -176,6 +176,11 @@ const BUILTINS: &[Builtin] = &[
         contract: include_str!("contracts/folder-source.yaml"),
         factory: FolderSource::create,
     },
+    Builtin {
+        name: "dataset-writer",
+        contract: include_str!("contracts/dataset-writer.yaml"),
+        factory: crate::dataset::DatasetWriter::create,
+    },
 ];
 
 /// Names of every builtin this host provides.
@@ -205,7 +210,7 @@ pub fn instantiate_builtin(
     (b.factory)(config, services)
 }
 
-fn parse_config<T: for<'de> Deserialize<'de>>(
+pub(crate) fn parse_config<T: for<'de> Deserialize<'de>>(
     config: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<T, NodeError> {
     serde_path_to_error::deserialize(serde_json::Value::Object(config.clone())).map_err(|e| {
@@ -325,6 +330,11 @@ impl NodeHandle for SyntheticSource {
     fn import_state(&mut self, state: &StateBlob) -> Result<(), NodeError> {
         self.next_sequence = cursor_from(state)?;
         Ok(())
+    }
+
+    fn rewind(&mut self) -> Result<bool, NodeError> {
+        self.next_sequence = 1;
+        Ok(true)
     }
 
     fn execute(&mut self, ctx: &ExecContext<'_>, _: &Inputs) -> Result<Execution, NodeError> {
@@ -858,13 +868,20 @@ impl NodeHandle for PlcSim {
 struct FolderSourceConfig {
     /// Folder of frame files, relative to the pipeline package directory.
     source_folder: String,
-    /// Start over after the last file instead of reporting exhaustion.
+    /// Start over after the last file instead of reporting exhaustion (legacy; a `loop` primitive
+    /// in mode `forever` owns iteration now).
     #[serde(default)]
     r#loop: bool,
     /// Publish each frame into the shared-memory arena (one counted copy, like the .NET arena
     /// publish). Default: share the cached heap buffer.
     #[serde(default)]
     arena: bool,
+    /// Camera id stamped on frames (default: the node id; the .NET simulator uses `sim-cam-1`).
+    #[serde(default)]
+    camera_id: Option<String>,
+    /// Minimum interval between frames, milliseconds (pacing like the .NET simulator).
+    #[serde(default)]
+    frame_interval_ms: u64,
 }
 
 /// Replays files as raw byte frames (`blob`, u8). Files are read once at activation, so the run
@@ -874,6 +891,9 @@ pub struct FolderSource {
     frames: Vec<std::sync::Arc<[u8]>>,
     looping: bool,
     arena: bool,
+    camera_id: Option<String>,
+    interval: Duration,
+    last: Option<std::time::Instant>,
     next: u64,
     services: HostServices,
 }
@@ -916,6 +936,9 @@ impl FolderSource {
             frames,
             looping: c.r#loop,
             arena: c.arena,
+            camera_id: c.camera_id,
+            interval: Duration::from_millis(c.frame_interval_ms),
+            last: None,
             next: 0,
             services: services.clone(),
         }))
@@ -932,11 +955,23 @@ impl NodeHandle for FolderSource {
         Ok(())
     }
 
+    fn rewind(&mut self) -> Result<bool, NodeError> {
+        self.next = 0;
+        Ok(true)
+    }
+
     fn execute(&mut self, ctx: &ExecContext<'_>, _: &Inputs) -> Result<Execution, NodeError> {
         let count = self.frames.len() as u64;
         if !self.looping && self.next >= count {
             return Ok(Execution::Exhausted);
         }
+        if let Some(last) = self.last {
+            // Pace in short slices so cancellation stays responsive.
+            while last.elapsed() < self.interval && !ctx.cancel.is_cancelled() {
+                std::thread::sleep((self.interval - last.elapsed()).min(Duration::from_millis(20)));
+            }
+        }
+        self.last = Some(std::time::Instant::now());
         let bytes = &self.frames[(self.next % count) as usize];
         self.next += 1;
         let descriptor = Descriptor::blob(bytes.len() as u64);
@@ -953,16 +988,21 @@ impl NodeHandle for FolderSource {
         } else {
             Payload::heap(descriptor, bytes.clone()).map_err(NodeError::failed)?
         };
-        Ok(Execution::Produced(Outputs::new().with(
-            "frame",
-            Value::Frame(Frame {
-                meta: FrameMeta {
-                    source: ctx.node_id.to_string(),
-                    sequence: self.next,
-                },
-                payload,
-            }),
-        )))
+        Ok(Execution::Produced(
+            Outputs::new().with(
+                "frame",
+                Value::Frame(Frame {
+                    meta: FrameMeta {
+                        source: self
+                            .camera_id
+                            .clone()
+                            .unwrap_or_else(|| ctx.node_id.to_string()),
+                        sequence: self.next,
+                    },
+                    payload,
+                }),
+            ),
+        ))
     }
 }
 

@@ -130,7 +130,10 @@ impl ExecutionBackend for InProcessBackend {
                 "in-process backend received a non in-process artifact",
             ));
         };
-        let inner = instantiate_builtin(builtin, request.config, request.services)?;
+        let inner = match request.origin {
+            ContractOrigin::Primitive(kind) => crate::primitives::instantiate(*kind, request)?,
+            _ => instantiate_builtin(builtin, request.config, request.services)?,
+        };
         Ok(Box::new(PanicGuard {
             inner,
             poisoned: false,
@@ -199,5 +202,17 @@ impl NodeHandle for PanicGuard {
 
     fn import_state(&mut self, state: &StateBlob) -> Result<(), NodeError> {
         self.guard(|n| n.import_state(state))
+    }
+    fn rewind(&mut self) -> Result<bool, NodeError> {
+        self.guard(|n| n.rewind())
+    }
+    fn set_value(&mut self, value: &serde_json::Value) -> Result<(), NodeError> {
+        self.guard(|n| n.set_value(value))
+    }
+    fn reconfigure(
+        &mut self,
+        config: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<bool, NodeError> {
+        self.guard(|n| n.reconfigure(config))
     }
 }

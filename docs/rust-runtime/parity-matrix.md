@@ -18,7 +18,7 @@ Updated by every slice; the stage reports carry the details.
 | Ports derived from capability kind (source/processor/classifier/analyzer/gate/sink) | `IntegrationCapabilityKind` | explicit `spec.ports` per node | new — explicit typing replaces derivation |
 | `runtime: dotnet \| python \| node` | `ModuleManifest.Runtime` | `artifacts[].backend` + `worker.runtime: python \| executable` | partial — Python ported (existing SDK modules run unchanged); `node` not mapped; .NET modules → OCI (#18) |
 | `"module": "py.…"` references | pipeline JSON | `module:` + `modules/<dir>/node.yaml` | ported |
-| `lifecycle: resident \| on-demand` | `ModuleManifest.Lifecycle` | `spec.lifecycle.activation` | ported (schema) |
+| `lifecycle: resident \| on-demand` | `ModuleManifest.Lifecycle`, `OnDemandActivationTests` | `spec.lifecycle.activation` | ported (#25) — lazy start, state handed over at activation; activation failure goes through `onError` |
 | `backpressure: stall \| drop` | `ModuleManifest.Backpressure` | node `backpressure`, `run.backpressure` | ported (#24) |
 | `maxParallelism` | `ModuleManifest.MaxParallelism` | — | not yet (serial executor only) |
 | Readiness budget (`hello ready:false` → `ready`) | `protocol/README.md`, `WorkerReadinessTests` | `spec.lifecycle.readinessTimeoutMs` | ported |
@@ -40,15 +40,17 @@ Updated by every slice; the stage reports carry the details.
 | `pipeline.port.duplicate-name`, `missing-name` | `contract.port.duplicate-name`, `contract.port.invalid-name` | ported (at contract level) |
 | `pipeline.node.invalid-activation-mode` | closed enum → `yaml.schema` | ported |
 | `pipeline.node.invalid-backpressure`, `invalid-parallelism` | — | not yet |
-| value/select/loop/binding codes (`select-*`, `loop-*`, `invalid-binding-*`, `literal-type-mismatch`, `unresolvable-value`, `invalid-value-*`, `invalid-schema`) | — | not yet (primitives out of Gate A scope) |
-| `pipeline.edge.invalid-loop-target` | — | not yet (loop primitive) |
+| value/select/loop/binding codes (`select-*`, `loop-*`, `invalid-binding-*`, `literal-type-mismatch`, `unresolvable-value`, `invalid-value-*`, `invalid-schema`) | `graph.value.*`, `graph.select.*`, `graph.loop.*`, `graph.binding.*`, `graph.primitive.*`, `graph.edge.value-type-mismatch` | ported (#25) |
+| `pipeline.edge.invalid-loop-target` | `graph.edge.invalid-loop-target` (`edges.loop`, ids only) | ported (#25) |
 
 ## Execution, data plane, recovery
 
 | Behaviour | .NET tests | Rust | Status |
 |---|---|---|---|
-| Topological serial execution | `GraphTopologySorterTests`, `PipelineGraphExecutorTests` | `mvf-engine` executor | partial — DAG, sources-first, control gating; no primitives |
-| Fork / if / switch / select / value / loop primitives | `*PrimitiveNodeRunnerTests` | — | not yet |
+| Topological serial execution | `GraphTopologySorterTests`, `PipelineGraphExecutorTests` | `mvf-engine` executor | ported — DAG, sources-first, control gating, primitives (#25) |
+| Fork / if / switch / select / value / loop primitives | `*PrimitiveNodeRunnerTests`, `LoopAndRunningStateGraphTests`, `ValueAndSelectGraphTests` | `mvf_graph::primitive`, `mvf_engine::primitives`, `mvf_engine::live` | ported (#25) — demo outputs byte-identical with .NET ([stage 12](stages/12.md)); values travel on data edges (documented) |
+| Binding store, pre-pass, environment resolver | `BindingPrePassTests`, `ModuleBindingGraphTests` | `mvf_engine::bindings`, `RunOptions`/`--bindings` | ported (#25) — no interactive prompt (unattended host) |
+| Live tuning, pause/resume | `ValuePrimitiveNodeRunnerTests`, `LoopAndRunningStateGraphTests` | `ControlHandle::{set_value, configure, pause, resume}`, update-plan steps | ported (#25) — no TUI; scripted or API-driven |
 | Pipelined executor, joins, per-node parallelism | `PipelinedGraphExecutorTests` | — | not yet (out of Gate A) |
 | Shared-memory arena, refcounts, fan-out | `SharedMemoryArenaTests`, `PipelineGraphExecutorDataPlaneTests` | `mvf_memory::Arena` + `Payload::Arena` | ported — plus generation-checked handles and copy accounting |
 | Backpressure stall/drop | `PipelineGraphExecutorBackpressureTests` | `mvf_engine::recovery` | ported (#24) — serial semantics |
@@ -56,7 +58,7 @@ Updated by every slice; the stage reports carry the details.
 | Worker logs / observability | `WorkerLoggingTests`, `WorkerObservabilityTests` | `HostServices.logs` | partial — logs, stderr, supervisor events; no RPC latency metrics |
 | Epoch checkpoint / restore / resume | `PipelineGraphExecutorCheckpointTests`, `CheckpointResumeTests`, `WorkerCheckpointTests` | `run.checkpoint`, worker `checkpoint`/`restore` | ported (#24) — atomic epochs, durable resume, worker state |
 | Node failure policy (fail / restart) | `NodeResilienceTests`, `SourceFailureTests` | `onError`, `run.onError` | ported (#24) — plus explicit `skip`; Rust default `fail` for all roles |
-| Live config (`configure`) | `LiveConfigureTests` | — | not yet |
+| Live config (`configure`) | `LiveConfigureTests` | worker `reconfigure` over protocol `configure`, else reopen | ported (#25) |
 | Egress / TUI / web studio | `Egress*Tests`, `GlyphsAsciiTests` | — | out of scope (adapters at the edges) |
 
 ## New in Gate B (no .NET equivalent)

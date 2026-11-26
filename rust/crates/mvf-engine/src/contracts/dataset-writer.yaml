@@ -1,0 +1,14 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.dataset-writer
+  version: 1.0.0
+  description: Writes each frame as a file plus JSON metadata into a timestamped session directory. Counterpart of the .NET mvf.dataset-writer (same layout and file names).
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - { backend: in-process, builtin: dataset-writer }
+  lifecycle:
+    activation: resident

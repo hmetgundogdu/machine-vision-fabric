@@ -1,0 +1,76 @@
+# Rust twin of packages/inspection-demo (issue #25). Same frames, same Python modules, same graph:
+# `cycle` owns iteration (forever: the folder source is rewound when it runs dry); every frame fans
+# out five ways from `fork` — inverted and archived (Python), classified black/ok (Python) and routed
+# by `route` (switch) to saveBlack/saveOk, and counted by the stateful frame counter (Python) whose
+# `sample` switch keeps only even counts. `thr` is a live `value` (unconnected in the .NET package
+# too); `cam.frameIntervalMs` is a live module binding.
+#
+# Differences from the .NET document, all syntactic: node ids are lower-case (`save-black`), data and
+# loop edges are separate lists, and the folder source states its simulator camera id explicitly.
+#
+#   mvf-rs run rust/examples/inspection-demo/pipeline.yaml --max-cycles 200
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: inspection-demo
+  description: Rust twin of packages/inspection-demo — fork, switch, value, loop and three Python modules.
+spec:
+  nodes:
+    - id: cycle
+      primitive: loop
+      config: { mode: forever }
+    - id: thr
+      primitive: value
+      config:
+        type: int
+        binding: brightness.threshold
+        literal: 40
+        schema: { type: integer, minimum: 0, maximum: 255 }
+    - id: cam
+      builtin: folder-source
+      config:
+        sourceFolder: ../../../packages/multilang-demo/assets/frames
+        frameIntervalMs: 250
+        cameraId: sim-cam-1
+      bindings:
+        frameIntervalMs:
+          type: int
+          binding: cam.interval
+          schema: { type: integer, minimum: 0, maximum: 5000 }
+    - { id: fork, primitive: fork }
+    - { id: invert, module: py.invert-transformer }
+    - { id: bright, module: py.brightness-classifier }
+    - { id: count, module: py.frame-counter }
+    - { id: route, primitive: switch }
+    - { id: sample, primitive: switch }
+    - id: save-inverted
+      builtin: dataset-writer
+      config: { outputRoot: out/inverted, sessionPrefix: inverted }
+    - id: save-black
+      builtin: dataset-writer
+      config: { outputRoot: out/black, sessionPrefix: black }
+    - id: save-ok
+      builtin: dataset-writer
+      config: { outputRoot: out/ok, sessionPrefix: ok }
+    - id: save-sample
+      builtin: dataset-writer
+      config: { outputRoot: out/sample, sessionPrefix: sample }
+  edges:
+    data:
+      - { from: cam.frame, to: fork.frame }
+      - { from: fork.toInvert, to: invert.frame }
+      - { from: fork.toBright, to: bright.frame }
+      - { from: fork.toCount, to: count.frame }
+      - { from: fork.toRoute, to: route.frame }
+      - { from: fork.toSample, to: sample.frame }
+      - { from: invert.frame, to: save-inverted.frame }
+      - { from: bright.class, to: route.class }
+      - { from: route.black, to: save-black.frame }
+      - { from: route.ok, to: save-ok.frame }
+      - { from: count.class, to: sample.class }
+      - { from: sample.even, to: save-sample.frame }
+    loop:
+      - { from: save-inverted, to: cycle }
+      - { from: save-black, to: cycle }
+      - { from: save-ok, to: cycle }
+      - { from: save-sample, to: cycle }
