@@ -10,6 +10,7 @@ mod dataset;
 pub mod executor;
 pub mod live;
 pub mod node;
+pub mod pipelined;
 mod primitives;
 pub mod recovery;
 pub mod replace;

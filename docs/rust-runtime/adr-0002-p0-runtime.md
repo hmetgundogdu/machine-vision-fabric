@@ -36,10 +36,10 @@
 ## Decision on proceeding
 
 P0 is **not** achieved as a single demonstration (the single-host demo is blocked by hardware).
-P0.1 was first evaluated as incomplete and passes for DAG graphs since #24. Recommendation:
+P0.1 was first evaluated as incomplete; it passes since #24 (recovery) and #25 (primitives,
+pipelined executor). Recommendation:
 
 1. keep the .NET engine as the shipping implementation and the reference;
-2. continue the Rust runtime as research on this branch, prioritising graph-semantics parity
-   (primitives, joins, pipelined executor — #25) and a Linux + GPU host for the single-host P0 run
-   (#26);
+2. continue the Rust runtime as research on this branch, prioritising a Linux + GPU host for the
+   single-host P0 run (#26), Windows OCI (#27) and worker/arena hardening (#28);
 3. revisit migration only after those pass; do not merge to `main` or release from this branch.

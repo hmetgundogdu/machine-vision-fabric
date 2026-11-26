@@ -35,6 +35,8 @@ pub(crate) enum Recovery {
     Skip(SkipReason),
     /// End the run.
     End(EndReason),
+    /// Wait for downstream to release resources, then retry (pipelined `stall`).
+    Wait(NodeError),
 }
 
 /// Kinds of recovery events.
@@ -125,6 +127,248 @@ fn state_file(dir: &Path, node: &str) -> Option<PathBuf> {
         .then(|| dir.join(format!("{node}.state")))
 }
 
+/// What slot-level recovery needs besides the slot: shared, read-only host parts. Lets a pipelined
+/// stage thread restart its own node without exclusive access to the engine.
+pub(crate) struct RecoveryCtx<'a> {
+    pub(crate) backends: &'a crate::backend::BackendRegistry,
+    pub(crate) services: &'a crate::builtins::HostServices,
+    /// Last captured state per node (restored into a restarted instance).
+    pub(crate) last_states: &'a HashMap<String, StateBlob>,
+    /// The pipelined executor can wait for a drain, so `stall` waits there instead of ending.
+    pub(crate) can_wait: bool,
+}
+
+/// Logs and records one recovery event.
+pub(crate) fn note_event(
+    services: &crate::builtins::HostServices,
+    log: &mut Vec<RecoveryEvent>,
+    node: Option<(&str, u64)>,
+    cycle: u64,
+    kind: RecoveryKind,
+    attempt: Option<u32>,
+    message: Option<String>,
+) {
+    if let Some((n, generation)) = node {
+        let level = match kind {
+            RecoveryKind::Checkpointed | RecoveryKind::Restored | RecoveryKind::Restarted => {
+                "supervisor"
+            }
+            _ => "warn",
+        };
+        services.log(
+            n,
+            generation,
+            level,
+            format!(
+                "{kind:?}{}{}",
+                attempt
+                    .map(|a| format!(" (attempt {a})"))
+                    .unwrap_or_default(),
+                message
+                    .as_deref()
+                    .map(|m| format!(": {m}"))
+                    .unwrap_or_default()
+            ),
+        );
+    }
+    log.push(RecoveryEvent {
+        node: node.map(|(n, _)| n.to_string()),
+        cycle,
+        kind,
+        attempt,
+        message,
+    });
+}
+
+/// Decides what a failure of `slot` in `cycle` means under its policies.
+pub(crate) fn recover_slot(
+    slot: &mut crate::executor::NodeSlot,
+    ctx: &RecoveryCtx<'_>,
+    cycle: u64,
+    error: NodeError,
+    attempts: &mut u32,
+    cancel: &CancellationToken,
+    log: &mut Vec<RecoveryEvent>,
+) -> Recovery {
+    let id = slot.id.clone();
+    if error.kind == NodeErrorKind::Backpressure {
+        return match slot.backpressure {
+            mvf_graph::Backpressure::Drop => {
+                slot.stats.dropped += 1;
+                note_event(
+                    ctx.services,
+                    log,
+                    Some((&id, slot.generation)),
+                    cycle,
+                    RecoveryKind::Dropped,
+                    None,
+                    Some(error.message.clone()),
+                );
+                Recovery::Skip(SkipReason::Dropped(error.message))
+            }
+            mvf_graph::Backpressure::Stall if ctx.can_wait => Recovery::Wait(error),
+            mvf_graph::Backpressure::Stall => {
+                let mut e = error;
+                e.message = format!(
+                    "{} (backpressure: stall is lossless and the serial executor cannot wait for a drain — raise the arena slot count, or set `backpressure: drop` on this node)",
+                    e.message
+                );
+                Recovery::End(EndReason::NodeFailed {
+                    node: id,
+                    cycle,
+                    error: e,
+                })
+            }
+        };
+    }
+    if error.kind == NodeErrorKind::Cancelled || cancel.is_cancelled() {
+        return Recovery::End(EndReason::NodeFailed {
+            node: id,
+            cycle,
+            error,
+        });
+    }
+    let policy = slot.on_error.clone();
+    match policy.mode {
+        mvf_graph::FailureMode::Fail => Recovery::End(EndReason::NodeFailed {
+            node: id,
+            cycle,
+            error,
+        }),
+        mvf_graph::FailureMode::Skip => {
+            slot.stats.failures_skipped += 1;
+            note_event(
+                ctx.services,
+                log,
+                Some((&id, slot.generation)),
+                cycle,
+                RecoveryKind::Skipped,
+                None,
+                Some(error.message.clone()),
+            );
+            Recovery::Skip(SkipReason::Failure(error.message))
+        }
+        mvf_graph::FailureMode::Restart => loop {
+            *attempts += 1;
+            if !policy.allows(*attempts) {
+                note_event(
+                    ctx.services,
+                    log,
+                    Some((&id, slot.generation)),
+                    cycle,
+                    RecoveryKind::RestartsExhausted,
+                    Some(*attempts - 1),
+                    Some(error.message.clone()),
+                );
+                return Recovery::End(EndReason::NodeFailed {
+                    node: id,
+                    cycle,
+                    error,
+                });
+            }
+            let until = Instant::now() + policy.backoff(*attempts);
+            while Instant::now() < until {
+                if cancel.is_cancelled() {
+                    return Recovery::End(EndReason::Cancelled);
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            match restart_slot(slot, ctx, cancel, cycle, log) {
+                Ok(()) => {
+                    slot.stats.restarts += 1;
+                    note_event(
+                        ctx.services,
+                        log,
+                        Some((&id, slot.generation)),
+                        cycle,
+                        RecoveryKind::Restarted,
+                        Some(*attempts),
+                        Some(error.message.clone()),
+                    );
+                    return Recovery::Retry;
+                }
+                Err(e) => note_event(
+                    ctx.services,
+                    log,
+                    Some((&id, slot.generation)),
+                    cycle,
+                    RecoveryKind::RestartFailed,
+                    Some(*attempts),
+                    Some(e.message),
+                ),
+            }
+        },
+    }
+}
+
+/// Hard restart: stop the failed instance, build and start a fresh one of the active
+/// implementation (contract, origin, config), restore its last captured state.
+pub(crate) fn restart_slot(
+    slot: &mut crate::executor::NodeSlot,
+    ctx: &RecoveryCtx<'_>,
+    cancel: &CancellationToken,
+    cycle: u64,
+    log: &mut Vec<RecoveryEvent>,
+) -> Result<(), NodeError> {
+    let generation = slot.next_generation;
+    slot.next_generation += 1;
+    let (mut handle, _) = ctx.backends.instantiate(&InstantiateRequest {
+        node_id: &slot.id,
+        contract: &slot.contract,
+        origin: &slot.origin,
+        config: &slot.config,
+        generation,
+        services: ctx.services,
+    })?;
+    let start = LifecycleContext {
+        node_id: &slot.id,
+        generation,
+        budget: Duration::from_millis(slot.contract.spec.lifecycle.readiness_timeout_ms),
+        cancel,
+    };
+    if let Err(e) = handle.start(&start) {
+        handle.stop(&start);
+        return Err(e);
+    }
+    let restored = ctx
+        .last_states
+        .get(&slot.id)
+        .map(|state| handle.import_state(state));
+    let mut old = std::mem::replace(&mut slot.handle, handle);
+    let old_generation = std::mem::replace(&mut slot.generation, generation);
+    slot.stats.generation = generation;
+    slot.activated = true;
+    slot.pending_state = None;
+    old.stop(&LifecycleContext {
+        node_id: &slot.id,
+        generation: old_generation,
+        budget: Duration::from_millis(500),
+        cancel,
+    });
+    match restored {
+        Some(Ok(())) => note_event(
+            ctx.services,
+            log,
+            Some((&slot.id, generation)),
+            cycle,
+            RecoveryKind::Restored,
+            None,
+            Some("restarted instance restored its last checkpoint".into()),
+        ),
+        Some(Err(e)) => note_event(
+            ctx.services,
+            log,
+            Some((&slot.id, generation)),
+            cycle,
+            RecoveryKind::RestoreFailed,
+            None,
+            Some(e.message),
+        ),
+        None => {}
+    }
+    Ok(())
+}
+
 impl Engine {
     fn note(
         &mut self,
@@ -134,45 +378,27 @@ impl Engine {
         attempt: Option<u32>,
         message: Option<String>,
     ) {
-        if let Some(n) = node {
+        let node = node.map(|n| {
             let generation = self
                 .slots
                 .iter()
                 .find(|s| s.id == n)
                 .map(|s| s.generation)
                 .unwrap_or(0);
-            let level = match kind {
-                RecoveryKind::Checkpointed | RecoveryKind::Restored | RecoveryKind::Restarted => {
-                    "supervisor"
-                }
-                _ => "warn",
-            };
-            self.services.log(
-                n,
-                generation,
-                level,
-                format!(
-                    "{kind:?}{}{}",
-                    attempt
-                        .map(|a| format!(" (attempt {a})"))
-                        .unwrap_or_default(),
-                    message
-                        .as_deref()
-                        .map(|m| format!(": {m}"))
-                        .unwrap_or_default()
-                ),
-            );
-        }
-        self.recovery_log.push(RecoveryEvent {
-            node: node.map(str::to_string),
+            (n, generation)
+        });
+        note_event(
+            &self.services,
+            &mut self.recovery_log,
+            node,
             cycle,
             kind,
             attempt,
             message,
-        });
+        );
     }
 
-    /// Decides what a failure of node `i` in `cycle` means under its policies.
+    /// Decides what a failure of node `i` in `cycle` means under its policies (serial executor).
     pub(crate) fn recover(
         &mut self,
         i: usize,
@@ -181,170 +407,21 @@ impl Engine {
         attempts: &mut u32,
         cancel: &CancellationToken,
     ) -> Recovery {
-        let id = self.slots[i].id.clone();
-        if error.kind == NodeErrorKind::Backpressure {
-            return match self.slots[i].backpressure {
-                mvf_graph::Backpressure::Drop => {
-                    self.slots[i].stats.dropped += 1;
-                    self.note(
-                        Some(&id),
-                        cycle,
-                        RecoveryKind::Dropped,
-                        None,
-                        Some(error.message.clone()),
-                    );
-                    Recovery::Skip(SkipReason::Dropped(error.message))
-                }
-                mvf_graph::Backpressure::Stall => {
-                    let mut e = error;
-                    e.message = format!(
-                        "{} (backpressure: stall is lossless and the serial executor cannot wait for a drain — raise the arena slot count, or set `backpressure: drop` on this node)",
-                        e.message
-                    );
-                    Recovery::End(EndReason::NodeFailed {
-                        node: id,
-                        cycle,
-                        error: e,
-                    })
-                }
-            };
-        }
-        if error.kind == NodeErrorKind::Cancelled || cancel.is_cancelled() {
-            return Recovery::End(EndReason::NodeFailed {
-                node: id,
-                cycle,
-                error,
-            });
-        }
-        let policy = self.slots[i].on_error.clone();
-        match policy.mode {
-            mvf_graph::FailureMode::Fail => Recovery::End(EndReason::NodeFailed {
-                node: id,
-                cycle,
-                error,
-            }),
-            mvf_graph::FailureMode::Skip => {
-                self.slots[i].stats.failures_skipped += 1;
-                self.note(
-                    Some(&id),
-                    cycle,
-                    RecoveryKind::Skipped,
-                    None,
-                    Some(error.message.clone()),
-                );
-                Recovery::Skip(SkipReason::Failure(error.message))
-            }
-            mvf_graph::FailureMode::Restart => loop {
-                *attempts += 1;
-                if !policy.allows(*attempts) {
-                    self.note(
-                        Some(&id),
-                        cycle,
-                        RecoveryKind::RestartsExhausted,
-                        Some(*attempts - 1),
-                        Some(error.message.clone()),
-                    );
-                    return Recovery::End(EndReason::NodeFailed {
-                        node: id,
-                        cycle,
-                        error,
-                    });
-                }
-                let until = Instant::now() + policy.backoff(*attempts);
-                while Instant::now() < until {
-                    if cancel.is_cancelled() {
-                        return Recovery::End(EndReason::Cancelled);
-                    }
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                match self.restart_node(i, cancel) {
-                    Ok(()) => {
-                        self.slots[i].stats.restarts += 1;
-                        self.note(
-                            Some(&id),
-                            cycle,
-                            RecoveryKind::Restarted,
-                            Some(*attempts),
-                            Some(error.message.clone()),
-                        );
-                        return Recovery::Retry;
-                    }
-                    Err(e) => self.note(
-                        Some(&id),
-                        cycle,
-                        RecoveryKind::RestartFailed,
-                        Some(*attempts),
-                        Some(e.message),
-                    ),
-                }
-            },
-        }
-    }
-
-    /// Hard restart: stop the failed instance, build and start a fresh one of the active
-    /// implementation (contract, origin, config), restore its last captured state.
-    fn restart_node(&mut self, i: usize, cancel: &CancellationToken) -> Result<(), NodeError> {
-        let generation = self.slots[i].next_generation;
-        self.slots[i].next_generation += 1;
-        let (mut handle, _) = {
-            let slot = &self.slots[i];
-            self.backends.instantiate(&InstantiateRequest {
-                node_id: &slot.id,
-                contract: &slot.contract,
-                origin: &slot.origin,
-                config: &slot.config,
-                generation,
-                services: &self.services,
-            })?
+        let ctx = RecoveryCtx {
+            backends: &self.backends,
+            services: &self.services,
+            last_states: &self.checkpoint.last,
+            can_wait: false,
         };
-        let slot = &self.slots[i];
-        let ctx = LifecycleContext {
-            node_id: &slot.id,
-            generation,
-            budget: Duration::from_millis(slot.contract.spec.lifecycle.readiness_timeout_ms),
+        recover_slot(
+            &mut self.slots[i],
+            &ctx,
+            cycle,
+            error,
+            attempts,
             cancel,
-        };
-        if let Err(e) = handle.start(&ctx) {
-            handle.stop(&ctx);
-            return Err(e);
-        }
-        let restored = self
-            .checkpoint
-            .last
-            .get(&slot.id)
-            .map(|state| handle.import_state(state));
-        let id = slot.id.clone();
-        let slot = &mut self.slots[i];
-        let mut old = std::mem::replace(&mut slot.handle, handle);
-        let old_generation = std::mem::replace(&mut slot.generation, generation);
-        slot.stats.generation = generation;
-        slot.activated = true;
-        slot.pending_state = None;
-        old.stop(&LifecycleContext {
-            node_id: &id,
-            generation: old_generation,
-            budget: Duration::from_millis(500),
-            cancel,
-        });
-        let cycle = self.next_cycle;
-        match restored {
-            Some(Ok(())) => self.note(
-                Some(&id),
-                cycle,
-                RecoveryKind::Restored,
-                None,
-                Some("restarted instance restored its last checkpoint".into()),
-            ),
-            Some(Err(e)) => self.note(
-                Some(&id),
-                cycle,
-                RecoveryKind::RestoreFailed,
-                None,
-                Some(e.message),
-            ),
-            None => {}
-        }
-        Ok(())
+            &mut self.recovery_log,
+        )
     }
 
     pub(crate) fn configure_checkpoints(&mut self, options: &RunOptions) {

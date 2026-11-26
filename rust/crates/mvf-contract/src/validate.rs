@@ -352,6 +352,22 @@ fn check_targets(targets: Option<&[Target]>, path: &str, issues: &mut Issues) {
 }
 
 fn validate_policy(spec: &NodeSpec, issues: &mut Issues) {
+    if spec.execution.max_parallelism == 0 || spec.execution.max_parallelism > 64 {
+        issues.push(
+            "contract.execution.invalid-max-parallelism",
+            "spec.execution.maxParallelism".to_string(),
+            "maxParallelism must be within 1..=64",
+        );
+    }
+    if spec.execution.max_parallelism > 1
+        && spec.lifecycle.replacement == crate::Replacement::Stateful
+    {
+        issues.push(
+            "contract.execution.stateful-parallelism",
+            "spec.execution.maxParallelism".to_string(),
+            "a stateful node cannot be replicated: N instances would hold N diverging states",
+        );
+    }
     let placement = &spec.execution.placement;
     let artifact_targets: HashSet<Target> =
         spec.artifacts.iter().flat_map(|a| a.targets()).collect();

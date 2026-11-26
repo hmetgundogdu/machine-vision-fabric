@@ -91,7 +91,7 @@ Every operation is recorded in `RunReport.live`; the `loop` counters are in `Run
 | An unresolved binding prompts an operator (TUI/terminal) | The run fails before cycle 1, naming the binding, the store path and `MVF_BINDING_<KEY>` | The Rust host is unattended. There is no TUI in scope. |
 | On-demand activation failure: warn, then skip the node forever | handled by the node's `onError` (default `fail`; `skip` reproduces .NET) | Nothing fails silently unless configured. |
 | An edited module binding always reopens the node, except for `ILiveConfigurable` nodes | A worker that advertises `configure` takes it live; any other node is reopened | Same model; the Rust worker protocol already carries `configure`. |
-| Pipelined mode rejects `loop`, `value`, `select` and on-demand nodes | see [stage 13](stages/13.md) | |
+| Pipelined mode rejects `loop`, `value`, `select` and on-demand nodes | pipelined mode runs all of them, with outputs identical to serial ([stage 13](stages/13.md)) | The driver paces `value`s per cycle and owns the loop; quiesce points give the serial boundary. |
 | Node ids are `camelCase` | Node ids are lower-case (`save-black`); port names may be camelCase | The Rust contract id rule. |
 
 ## Evidence

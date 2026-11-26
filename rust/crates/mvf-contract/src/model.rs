@@ -353,6 +353,14 @@ pub struct Execution {
     /// Preferred target and what to do when it is unavailable.
     #[serde(default)]
     pub placement: Placement,
+    /// How many instances of this node the pipelined executor may run side by side. Above 1 the
+    /// author asserts the node keeps no state across frames (the .NET `maxParallelism`). Default 1.
+    #[serde(default = "one_instance")]
+    pub max_parallelism: u32,
+}
+
+fn one_instance() -> u32 {
+    1
 }
 
 impl Default for Execution {
@@ -360,6 +368,7 @@ impl Default for Execution {
         Self {
             backend: BackendPreference::Auto,
             placement: Placement::default(),
+            max_parallelism: 1,
         }
     }
 }

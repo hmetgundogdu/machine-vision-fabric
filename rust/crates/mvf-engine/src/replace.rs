@@ -368,6 +368,9 @@ impl Engine {
     }
 
     pub(crate) fn on_boundary(&mut self, cancel: &CancellationToken) {
+        for command in std::mem::take(&mut self.stashed) {
+            self.handle_command(command, cancel);
+        }
         while let Ok(command) = self.control_rx.try_recv() {
             self.handle_command(command, cancel);
         }

@@ -1,0 +1,14 @@
+# Rust-runtime twin of pipeline-numpy-parallel.json: the Python stage runs 4 instances (legal because
+# py.bench-numpy declares maxParallelism 4 — it keeps no state). Run with `--mode pipelined`; the
+# arena is sized from the graph.
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: bench-numpy-parallel
+spec:
+  nodes:
+    - { id: cam, builtin: folder-source, config: { sourceFolder: assets/frames, loop: true, arena: true } }
+    - { id: bench, module: py.bench-numpy, parallelism: 4 }
+  edges:
+    data:
+      - { from: cam.frame, to: bench.frame }

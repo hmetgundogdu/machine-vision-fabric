@@ -100,6 +100,12 @@ enum Command {
         /// Durable checkpoint directory; a run that finds one resumes after its last epoch.
         #[arg(long)]
         checkpoint_dir: Option<PathBuf>,
+        /// `serial` (one cycle at a time) or `pipelined` (stage-parallel, bounded queues).
+        #[arg(long, value_enum, default_value_t = Mode::Serial)]
+        mode: Mode,
+        /// Pipelined: depth of each inter-stage queue (default 2).
+        #[arg(long)]
+        queue: Option<usize>,
     },
     /// List the builtins and backends this host provides.
     Host,
@@ -131,6 +137,8 @@ fn main() -> ExitCode {
             require_oci,
             checkpoint_every,
             checkpoint_dir,
+            mode,
+            queue,
         } => {
             if require_gpu && gpu_context().is_none() {
                 return fail(
@@ -155,6 +163,8 @@ fn main() -> ExitCode {
                     max_cycles,
                     checkpoint_every,
                     checkpoint_dir,
+                    pipelined: mode == Mode::Pipelined,
+                    queue,
                     ..RunOptions::default()
                 },
                 json,
@@ -305,10 +315,36 @@ fn services_for(args: &PipelineArgs, base: HostServices) -> HostServices {
 }
 
 fn load_engine(args: &PipelineArgs, services: &HostServices) -> Result<Engine, ExitCode> {
+    load_engine_for(args, services, None)
+}
+
+/// With `pipelined_queue`, the arena is sized from the graph (unless `--arena-slots` was given):
+/// stage-parallel runs keep a queue's worth of frames in flight per edge.
+fn load_engine_for(
+    args: &PipelineArgs,
+    services: &HostServices,
+    pipelined_queue: Option<usize>,
+) -> Result<Engine, ExitCode> {
     let text = std::fs::read_to_string(&args.pipeline)
         .map_err(|e| fail(2, format!("{}: {e}", args.pipeline.display())))?;
     let graph = mvf_graph::build_graph(&text, &resolver(args)).map_err(|e| fail(2, e))?;
-    Engine::build(graph, &host_backends(), services).map_err(|e| fail(2, e))
+    let mut services = services.clone();
+    if let Some(queue) = pipelined_queue
+        && args.arena_slots.is_none()
+    {
+        services.arena_config.slot_count =
+            mvf_engine::pipelined::arena_slots_for(&graph, queue, services.arena_config.slot_count);
+    }
+    Engine::build(graph, &host_backends(), &services).map_err(|e| fail(2, e))
+}
+
+/// Execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Mode {
+    /// One cycle at a time.
+    Serial,
+    /// Stage-parallel with bounded inter-stage queues.
+    Pipelined,
 }
 
 fn validate(args: &PipelineArgs) -> ExitCode {
@@ -616,7 +652,12 @@ fn run(
             ..HostServices::with_recorder(Recorder::streaming(move |r| print_record(r, json)))
         },
     );
-    let mut engine = match load_engine(args, &services) {
+    let queue = options.pipelined.then(|| {
+        options
+            .queue
+            .unwrap_or(mvf_engine::pipelined::DEFAULT_QUEUE)
+    });
+    let mut engine = match load_engine_for(args, &services, queue) {
         Ok(e) => e,
         Err(code) => return code,
     };

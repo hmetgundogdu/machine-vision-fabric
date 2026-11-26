@@ -6,6 +6,7 @@
 #
 #   rust/scripts/parity-demos.sh                 # 24 cycles per demo
 #   CYCLES=40 SKIP_BUILD=1 rust/scripts/parity-demos.sh
+#   RUST_MODE=pipelined rust/scripts/parity-demos.sh   # the Rust twins stage-parallel
 #
 # value-demo: the .NET CLI exposes no selection output, so its dataset is compared like the others
 # and the Rust selections are checked against what the .NET reference tests assert
@@ -13,6 +14,7 @@
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 CYCLES=${CYCLES:-24}
+RUST_MODE=${RUST_MODE:-serial}
 DEMOS=${DEMOS:-"inspection-demo loop-demo value-demo"}
 WORK=${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/mvf-parity.XXXXXX")}
 export MVF_BINDING_CAMERA_SERIAL=DEF456
@@ -53,7 +55,7 @@ PY
   sed -E 's/frameIntervalMs: [0-9]+/frameIntervalMs: 0/' "$REPO/rust/examples/$demo/pipeline.yaml" \
     > "$WORK/rust/rust/examples/$demo/pipeline.yaml"
   "$MVF_RS" run "$WORK/rust/rust/examples/$demo/pipeline.yaml" --modules "$REPO/modules" \
-    --max-cycles "$CYCLES" --json > "$WORK/rust/$demo.jsonl" 2> "$WORK/rust/$demo.err" \
+    --max-cycles "$CYCLES" --mode "$RUST_MODE" --json > "$WORK/rust/$demo.jsonl" 2> "$WORK/rust/$demo.err" \
     || { echo "Rust $demo failed:"; tail -5 "$WORK/rust/$demo.err"; exit 1; }
 done
 
@@ -112,6 +114,6 @@ for demo in demos:
               f"pick-protocol={'[ABC123, DEF456]' if narrowed == want_many else narrowed} "
               f"every cycle={n_one == cycles} -> {'MATCH' if sel and n_one == cycles else 'MISMATCH'}")
         ok = ok and sel and n_one == cycles
-print("PARITY", "PASS" if ok else "FAIL", f"({cycles} cycles per demo, work dir {work})")
+print("PARITY", "PASS" if ok else "FAIL", f"({cycles} cycles per demo, Rust mode {os.environ.get('RUST_MODE', 'serial')}, work dir {work})")
 sys.exit(0 if ok else 1)
 PY

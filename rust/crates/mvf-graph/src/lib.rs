@@ -97,6 +97,9 @@ pub struct NodeRef {
     /// Live-editable config fields, persisted under a binding key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bindings: Option<ModuleBindings>,
+    /// Instances the pipelined executor runs side by side (≤ the contract's `maxParallelism`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallelism: Option<u32>,
     /// Instance configuration handed to the implementation (validated by it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Map<String, serde_json::Value>>,
@@ -340,6 +343,8 @@ pub struct GraphNode {
     /// Live-editable config fields.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub bindings: ModuleBindings,
+    /// Instances in the pipelined executor (1 = no replication).
+    pub parallelism: u32,
 }
 
 impl GraphNode {
@@ -747,6 +752,19 @@ pub fn build_from_document(
                 "primitives have no module config to bind; tune a `value` node instead".into(),
             );
         }
+        if let Some((_, contract)) = &resolved
+            && let Some(p) = node.parallelism
+            && (p == 0 || p > contract.spec.execution.max_parallelism)
+        {
+            issue(
+                "graph.node.invalid-parallelism",
+                format!("{path}.parallelism"),
+                format!(
+                    "`{}` asks for parallelism {p} but its contract allows 1..={}; a node opts into replication with `spec.execution.maxParallelism`, which asserts it keeps no state across frames",
+                    node.id, contract.spec.execution.max_parallelism
+                ),
+            );
+        }
         if let Some((origin, contract)) = resolved {
             let role_default = if primitive.is_none() && contract.spec.ports.inputs.is_empty() {
                 &spec.run.on_error.sources
@@ -769,6 +787,7 @@ pub fn build_from_document(
                 backpressure: node.backpressure.unwrap_or(spec.run.backpressure),
                 primitive,
                 bindings,
+                parallelism: node.parallelism.unwrap_or(1),
             });
         }
     }

@@ -1,0 +1,18 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: test.parallel-invert
+  version: 1.0.0
+  description: The builtin invert, declared replicable (it keeps no state across frames).
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - { backend: in-process, builtin: invert }
+  execution:
+    maxParallelism: 4
+  lifecycle:
+    replacement: stateless

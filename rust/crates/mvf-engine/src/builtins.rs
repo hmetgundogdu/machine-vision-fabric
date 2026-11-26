@@ -359,8 +359,8 @@ impl NodeHandle for SyntheticSource {
                 self.next_sequence
             )));
         }
+        // The cursor advances only once the frame exists, so a backpressure retry is lossless.
         let sequence = self.next_sequence;
-        self.next_sequence += 1;
         let c = &self.config;
         let descriptor = Descriptor::image_u8(c.height, c.width, c.channels);
         let len = descriptor.byte_len().unwrap_or(0) as usize;
@@ -392,6 +392,7 @@ impl NodeHandle for SyntheticSource {
             Payload::heap(descriptor, Self::pixels(c.seed, sequence, len))
                 .map_err(NodeError::failed)?
         };
+        self.next_sequence += 1;
         let source = c
             .source_id
             .clone()
@@ -973,7 +974,6 @@ impl NodeHandle for FolderSource {
         }
         self.last = Some(std::time::Instant::now());
         let bytes = &self.frames[(self.next % count) as usize];
-        self.next += 1;
         let descriptor = Descriptor::blob(bytes.len() as u64);
         let payload = if self.arena {
             let arena = self
@@ -988,6 +988,8 @@ impl NodeHandle for FolderSource {
         } else {
             Payload::heap(descriptor, bytes.clone()).map_err(NodeError::failed)?
         };
+        // Advance only once the frame exists, so a backpressure retry is lossless.
+        self.next += 1;
         Ok(Execution::Produced(
             Outputs::new().with(
                 "frame",

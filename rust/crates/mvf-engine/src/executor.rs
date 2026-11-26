@@ -210,6 +210,10 @@ pub struct RunOptions {
     pub checkpoint_every: Option<u64>,
     /// Overrides `run.checkpoint.directory` (absolute or relative to the working directory).
     pub checkpoint_dir: Option<std::path::PathBuf>,
+    /// Run stage-parallel (the pipelined executor) instead of one cycle at a time.
+    pub pipelined: bool,
+    /// Pipelined: depth of each inter-stage queue (default [`crate::pipelined::DEFAULT_QUEUE`]).
+    pub queue: Option<usize>,
 }
 
 /// A node slot: the active handle plus its routing generation.
@@ -228,6 +232,8 @@ pub(crate) struct NodeSlot {
     /// A restored state waiting for an on-demand node's activation.
     pub(crate) pending_state: Option<StateBlob>,
     pub(crate) handle: Box<dyn NodeHandle>,
+    /// Extra instances of a replicated node (pipelined `parallelism`), started on first use.
+    pub(crate) replicas: Vec<Box<dyn NodeHandle>>,
     pub(crate) generation: u64,
     pub(crate) stats: NodeStats,
     /// Next generation number to hand out (monotonic per node).
@@ -250,7 +256,7 @@ pub struct Engine {
     pub(crate) next_cycle: u64,
     started: bool,
     pub(crate) services: HostServices,
-    deliveries: DataPlaneReport,
+    pub(crate) deliveries: DataPlaneReport,
     pub(crate) backends: BackendRegistry,
     pub(crate) control_tx: Sender<ControlCommand>,
     pub(crate) control_rx: Receiver<ControlCommand>,
@@ -258,6 +264,8 @@ pub struct Engine {
     pub(crate) recovery_log: Vec<RecoveryEvent>,
     pub(crate) checkpoint: CheckpointState,
     pub(crate) live_log: Vec<LiveEvent>,
+    /// Commands the pipelined driver received mid-segment, applied at the next boundary.
+    pub(crate) stashed: Vec<ControlCommand>,
     pub(crate) iteration: IterationReport,
     /// Whole-graph pause (only with a `loop`), with an optional automatic resume.
     pub(crate) paused: Option<Option<Instant>>,
@@ -326,6 +334,7 @@ impl Engine {
                 activated: false,
                 pending_state: None,
                 handle,
+                replicas: Vec::new(),
                 generation: 1,
                 stats: NodeStats {
                     id: node.id.clone(),
@@ -378,6 +387,7 @@ impl Engine {
             recovery_log: Vec::new(),
             checkpoint: CheckpointState::default(),
             live_log: Vec::new(),
+            stashed: Vec::new(),
             iteration,
             paused: None,
             timings: (0.0, 0.0),
@@ -395,6 +405,11 @@ impl Engine {
     /// The validated graph.
     pub fn graph(&self) -> &Graph {
         &self.graph
+    }
+
+    /// Execution order (sources first), without the `loop`.
+    pub(crate) fn exec_order(&self) -> &[usize] {
+        &self.exec_order
     }
 
     /// Current statistics.
@@ -435,6 +450,14 @@ impl Engine {
                 continue;
             }
             slot.activated = false;
+            for mut replica in std::mem::take(&mut slot.replicas) {
+                replica.stop(&LifecycleContext {
+                    node_id: &slot.id,
+                    generation: slot.generation,
+                    budget: Duration::from_millis(slot.contract.spec.lifecycle.drain_timeout_ms),
+                    cancel,
+                });
+            }
             let ctx = LifecycleContext {
                 node_id: &slot.id,
                 generation: slot.generation,
@@ -459,9 +482,13 @@ impl Engine {
                 self.resume_from_checkpoint();
                 let cancel = options.cancel.clone();
                 let t0 = Instant::now();
-                let end = self.run_cycles(options, observer, &mut |e: &mut Engine| {
-                    e.on_boundary(&cancel)
-                });
+                let end = if options.pipelined {
+                    self.run_cycles_pipelined(options, observer)
+                } else {
+                    self.run_cycles(options, observer, &mut |e: &mut Engine| {
+                        e.on_boundary(&cancel)
+                    })
+                };
                 self.timings.1 = t0.elapsed().as_secs_f64() * 1e3;
                 end
             }
@@ -545,7 +572,7 @@ impl Engine {
     }
 
     /// Executes one cycle. Returns `Some(end)` when the run must end.
-    fn run_cycle(
+    pub(crate) fn run_cycle(
         &mut self,
         cycle: u64,
         cancel: &CancellationToken,
@@ -618,6 +645,13 @@ impl Engine {
                         continue 'nodes;
                     }
                     Recovery::End(end) => return Some(end),
+                    Recovery::Wait(error) => {
+                        return Some(EndReason::NodeFailed {
+                            node: self.slots[i].id.clone(),
+                            cycle,
+                            error,
+                        });
+                    }
                 }
             }
             // Executes on the active generation. A candidate that fails during probation is rolled
@@ -683,6 +717,14 @@ impl Engine {
                             continue 'nodes;
                         }
                         Recovery::End(end) => return Some(end),
+                        // The serial executor never waits (`can_wait: false`).
+                        Recovery::Wait(error) => {
+                            return Some(EndReason::NodeFailed {
+                                node: self.slots[i].id.clone(),
+                                cycle,
+                                error,
+                            });
+                        }
                     },
                 }
             };
@@ -707,7 +749,7 @@ impl Engine {
 }
 
 /// Re-checks every emitted value against the active generation's declared outputs.
-fn validate_outputs(
+pub(crate) fn validate_outputs(
     contract: &NodeContract,
     outputs: Outputs,
 ) -> Result<std::collections::BTreeMap<String, Value>, NodeError> {

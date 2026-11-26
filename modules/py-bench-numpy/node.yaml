@@ -15,3 +15,5 @@ spec:
     - { backend: worker, runtime: python, entry: classifier.py, protocol: 1 }
   isolation:
     minimum: process
+  execution:
+    maxParallelism: 4   # as module.json: computes a mean per frame, keeps no state

@@ -52,6 +52,7 @@ spec:
 | `execution.backend` | `auto` or a backend | `auto` | A pinned backend is never substituted. |
 | `execution.placement.target` | `cpu`, `gpu` | `cpu` | |
 | `execution.placement.fallback` | `deny`, `cpu` | `deny` | A fallback is always reported as a placement note. |
+| `execution.maxParallelism` | `1..=64` | `1` | Instances the pipelined executor may run side by side (node `parallelism`). Above 1 asserts the node keeps no state; refused for `replacement: stateful` (`contract.execution.stateful-parallelism`). |
 | `isolation.minimum` | `none`, `process`, `sandbox`, `vm` | `none` | Replaces the ambiguous `isolation.required: true` (rejected as an unknown field). |
 | `memory.domain` | `host`, `device` | `host` | `device` requires `target: gpu`. |
 | `memory.zeroCopy` | `required`, `preferred`, `disabled` | `preferred` | `required` fails negotiation on a copying backend. |
@@ -110,7 +111,7 @@ Contract: `contract.api-version.unsupported`, `contract.kind.unsupported`,
 `contract.artifact.unsupported-protocol`, `contract.artifact.invalid-image`,
 `contract.artifact.invalid-digest`, `contract.artifact.invalid-entry-point`,
 `contract.artifact.no-targets`, `contract.artifact.duplicate-target`,
-`contract.execution.backend-without-artifact`, `contract.placement.no-artifact-for-target`,
+`contract.execution.backend-without-artifact`, `contract.execution.invalid-max-parallelism`, `contract.execution.stateful-parallelism`, `contract.placement.no-artifact-for-target`,
 `contract.placement.redundant-fallback`, `contract.memory.device-without-gpu`,
 `contract.memory.zero-copy-conflicts-with-fallback`, `contract.lifecycle.timeout-out-of-range`,
 `contract.lifecycle.stateful-without-state`, `contract.lifecycle.state-without-stateful`,
