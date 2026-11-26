@@ -11,9 +11,7 @@ fn engine(text: &str, recorder: &Recorder) -> Engine {
     Engine::build(
         graph,
         &default_backends(),
-        &HostServices {
-            recorder: recorder.clone(),
-        },
+        &HostServices::with_recorder(recorder.clone()),
     )
     .expect("build")
 }

@@ -16,11 +16,12 @@ Updated by every slice; the stage reports carry the details.
 |---|---|---|---|
 | Module manifest `id/name/version/kind/runtime/entry` | `ModuleManifest.cs` (`module.json`) | `NodeContract.metadata` + `spec.artifacts` | partial — `kind` (port derivation) is replaced by explicit typed ports; `name` → `description` |
 | Ports derived from capability kind (source/processor/classifier/analyzer/gate/sink) | `IntegrationCapabilityKind` | explicit `spec.ports` per node | new — explicit typing replaces derivation |
-| `runtime: dotnet \| python \| node` | `ModuleManifest.Runtime` | `artifacts[].backend` + `worker.runtime: python \| executable` | partial — `node` runtime not mapped; .NET modules → worker/OCI (#13, #18) |
+| `runtime: dotnet \| python \| node` | `ModuleManifest.Runtime` | `artifacts[].backend` + `worker.runtime: python \| executable` | partial — Python ported (existing SDK modules run unchanged); `node` not mapped; .NET modules → OCI (#18) |
+| `"module": "py.…"` references | pipeline JSON | `module:` + `modules/<dir>/node.yaml` | ported |
 | `lifecycle: resident \| on-demand` | `ModuleManifest.Lifecycle` | `spec.lifecycle.activation` | ported (schema) |
 | `backpressure: stall \| drop` | `ModuleManifest.Backpressure` | — | not yet (bounded admission in #14) |
 | `maxParallelism` | `ModuleManifest.MaxParallelism` | — | not yet (serial executor only) |
-| Readiness budget (`hello ready:false` → `ready`) | `protocol/README.md`, `WorkerReadinessTests` | `spec.lifecycle.readinessTimeoutMs` | ported (schema); enforcement in #13 |
+| Readiness budget (`hello ready:false` → `ready`) | `protocol/README.md`, `WorkerReadinessTests` | `spec.lifecycle.readinessTimeoutMs` | ported |
 | Typed payload descriptor (192-byte header, `MVF1`) | `PayloadDescriptor.cs` | — | not yet (#14) |
 | Isolation / resource / memory / placement policy | — | `spec.isolation`, `spec.resources`, `spec.memory`, `spec.execution` | new |
 | Live replacement + versioned state | — | `spec.lifecycle.replacement`, `spec.lifecycle.state` | new (schema); behaviour in #15 |
@@ -51,8 +52,8 @@ Updated by every slice; the stage reports carry the details.
 | Pipelined executor, joins, per-node parallelism | `PipelinedGraphExecutorTests` | — | not yet (out of Gate A) |
 | Shared-memory arena, refcounts, fan-out | `SharedMemoryArenaTests`, `PipelineGraphExecutorDataPlaneTests` | — | not yet (#14) |
 | Backpressure stall/drop | `PipelineGraphExecutorBackpressureTests` | — | not yet (#14 bounded admission) |
-| Supervised worker, readiness, warm pool | `SupervisedWorkerTests`, `WorkerReadinessTests`, `WarmWorkerPoolTests` | — | not yet (#13) |
-| Worker logs / observability | `WorkerLoggingTests`, `WorkerObservabilityTests` | — | not yet (#13) |
+| Supervised worker, readiness, warm pool | `SupervisedWorkerTests`, `WorkerReadinessTests`, `WarmWorkerPoolTests` | `mvf-worker` | partial — readiness, deadlines, kill, reaping; no warm pool, no restart |
+| Worker logs / observability | `WorkerLoggingTests`, `WorkerObservabilityTests` | `HostServices.logs` | partial — logs, stderr, supervisor events; no RPC latency metrics |
 | Epoch checkpoint / restore / resume | `PipelineGraphExecutorCheckpointTests`, `CheckpointResumeTests`, `WorkerCheckpointTests` | — | not yet |
 | Node failure policy (fail / restart) | `NodeResilienceTests`, `SourceFailureTests` | — | not yet |
 | Live config (`configure`) | `LiveConfigureTests` | — | not yet |

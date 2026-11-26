@@ -1,0 +1,21 @@
+# Universal Node Contract for the Rust runtime (issue #10). The .NET engine keeps using module.json.
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: py.brightness-analyzer
+  version: 1.0.0
+  description: Multi-output analyzer (derived frame + classification + JSON metadata) in Python.
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: frame, channel: data, type: frame }
+      - { name: class, channel: data, type: classification }
+      - { name: meta, channel: data, type: json }
+  artifacts:
+    - { backend: worker, runtime: python, entry: analyzer.py, protocol: 1 }
+  isolation:
+    minimum: process
+  lifecycle:
+    replacement: stateless

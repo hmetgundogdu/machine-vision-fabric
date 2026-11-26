@@ -18,6 +18,8 @@ mechanical change once the .NET host retires.
 | `mvf-contract` | #11 | Universal Node Contract: strict YAML loader, typed model, validation, capability negotiation. No host dependencies. |
 | `mvf-graph` | #12 | Pipeline document, typed graph validation (separate data/control edges), deterministic order. Pure. |
 | `mvf-engine` | #12– | Single scheduling authority: typed values, node handles, backends, builtins, executor. |
+| `mvf-memory` | #13–#14 | Descriptor codec (compatible with .NET/Python/C++), engine-owned file-backed arena, leases. |
+| `mvf-worker` | #13 | Supervised stdio worker backend (protocol v1): readiness, deadlines, kill, exit classification, logs. |
 | `mvf-cli` | #12– | `mvf-rs` native CLI: `contract`, `validate`, `run`, `host`. |
 
 ## Commands

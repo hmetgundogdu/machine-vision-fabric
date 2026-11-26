@@ -1,0 +1,17 @@
+[package]
+name = "mvf-memory"
+description = "MVF CPU data plane: typed payload descriptor (wire-compatible with the .NET engine) and the file-backed shared-memory arena."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+memmap2 = "0.9.12"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+
+[lints]
+workspace = true

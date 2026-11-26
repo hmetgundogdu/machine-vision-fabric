@@ -75,6 +75,9 @@ pub struct NodeRef {
     /// A host builtin by name (its contract is embedded in the host).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builtin: Option<String>,
+    /// A module by contract id, found in the host's module roots (`<root>/<dir>/node.yaml`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
     /// A node contract file, relative to the pipeline file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contract: Option<String>,
@@ -130,6 +133,14 @@ pub trait ContractResolver {
     fn builtin(&self, name: &str) -> Option<NodeContract>;
     /// Loads and validates a contract file referenced relative to the pipeline.
     fn file(&self, path: &str) -> Result<(String, NodeContract), ContractError>;
+    /// Finds an installed module by contract id. Returns the contract file path and contract.
+    fn module(&self, id: &str) -> Result<(String, NodeContract), ContractError> {
+        Err(ContractError::Invalid(vec![mvf_contract::ContractIssue {
+            code: "graph.module.unsupported",
+            path: id.to_string(),
+            message: "this host resolves no modules".into(),
+        }]))
+    }
 }
 
 /// A node in the validated graph.
@@ -373,8 +384,19 @@ pub fn build_from_document(
             );
             continue;
         }
-        let resolved = match (&node.builtin, &node.contract) {
-            (Some(name), None) => match resolver.builtin(name) {
+        let resolved = match (&node.builtin, &node.contract, &node.module) {
+            (None, None, Some(id)) => match resolver.module(id) {
+                Ok((resolved_path, c)) => Some((ContractOrigin::File(resolved_path), c)),
+                Err(e) => {
+                    issue(
+                        "graph.node.unknown-module",
+                        format!("{path}.module"),
+                        format!("module `{id}` could not be resolved: {e}"),
+                    );
+                    None
+                }
+            },
+            (Some(name), None, None) => match resolver.builtin(name) {
                 Some(c) => Some((ContractOrigin::Builtin(name.clone()), c)),
                 None => {
                     issue(
@@ -385,7 +407,7 @@ pub fn build_from_document(
                     None
                 }
             },
-            (None, Some(file)) => match resolver.file(file) {
+            (None, Some(file), None) => match resolver.file(file) {
                 Ok((resolved_path, c)) => Some((ContractOrigin::File(resolved_path), c)),
                 Err(e) => {
                     issue(
@@ -400,7 +422,7 @@ pub fn build_from_document(
                 issue(
                     "graph.node.ambiguous-implementation",
                     path.clone(),
-                    "a node must reference exactly one of `builtin` or `contract`".into(),
+                    "a node must reference exactly one of `builtin`, `contract` or `module`".into(),
                 );
                 None
             }

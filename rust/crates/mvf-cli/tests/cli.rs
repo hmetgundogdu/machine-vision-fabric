@@ -13,7 +13,7 @@ fn mvf() -> Command {
 
 #[test]
 fn validate_accepts_the_examples() {
-    for example in ["basic", "gated"] {
+    for example in ["basic", "gated", "python-worker"] {
         let out = mvf()
             .arg("validate")
             .arg(examples().join(example).join("pipeline.yaml"))

@@ -1,0 +1,10 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: test.error-reply, version: 1.0.0 }
+spec:
+  ports:
+    inputs: [ { name: frame, channel: data, type: frame } ]
+    outputs: [ { name: class, channel: data, type: classification } ]
+  artifacts: [ { backend: worker, runtime: python, entry: error_reply.py, protocol: 1 } ]
+  isolation: { minimum: process }
+  lifecycle: { readinessTimeoutMs: 10000, executeTimeoutMs: 10000, drainTimeoutMs: 2000 }

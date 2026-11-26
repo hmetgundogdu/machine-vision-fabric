@@ -1,0 +1,26 @@
+# In-process source and sink around an existing, unmodified Python SDK module running as a
+# supervised worker. `module:` resolves modules/py-invert-transformer/node.yaml. Run from rust/:
+#   cargo run -p mvf-cli -- run examples/python-worker/pipeline.yaml
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: python-worker
+spec:
+  nodes:
+    - id: cam
+      builtin: synthetic-source
+      config: { width: 4, height: 2 }
+    - id: invert
+      module: py.invert-transformer
+    - id: classify
+      module: py.brightness-classifier
+    - id: sink
+      builtin: record
+  edges:
+    data:
+      - { from: cam.frame, to: invert.frame }
+      - { from: invert.frame, to: classify.frame }
+      - { from: invert.frame, to: sink.frame }
+      - { from: classify.class, to: sink.class }
+  run:
+    maxCycles: 3

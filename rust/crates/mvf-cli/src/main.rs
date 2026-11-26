@@ -2,15 +2,19 @@
 //!
 //! Exit codes: 0 = run ended normally (cycle limit, source exhausted, cancelled) or validation passed;
 //! 1 = a node failed or could not start; 2 = invalid input (YAML, contract, graph, negotiation).
+//!
+//! Output: sink records go to stdout (text or `--json` lines); node logs and the run summary go to
+//! stderr, so stdout stays machine-readable.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use mvf_engine::{
-    CancellationToken, EndReason, Engine, HostResolver, HostServices, NullObserver, Record,
-    Recorder, RunOptions, RunReport, default_backends,
+    BackendRegistry, CancellationToken, EndReason, Engine, HostResolver, HostServices, LogEvent,
+    Logs, NullObserver, Record, Recorder, RunOptions, RunReport, default_backends,
 };
+use mvf_worker::WorkerBackend;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -23,6 +27,16 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Debug, Args)]
+struct PipelineArgs {
+    /// Pipeline YAML file.
+    pipeline: PathBuf,
+    /// Module root searched for `<dir>/node.yaml` (repeatable). Default: the nearest `modules/`
+    /// directory above the pipeline, plus `MVF_MODULE_PATH`.
+    #[arg(long = "modules")]
+    modules: Vec<PathBuf>,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Validate a node contract and show how this host would place it.
@@ -32,13 +46,13 @@ enum Command {
     },
     /// Validate a pipeline: YAML, contracts, typed edges and backend negotiation.
     Validate {
-        /// Pipeline YAML file.
-        pipeline: PathBuf,
+        #[command(flatten)]
+        args: PipelineArgs,
     },
     /// Run a pipeline until a limit, source exhaustion, failure or Ctrl+C.
     Run {
-        /// Pipeline YAML file.
-        pipeline: PathBuf,
+        #[command(flatten)]
+        args: PipelineArgs,
         /// Override `spec.run.maxCycles`.
         #[arg(long)]
         max_cycles: Option<u64>,
@@ -54,14 +68,19 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Contract { file } => contract(&file),
-        Command::Validate { pipeline } => validate(&pipeline),
+        Command::Validate { args } => validate(&args),
         Command::Run {
-            pipeline,
+            args,
             max_cycles,
             json,
-        } => run(&pipeline, max_cycles, json),
+        } => run(&args, max_cycles, json),
         Command::Host => host(),
     }
+}
+
+/// Every backend this binary provides.
+fn host_backends() -> BackendRegistry {
+    default_backends().with(WorkerBackend::from_env())
 }
 
 fn fail(code: u8, message: impl std::fmt::Display) -> ExitCode {
@@ -78,7 +97,7 @@ fn contract(file: &Path) -> ExitCode {
         Ok(c) => c,
         Err(e) => return fail(2, e),
     };
-    let placement = default_backends().negotiate(&contract);
+    let placement = host_backends().negotiate(&contract);
     let out = serde_json::json!({
         "id": contract.metadata.id,
         "version": contract.metadata.version,
@@ -95,16 +114,37 @@ fn contract(file: &Path) -> ExitCode {
     }
 }
 
-fn load_engine(pipeline: &Path, services: &HostServices) -> Result<Engine, ExitCode> {
-    let text = std::fs::read_to_string(pipeline)
-        .map_err(|e| fail(2, format!("{}: {e}", pipeline.display())))?;
-    let base = pipeline.parent().unwrap_or(Path::new("."));
-    let graph = mvf_graph::build_graph(&text, &HostResolver::new(base)).map_err(|e| fail(2, e))?;
-    Engine::build(graph, &default_backends(), services).map_err(|e| fail(2, e))
+fn resolver(args: &PipelineArgs) -> HostResolver {
+    let base = args
+        .pipeline
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut resolver = HostResolver::new(base);
+    let mut roots = args.modules.clone();
+    if let Some(env) = std::env::var_os("MVF_MODULE_PATH") {
+        roots.extend(std::env::split_paths(&env));
+    }
+    if roots.is_empty()
+        && let Some(found) = HostResolver::discover_module_root(base, 6)
+    {
+        roots.push(found);
+    }
+    for root in roots {
+        resolver = resolver.with_module_root(root);
+    }
+    resolver
 }
 
-fn validate(pipeline: &Path) -> ExitCode {
-    let engine = match load_engine(pipeline, &HostServices::default()) {
+fn load_engine(args: &PipelineArgs, services: &HostServices) -> Result<Engine, ExitCode> {
+    let text = std::fs::read_to_string(&args.pipeline)
+        .map_err(|e| fail(2, format!("{}: {e}", args.pipeline.display())))?;
+    let graph = mvf_graph::build_graph(&text, &resolver(args)).map_err(|e| fail(2, e))?;
+    Engine::build(graph, &host_backends(), services).map_err(|e| fail(2, e))
+}
+
+fn validate(args: &PipelineArgs) -> ExitCode {
+    let engine = match load_engine(args, &HostServices::default()) {
         Ok(e) => e,
         Err(code) => return code,
     };
@@ -118,7 +158,7 @@ fn validate(pipeline: &Path) -> ExitCode {
     );
     for (node, stats) in graph.nodes.iter().zip(engine.stats()) {
         println!(
-            "  {:<16} {:<28} backend={}",
+            "  {:<16} {:<32} backend={}",
             node.id,
             format!(
                 "{}@{}",
@@ -145,31 +185,43 @@ fn print_record(record: &Record, json: bool) {
     }
 }
 
-fn print_report(report: &RunReport, json: bool) {
+fn print_log(event: &LogEvent, json: bool) {
     if json {
-        println!("{}", serde_json::json!({ "report": report }));
+        eprintln!("{}", serde_json::json!({ "log": event }));
     } else {
         eprintln!(
-            "run `{}` ended: {} after {} cycles in {:.1} ms",
-            report.pipeline,
-            serde_json::to_string(&report.end).unwrap_or_default(),
-            report.cycles_completed,
-            report.wall_time_ms
+            "[{} gen={} {}] {}",
+            event.node, event.generation, event.level, event.message
         );
-        for n in &report.nodes {
-            eprintln!(
-                "  {:<16} backend={:<10} gen={} executed={} skipped={} total={}us max={}us",
-                n.id, n.backend, n.generation, n.executed, n.skipped, n.total_us, n.max_us
-            );
-        }
     }
 }
 
-fn run(pipeline: &Path, max_cycles: Option<u64>, json: bool) -> ExitCode {
+fn print_report(report: &RunReport, json: bool) {
+    if json {
+        println!("{}", serde_json::json!({ "report": report }));
+        return;
+    }
+    eprintln!(
+        "run `{}` ended: {} after {} cycles in {:.1} ms",
+        report.pipeline,
+        serde_json::to_string(&report.end).unwrap_or_default(),
+        report.cycles_completed,
+        report.wall_time_ms
+    );
+    for n in &report.nodes {
+        eprintln!(
+            "  {:<16} backend={:<10} gen={} executed={} skipped={} total={}us max={}us",
+            n.id, n.backend, n.generation, n.executed, n.skipped, n.total_us, n.max_us
+        );
+    }
+}
+
+fn run(args: &PipelineArgs, max_cycles: Option<u64>, json: bool) -> ExitCode {
     let services = HostServices {
-        recorder: Recorder::streaming(move |r| print_record(r, json)),
+        logs: Logs::streaming(move |e| print_log(e, json)),
+        ..HostServices::with_recorder(Recorder::streaming(move |r| print_record(r, json)))
     };
-    let mut engine = match load_engine(pipeline, &services) {
+    let mut engine = match load_engine(args, &services) {
         Ok(e) => e,
         Err(code) => return code,
     };
@@ -188,7 +240,7 @@ fn run(pipeline: &Path, max_cycles: Option<u64>, json: bool) -> ExitCode {
 fn host() -> ExitCode {
     let out = serde_json::json!({
         "builtins": mvf_engine::builtins::builtin_names(),
-        "backends": default_backends().capabilities(),
+        "backends": host_backends().capabilities(),
     });
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     ExitCode::SUCCESS

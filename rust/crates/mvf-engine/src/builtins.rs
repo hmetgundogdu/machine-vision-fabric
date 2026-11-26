@@ -107,12 +107,7 @@ impl Recorder {
     }
 }
 
-/// Host services available to builtins at instantiation.
-#[derive(Debug, Clone, Default)]
-pub struct HostServices {
-    /// Sink record store.
-    pub recorder: Recorder,
-}
+pub use crate::services::HostServices;
 
 type Factory = fn(
     &serde_json::Map<String, serde_json::Value>,
