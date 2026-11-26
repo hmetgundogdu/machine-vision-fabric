@@ -13,6 +13,9 @@ use serde::Serialize;
 pub enum PayloadData {
     /// Reference-counted heap bytes (in-process hand-off is an `Arc` clone, never a byte copy).
     Heap(Arc<[u8]>),
+    /// A reference-counted lease on an engine-owned shared-memory arena slot. Cloning adds a
+    /// reference (fan-out); dropping the last one reclaims the slot.
+    Arena(mvf_memory::Lease),
 }
 
 /// Typed payload: descriptor + bytes. Cloning shares the bytes.
@@ -40,10 +43,27 @@ impl Payload {
         }
     }
 
+    /// Wraps a sealed arena lease (its header was validated when it was sealed).
+    pub fn arena(lease: mvf_memory::Lease) -> Self {
+        Self {
+            descriptor: lease.descriptor().clone(),
+            data: PayloadData::Arena(lease),
+        }
+    }
+
+    /// The arena lease, when the payload lives in shared memory.
+    pub fn lease(&self) -> Option<&mvf_memory::Lease> {
+        match &self.data {
+            PayloadData::Arena(l) => Some(l),
+            PayloadData::Heap(_) => None,
+        }
+    }
+
     /// Read-only view of the bytes (zero copy for both heap and arena payloads).
     pub fn bytes(&self) -> &[u8] {
         match &self.data {
             PayloadData::Heap(b) => b,
+            PayloadData::Arena(l) => l.payload(),
         }
     }
 

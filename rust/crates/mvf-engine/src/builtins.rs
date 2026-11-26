@@ -227,6 +227,10 @@ struct SyntheticSourceConfig {
     /// Optional pacing between frames, in milliseconds.
     #[serde(default)]
     interval_ms: u64,
+    /// Write frames directly into the engine-owned shared-memory arena (a producer write, so
+    /// downstream workers receive them by handle with no copy). Default: host heap.
+    #[serde(default)]
+    arena: bool,
 }
 
 fn one() -> u64 {
@@ -244,12 +248,13 @@ fn four() -> u64 {
 pub struct SyntheticSource {
     config: SyntheticSourceConfig,
     next_sequence: u64,
+    services: HostServices,
 }
 
 impl SyntheticSource {
     fn create(
         config: &serde_json::Map<String, serde_json::Value>,
-        _: &HostServices,
+        services: &HostServices,
     ) -> Result<Box<dyn NodeHandle>, NodeError> {
         let config: SyntheticSourceConfig = parse_config(config)?;
         let pixels = config
@@ -268,6 +273,7 @@ impl SyntheticSource {
         Ok(Box::new(Self {
             config,
             next_sequence: 1,
+            services: services.clone(),
         }))
     }
 
@@ -297,8 +303,36 @@ impl NodeHandle for SyntheticSource {
         let c = &self.config;
         let descriptor = Descriptor::image_u8(c.height, c.width, c.channels);
         let len = descriptor.byte_len().unwrap_or(0) as usize;
-        let payload = Payload::heap(descriptor, Self::pixels(c.seed, sequence, len))
-            .map_err(NodeError::failed)?;
+        let payload = if c.arena {
+            let arena = self
+                .services
+                .arena()
+                .map_err(|e| NodeError::new(NodeErrorKind::Resource, e.to_string()))?;
+            let mut slot = arena
+                .reserve()
+                .map_err(|e| NodeError::new(NodeErrorKind::Resource, e.to_string()))?;
+            let out = slot.payload_mut();
+            if out.len() < len {
+                return Err(NodeError::new(
+                    NodeErrorKind::Resource,
+                    format!(
+                        "frame of {len} bytes exceeds the arena slot capacity {}",
+                        out.len()
+                    ),
+                ));
+            }
+            let base = c.seed.wrapping_add(sequence.wrapping_mul(7));
+            for (i, b) in out[..len].iter_mut().enumerate() {
+                *b = (base.wrapping_add(i as u64) & 0xff) as u8;
+            }
+            slot.write_header(&descriptor)
+                .and_then(|_| slot.seal())
+                .map(Payload::arena)
+                .map_err(|e| NodeError::new(NodeErrorKind::Resource, e.to_string()))?
+        } else {
+            Payload::heap(descriptor, Self::pixels(c.seed, sequence, len))
+                .map_err(NodeError::failed)?
+        };
         let source = c
             .source_id
             .clone()

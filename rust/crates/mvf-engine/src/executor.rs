@@ -135,6 +135,24 @@ pub struct RunReport {
     pub wall_time_ms: f64,
     /// Per-node statistics.
     pub nodes: Vec<NodeStats>,
+    /// Payload deliveries and shared-memory copy accounting.
+    pub data_plane: DataPlaneReport,
+}
+
+/// Data-plane accounting for a run. A *delivery* is one payload handed to one consuming node; it
+/// never copies bytes by itself (heap payloads share an `Arc`, arena payloads share a lease).
+/// Copies are counted by the arena (`copiesIn`/`copiesOut`) and distinguished from producers'
+/// output writes (`transformWrites`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataPlaneReport {
+    /// Payload deliveries whose bytes live in the shared-memory arena.
+    pub arena_deliveries: u64,
+    /// Payload deliveries whose bytes live on the host heap.
+    pub heap_deliveries: u64,
+    /// Arena counters, when the arena was created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arena: Option<mvf_memory::MetricsSnapshot>,
 }
 
 /// Run options.
@@ -164,6 +182,8 @@ pub struct Engine {
     feeds: HashMap<(usize, String), (usize, String)>,
     pub(crate) next_cycle: u64,
     started: bool,
+    services: HostServices,
+    deliveries: DataPlaneReport,
 }
 
 impl std::fmt::Debug for Engine {
@@ -242,7 +262,17 @@ impl Engine {
             feeds,
             next_cycle: 1,
             started: false,
+            services: services.clone(),
+            deliveries: DataPlaneReport::default(),
         })
+    }
+
+    /// Data-plane accounting so far.
+    pub fn data_plane(&self) -> DataPlaneReport {
+        DataPlaneReport {
+            arena: self.services.arena_if_created().map(|a| a.metrics()),
+            ..self.deliveries.clone()
+        }
     }
 
     /// The validated graph.
@@ -309,6 +339,7 @@ impl Engine {
             cycles_completed: self.next_cycle - 1,
             wall_time_ms: started_at.elapsed().as_secs_f64() * 1e3,
             nodes: self.stats(),
+            data_plane: self.data_plane(),
         }
     }
 
@@ -361,7 +392,14 @@ impl Engine {
                     (Some(Value::Signal(false)), Channel::Control) => {
                         skip.get_or_insert(SkipReason::ControlFalse(port.name.clone()));
                     }
-                    (Some(v), _) => inputs.insert(port.name.clone(), v.clone()),
+                    (Some(v), _) => {
+                        match v.payload().map(|p| p.lease().is_some()) {
+                            Some(true) => self.deliveries.arena_deliveries += 1,
+                            Some(false) => self.deliveries.heap_deliveries += 1,
+                            None => {}
+                        }
+                        inputs.insert(port.name.clone(), v.clone())
+                    }
                     (None, Channel::Control) => {
                         skip.get_or_insert(SkipReason::ControlAbsent(port.name.clone()));
                     }

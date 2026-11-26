@@ -14,8 +14,8 @@ pub mod value;
 pub use backend::{BackendRegistry, ExecutionBackend, InProcessBackend, InstantiateRequest};
 pub use builtins::{Record, RecordedValue, Recorder};
 pub use executor::{
-    BuildError, EndReason, Engine, NodeOutcome, NodeStats, NullObserver, Observer, RunOptions,
-    RunReport, SkipReason,
+    BuildError, DataPlaneReport, EndReason, Engine, NodeOutcome, NodeStats, NullObserver, Observer,
+    RunOptions, RunReport, SkipReason,
 };
 pub use node::*;
 pub use resolver::HostResolver;

@@ -71,7 +71,14 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Real C++ SDK worker for the data-plane interop test (no mock: the test fails if it is missing).
+      - name: Build C++ SDK example
+        run: |
+          cmake -S ../src/sdk/cpp -B target/cpp-sdk -DCMAKE_BUILD_TYPE=Release
+          cmake --build target/cpp-sdk --config Release
       - run: cargo test --workspace --locked
+        env:
+          MVF_REQUIRE_CPP: "1"
 
   cpp-sdk:
     name: C++ SDK (${{ matrix.os }})

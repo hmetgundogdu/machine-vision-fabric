@@ -22,7 +22,7 @@ Updated by every slice; the stage reports carry the details.
 | `backpressure: stall \| drop` | `ModuleManifest.Backpressure` | — | not yet (bounded admission in #14) |
 | `maxParallelism` | `ModuleManifest.MaxParallelism` | — | not yet (serial executor only) |
 | Readiness budget (`hello ready:false` → `ready`) | `protocol/README.md`, `WorkerReadinessTests` | `spec.lifecycle.readinessTimeoutMs` | ported |
-| Typed payload descriptor (192-byte header, `MVF1`) | `PayloadDescriptor.cs` | — | not yet (#14) |
+| Typed payload descriptor (192-byte header, `MVF1`) | `PayloadDescriptor.cs` | `mvf_memory::Descriptor` | ported — byte-for-byte golden + Python SDK cross-check |
 | Isolation / resource / memory / placement policy | — | `spec.isolation`, `spec.resources`, `spec.memory`, `spec.execution` | new |
 | Live replacement + versioned state | — | `spec.lifecycle.replacement`, `spec.lifecycle.state` | new (schema); behaviour in #15 |
 | Backend capability negotiation | — | `mvf_contract::negotiate` | new |
@@ -50,8 +50,8 @@ Updated by every slice; the stage reports carry the details.
 | Topological serial execution | `GraphTopologySorterTests`, `PipelineGraphExecutorTests` | `mvf-engine` executor | partial — DAG, sources-first, control gating; no primitives |
 | Fork / if / switch / select / value / loop primitives | `*PrimitiveNodeRunnerTests` | — | not yet |
 | Pipelined executor, joins, per-node parallelism | `PipelinedGraphExecutorTests` | — | not yet (out of Gate A) |
-| Shared-memory arena, refcounts, fan-out | `SharedMemoryArenaTests`, `PipelineGraphExecutorDataPlaneTests` | — | not yet (#14) |
-| Backpressure stall/drop | `PipelineGraphExecutorBackpressureTests` | — | not yet (#14 bounded admission) |
+| Shared-memory arena, refcounts, fan-out | `SharedMemoryArenaTests`, `PipelineGraphExecutorDataPlaneTests` | `mvf_memory::Arena` + `Payload::Arena` | ported — plus generation-checked handles and copy accounting |
+| Backpressure stall/drop | `PipelineGraphExecutorBackpressureTests` | bounded admission | partial — refusal only; no stall/drop policies |
 | Supervised worker, readiness, warm pool | `SupervisedWorkerTests`, `WorkerReadinessTests`, `WarmWorkerPoolTests` | `mvf-worker` | partial — readiness, deadlines, kill, reaping; no warm pool, no restart |
 | Worker logs / observability | `WorkerLoggingTests`, `WorkerObservabilityTests` | `HostServices.logs` | partial — logs, stderr, supervisor events; no RPC latency metrics |
 | Epoch checkpoint / restore / resume | `PipelineGraphExecutorCheckpointTests`, `CheckpointResumeTests`, `WorkerCheckpointTests` | — | not yet |

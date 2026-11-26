@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use mvf_contract::{
-    Artifact, BackendCapabilities, BackendKind, Cancellation, Channel, IsolationLevel, PortType,
-    Replacement, Target, WorkerRuntime,
+    Artifact, BackendCapabilities, BackendKind, Cancellation, Channel, IsolationLevel,
+    MemoryDomain, PortType, Replacement, Target, WorkerRuntime,
 };
 use mvf_engine::{
     Classification, ExecContext, Execution, ExecutionBackend, Frame, HostServices, Inputs,
@@ -43,6 +43,7 @@ use crate::protocol::ChildMessage;
 pub struct WorkerBackend {
     python: OsString,
     python_sdk: Option<PathBuf>,
+    verify_inputs: bool,
 }
 
 impl Default for WorkerBackend {
@@ -59,7 +60,15 @@ impl WorkerBackend {
         Self {
             python: std::env::var_os("MVF_PYTHON").unwrap_or_else(|| default.into()),
             python_sdk: std::env::var_os("MVF_PYTHON_SDK").map(PathBuf::from),
+            verify_inputs: std::env::var_os("MVF_VERIFY_INPUTS").is_some_and(|v| v == "1"),
         }
+    }
+
+    /// Fingerprints every input before and after `execute` and fails the node if a worker wrote to
+    /// its read-only input (detection only; also enabled by `MVF_VERIFY_INPUTS=1`).
+    pub fn with_input_verification(mut self, on: bool) -> Self {
+        self.verify_inputs = on;
+        self
     }
 
     /// Uses `python` as the interpreter.
@@ -91,9 +100,8 @@ impl ExecutionBackend for WorkerBackend {
             kind: BackendKind::Worker,
             isolation: IsolationLevel::Process,
             targets: vec![Target::Cpu],
-            // Payloads cross the process boundary through the shared arena by handle; frames are
-            // still copied into the arena once and out of it once in this slice (see stage 03).
-            zero_copy_domains: vec![],
+            // Arena-resident payloads cross the process boundary by handle (offset), never inline.
+            zero_copy_domains: vec![MemoryDomain::Host],
             cancellation: Cancellation::Enforceable,
             enforceable_termination: true,
             enforces_memory_limit: false,
@@ -162,6 +170,7 @@ impl ExecutionBackend for WorkerBackend {
             process: None,
             capability: Capability::Classifier,
             next_id: 1,
+            verify_inputs: self.verify_inputs,
         }))
     }
 }
@@ -260,6 +269,7 @@ struct WorkerNode {
     process: Option<WorkerProcess>,
     capability: Capability,
     next_id: u64,
+    verify_inputs: bool,
 }
 
 impl WorkerNode {
@@ -440,10 +450,20 @@ impl NodeHandle for WorkerNode {
             return Err(info.to_error("before execute"));
         }
         let arena = self.arena()?;
-        // Copy in (slice 03); slice 04 hands existing arena leases over without this copy.
-        let input = arena
-            .publish_copy(&frame.payload.descriptor, frame.payload.bytes())
-            .map_err(resource)?;
+        // A payload already in this arena is handed over by handle (zero copy); a heap payload is
+        // copied in once (a counted transfer copy).
+        let input = match frame.payload.lease() {
+            Some(lease) if std::sync::Arc::ptr_eq(lease.arena(), &arena) => {
+                arena.note_handoff();
+                lease.clone()
+            }
+            _ => arena
+                .publish_copy(&frame.payload.descriptor, frame.payload.bytes())
+                .map_err(resource)?,
+        };
+        let fingerprint = self
+            .verify_inputs
+            .then(|| mvf_engine::fnv1a64(input.payload()));
         let out = match self.capability {
             Capability::Classifier => None,
             Capability::Processor | Capability::Analyzer => {
@@ -480,6 +500,15 @@ impl NodeHandle for WorkerNode {
                 ));
             }
         };
+        if let Some(before) = fingerprint
+            && mvf_engine::fnv1a64(input.payload()) != before
+        {
+            // Detected, not prevented: workers map the arena read-write (see stage 04).
+            return Err(NodeError::new(
+                NodeErrorKind::InvalidOutput,
+                "worker modified its read-only input payload",
+            ));
+        }
         drop(input);
         let (frame_out, classification, value) = match reply {
             Ok(ChildMessage::Result {
@@ -518,10 +547,8 @@ impl NodeHandle for WorkerNode {
                     format!("worker output rejected: {e}"),
                 )
             })?;
-            // Copy out (slice 03); slice 04 forwards the lease itself.
-            arena.note_copy_out(lease.payload().len());
-            let payload = Payload::heap(lease.descriptor().clone(), lease.payload().to_vec())
-                .map_err(NodeError::failed)?;
+            // The output stays in shared memory; downstream nodes share the lease (zero copy).
+            let payload = Payload::arena(lease);
             outputs.insert(
                 port,
                 Value::Frame(Frame {

@@ -68,9 +68,10 @@ fn alive(pid: u32) -> bool {
 #[cfg(windows)]
 fn alive(pid: u32) -> bool {
     std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+        // CSV quotes each field, so `"1234"` cannot match a memory column like `"12,345 K"`.
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&format!("\"{pid}\"")))
         .unwrap_or(false)
 }
 
