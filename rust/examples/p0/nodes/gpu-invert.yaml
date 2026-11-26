@@ -1,0 +1,12 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: gpu.invert-u8, version: 1.0.0 }
+spec:
+  ports:
+    inputs: [ { name: frame, channel: data, type: frame } ]
+    outputs: [ { name: frame, channel: data, type: frame } ]
+  artifacts:
+    - { backend: compute, api: wgpu, kernel: invert-u8, entryPoint: main }
+  execution: { backend: compute, placement: { target: gpu, fallback: deny } }
+  memory: { domain: device, zeroCopy: required }
+  lifecycle: { replacement: stateless }

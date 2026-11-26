@@ -125,10 +125,15 @@ impl ExecutionBackend for WorkerBackend {
                 "worker artifacts must come from a contract file",
             ));
         };
-        let contract_dir = Path::new(contract_path)
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
+        // Absolute: the child runs with this directory as its cwd, so a relative entry path would
+        // be applied twice.
+        let parent = Path::new(contract_path).parent().unwrap_or(Path::new("."));
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        let contract_dir = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
         let entry_path = contract_dir.join(entry);
         if !entry_path.is_file() {
             return Err(NodeError::new(

@@ -1,0 +1,24 @@
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: p0-gpu
+  description: P0 integrated graph - camera, GPU preprocessing chain, live-replaceable detector, PLC simulator, exactly-once recorder.
+spec:
+  nodes:
+    - { id: cam, builtin: synthetic-source, config: { width: 1280, height: 720, frames: 900, intervalMs: 4, arena: true } }
+    - { id: pre, contract: nodes/gpu-invert.yaml }
+    - { id: norm, contract: nodes/gpu-normalize.yaml }
+    - { id: stats, contract: nodes/gpu-mean.yaml }
+    - { id: det, builtin: brightness-gate, config: { threshold: 128 } }
+    - { id: plc, builtin: plc-sim, config: { rejectLabels: [dark, black] } }
+    - { id: sink, builtin: record }
+  edges:
+    data:
+      - { from: cam.frame, to: pre.frame }
+      - { from: pre.frame, to: norm.frame }
+      - { from: norm.tensor, to: stats.tensor }
+      - { from: stats.stats, to: sink.json }
+      - { from: cam.frame, to: det.frame }
+      - { from: det.class, to: plc.class }
+      - { from: det.class, to: sink.class }
+      - { from: cam.frame, to: sink.frame }

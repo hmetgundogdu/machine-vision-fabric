@@ -81,6 +81,15 @@ enum Command {
         /// With --verify: required number of rollbacks.
         #[arg(long)]
         expect_rollbacks: Option<usize>,
+        /// With --verify: largest acceptable cut-over pause of any promotion or rollback.
+        #[arg(long)]
+        max_cutover_us: Option<u64>,
+        /// Fail unless this host provides the GPU compute backend.
+        #[arg(long)]
+        require_gpu: bool,
+        /// Fail unless this host provides the daemonless OCI backend.
+        #[arg(long)]
+        require_oci: bool,
     },
     /// List the builtins and backends this host provides.
     Host,
@@ -107,16 +116,39 @@ fn main() -> ExitCode {
             verify,
             expect_promotions,
             expect_rollbacks,
-        } => run(
-            &args,
-            max_cycles,
-            json,
-            updates.as_deref(),
-            verify.then_some(Expectations {
-                promotions: expect_promotions,
-                rollbacks: expect_rollbacks,
-            }),
-        ),
+            max_cutover_us,
+            require_gpu,
+            require_oci,
+        } => {
+            if require_gpu && gpu_context().is_none() {
+                return fail(
+                    2,
+                    "--require-gpu: this host provides no GPU compute backend",
+                );
+            }
+            if require_oci
+                && !host_backends()
+                    .capabilities()
+                    .iter()
+                    .any(|c| c.kind == mvf_contract::BackendKind::Oci)
+            {
+                return fail(
+                    2,
+                    "--require-oci: this host provides no OCI backend (Linux + runc/crun)",
+                );
+            }
+            run(
+                &args,
+                max_cycles,
+                json,
+                updates.as_deref(),
+                verify.then_some(Expectations {
+                    promotions: expect_promotions,
+                    rollbacks: expect_rollbacks,
+                    max_cutover_us,
+                }),
+            )
+        }
         Command::Host => host(),
         Command::Image { store, command } => {
             image::run(&store.unwrap_or_else(image::default_store), command)
@@ -124,15 +156,25 @@ fn main() -> ExitCode {
     }
 }
 
+/// The host GPU, opened once (`None` without a hardware adapter or with `MVF_DISABLE_GPU=1`).
+fn gpu_context() -> Option<mvf_compute::GpuContext> {
+    static GPU: std::sync::OnceLock<Option<mvf_compute::GpuContext>> = std::sync::OnceLock::new();
+    GPU.get_or_init(|| {
+        if std::env::var_os("MVF_DISABLE_GPU").is_some() {
+            return None;
+        }
+        mvf_compute::GpuContext::new(&mvf_compute::GpuConfig::default()).ok()
+    })
+    .clone()
+}
+
 /// Every backend this host provides: in-process and worker always; the GPU compute backend when a
 /// hardware adapter exists (`MVF_DISABLE_GPU=1` turns it off); the daemonless OCI backend on Linux
 /// when `runc`/`crun` is installed (images from `MVF_STORE`, state under `~/.mvf/state`).
 fn host_backends() -> BackendRegistry {
     let mut registry = default_backends().with(WorkerBackend::from_env());
-    if std::env::var_os("MVF_DISABLE_GPU").is_none()
-        && let Some(gpu) = mvf_compute::ComputeBackend::detect(&mvf_compute::GpuConfig::default())
-    {
-        registry = registry.with(gpu);
+    if let Some(gpu) = gpu_context() {
+        registry = registry.with(mvf_compute::ComputeBackend::new(gpu));
     }
     let store_root = image::default_store();
     if let Ok(store) = mvf_oci::ContentStore::open(&store_root)
@@ -335,10 +377,15 @@ fn print_report(report: &RunReport, json: bool) {
 struct PlanDriver {
     control: ControlHandle,
     steps: Vec<(u64, PlannedCommand)>,
+    last: std::time::Instant,
+    cycle_ms: Vec<f64>,
 }
 
 impl Observer for PlanDriver {
     fn cycle_completed(&mut self, cycle: u64) {
+        let now = std::time::Instant::now();
+        self.cycle_ms.push((now - self.last).as_secs_f64() * 1e3);
+        self.last = now;
         for (at, command) in &self.steps {
             if *at == cycle + 1 {
                 command.submit(&self.control);
@@ -367,6 +414,7 @@ fn load_plan(path: &Path, args: &PipelineArgs) -> Result<Vec<(u64, PlannedComman
 struct Expectations {
     promotions: Option<usize>,
     rollbacks: Option<usize>,
+    max_cutover_us: Option<u64>,
 }
 
 fn verify(report: &RunReport, services: &HostServices, expect: Expectations, json: bool) -> bool {
@@ -424,6 +472,46 @@ fn verify(report: &RunReport, services: &HostServices, expect: Expectations, jso
         let got = count(ReplacementEventKind::RolledBack);
         checks.push(("rollbacks", got == n, format!("expected {n}, got {got}")));
     }
+    if let Some(limit) = expect.max_cutover_us {
+        let worst = report
+            .replacements
+            .iter()
+            .filter_map(|e| e.cutover_us)
+            .max()
+            .unwrap_or(0);
+        checks.push((
+            "cutover-pause",
+            worst <= limit,
+            format!("max {worst} us (limit {limit} us)"),
+        ));
+    }
+    let plc: Vec<u64> = services
+        .recorder
+        .records()
+        .iter()
+        .filter(|r| r.port == "plc")
+        .map(|r| r.cycle)
+        .collect();
+    if !plc.is_empty() {
+        let unique: std::collections::BTreeSet<u64> = plc.iter().copied().collect();
+        checks.push((
+            "plc-no-duplicate-commit",
+            unique.len() == plc.len() && plc.len() as u64 == report.cycles_completed,
+            format!(
+                "{} commits for {} cycles",
+                plc.len(),
+                report.cycles_completed
+            ),
+        ));
+    }
+    if let Some(g) = gpu_context().filter(|_| report.nodes.iter().any(|n| n.backend == "compute")) {
+        let m = g.metrics();
+        checks.push((
+            "no-leaked-device-memory",
+            m.allocated == 0,
+            format!("allocated={}", m.allocated),
+        ));
+    }
     let pass = checks.iter().all(|(_, ok, _)| *ok);
     if json {
         let list: Vec<_> = checks
@@ -476,9 +564,12 @@ fn run(
     let mut driver = PlanDriver {
         control: engine.control(),
         steps,
+        last: std::time::Instant::now(),
+        cycle_ms: Vec::new(),
     };
     let report = engine.run(&RunOptions { max_cycles, cancel }, &mut driver);
     print_report(&report, json);
+    print_metrics(&report, &mut driver.cycle_ms, json);
     if let Some(expect) = expect
         && !verify(&report, &services, expect, json)
     {
@@ -487,6 +578,50 @@ fn run(
     match report.end {
         EndReason::NodeFailed { .. } | EndReason::StartFailed { .. } => ExitCode::from(1),
         _ => ExitCode::SUCCESS,
+    }
+}
+
+/// Cycle latency percentiles, throughput and GPU counters of a run.
+fn print_metrics(report: &RunReport, cycle_ms: &mut [f64], json: bool) {
+    // The first cycle includes lazy start-up (pipeline compilation, arena creation).
+    let steady = if cycle_ms.len() > 1 {
+        &mut cycle_ms[1..]
+    } else {
+        cycle_ms
+    };
+    steady.sort_by(|a, b| a.total_cmp(b));
+    let pct = |p: f64| {
+        steady
+            .get(((steady.len().max(1) - 1) as f64 * p).round() as usize)
+            .copied()
+            .unwrap_or(0.0)
+    };
+    let fps = if report.cycles_ms > 0.0 {
+        report.cycles_completed as f64 / (report.cycles_ms / 1e3)
+    } else {
+        0.0
+    };
+    let gpu = gpu_context()
+        .filter(|_| report.nodes.iter().any(|n| n.backend == "compute"))
+        .map(|g| (g.info().name.clone(), g.metrics()));
+    let metrics = serde_json::json!({
+        "cycleMs": { "p50": pct(0.5), "p95": pct(0.95), "p99": pct(0.99), "max": pct(1.0) },
+        "fps": fps,
+        "gpu": gpu.as_ref().map(|(name, m)| serde_json::json!({ "adapter": name, "counters": m })),
+    });
+    if json {
+        println!("{}", serde_json::json!({ "metrics": metrics }));
+    } else {
+        eprintln!(
+            "  cycle ms p50={:.3} p95={:.3} p99={:.3} max={:.3}  fps={fps:.1}",
+            pct(0.5),
+            pct(0.95),
+            pct(0.99),
+            pct(1.0)
+        );
+        if let Some((name, m)) = gpu {
+            eprintln!("  gpu {name}: {m:?}");
+        }
     }
 }
 

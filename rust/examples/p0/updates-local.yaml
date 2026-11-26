@@ -1,0 +1,8 @@
+# macOS/Windows/Linux without OCI: detector candidates as Python workers.
+apiVersion: mvf.dev/v1alpha1
+kind: UpdatePlan
+spec:
+  updates:
+    - { node: det, atCycle: 50, module: py.brightness-classifier, probationCycles: 30 }   # v2: promoted, committed
+    - { node: det, atCycle: 300, contract: candidates/never-ready/node.yaml }                 # failed readiness: rejected, v2 keeps serving
+    - { node: det, atCycle: 500, contract: candidates/crash-classifier/node.yaml, probationCycles: 100 }  # crashes: rolled back to v2

@@ -1,0 +1,12 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.plc-sim
+  version: 1.0.0
+  description: PLC simulator. Commits one accept/reject effect per cycle and refuses a second commit for the same cycle (no duplicate physical effects).
+spec:
+  ports:
+    inputs: [ { name: class, channel: data, type: classification } ]
+  artifacts:
+    - { backend: in-process, builtin: plc-sim }
+  lifecycle: { activation: resident }

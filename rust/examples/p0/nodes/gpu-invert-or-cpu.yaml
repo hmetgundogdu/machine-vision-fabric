@@ -1,0 +1,14 @@
+# GPU kernel preferred; CPU builtin when the host has no GPU (reported as a placement note).
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: any.invert-u8, version: 1.0.0 }
+spec:
+  ports:
+    inputs: [ { name: frame, channel: data, type: frame } ]
+    outputs: [ { name: frame, channel: data, type: frame } ]
+  artifacts:
+    - { backend: compute, api: wgpu, kernel: invert-u8, entryPoint: main }
+    - { backend: in-process, builtin: invert }
+  execution: { placement: { target: gpu, fallback: cpu } }
+  memory: { domain: device, zeroCopy: preferred }
+  lifecycle: { replacement: stateless }

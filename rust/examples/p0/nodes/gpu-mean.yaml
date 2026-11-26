@@ -1,0 +1,12 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: gpu.mean-f32, version: 1.0.0 }
+spec:
+  ports:
+    inputs: [ { name: tensor, channel: data, type: tensor } ]
+    outputs: [ { name: class, channel: data, type: classification }, { name: stats, channel: data, type: json } ]
+  artifacts:
+    - { backend: compute, api: wgpu, kernel: mean-f32, entryPoint: main }
+  execution: { backend: compute, placement: { target: gpu, fallback: deny } }
+  memory: { domain: device, zeroCopy: required }
+  lifecycle: { replacement: stateless }

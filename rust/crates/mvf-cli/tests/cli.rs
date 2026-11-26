@@ -40,7 +40,8 @@ fn run_json_emits_ordered_records_with_cycle_ids_then_a_report() {
         .lines()
         .map(|l| serde_json::from_str(l).expect("json line"))
         .collect();
-    assert_eq!(lines.len(), 6, "5 records + 1 report");
+    assert_eq!(lines.len(), 7, "5 records + 1 report + 1 metrics");
+    assert!(lines[6].get("metrics").is_some());
     let expected_checksums = [
         "5da82418a8f85b75",
         "f19c29e807fbf7f5",
@@ -68,7 +69,11 @@ fn max_cycles_flag_bounds_the_run() {
         .output()
         .expect("spawn");
     assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 3);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).lines().count(),
+        4,
+        "2 records + report + metrics"
+    );
 }
 
 #[test]
@@ -103,15 +108,13 @@ fn node_failure_exits_with_code_1() {
         .output()
         .expect("spawn");
     assert_eq!(out.status.code(), Some(1));
-    let last: serde_json::Value = serde_json::from_str(
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .last()
-            .expect("report"),
-    )
-    .expect("json");
-    assert_eq!(last["report"]["end"]["reason"], "node-failed");
-    assert_eq!(last["report"]["end"]["cycle"], 2);
+    let report: serde_json::Value = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v.get("report").is_some())
+        .expect("report");
+    assert_eq!(report["report"]["end"]["reason"], "node-failed");
+    assert_eq!(report["report"]["end"]["cycle"], 2);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -146,7 +149,10 @@ fn gate_a_demo_verifies_ordered_output_replacement_and_rollback() {
         .collect();
     let verify = &lines.last().expect("verify")["verify"];
     assert_eq!(verify["pass"], true, "{verify}");
-    let report = &lines[lines.len() - 2]["report"];
+    let report = &lines
+        .iter()
+        .find(|l| l.get("report").is_some())
+        .expect("report")["report"];
     let kinds: Vec<&str> = report["replacements"]
         .as_array()
         .expect("events")

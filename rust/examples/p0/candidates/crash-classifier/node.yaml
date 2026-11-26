@@ -1,0 +1,10 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: p0.crash-classifier, version: 9.0.0 }
+spec:
+  ports:
+    inputs: [ { name: frame, channel: data, type: frame } ]
+    outputs: [ { name: class, channel: data, type: classification } ]
+  artifacts: [ { backend: worker, runtime: python, entry: crash.py, protocol: 1 } ]
+  isolation: { minimum: process }
+  lifecycle: { readinessTimeoutMs: 20000, replacement: stateless }

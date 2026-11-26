@@ -372,3 +372,31 @@ fn dropping_a_started_engine_reaps_its_workers() {
     drop(e);
     assert!(!alive(pid), "worker {pid} survived engine drop");
 }
+
+#[test]
+fn relative_contract_paths_resolve_the_entry_once() {
+    // A pipeline whose package directory is given relative to the current directory.
+    let here = std::env::current_dir().expect("cwd");
+    let relative = pathdiff(&fixtures(), &here);
+    let resolver = HostResolver::new(&relative);
+    let graph = build_graph(&classifier("pid-classifier.yaml", 2), &resolver).expect("graph");
+    let services = HostServices::default();
+    let mut e = Engine::build(graph, &registry(), &services).expect("build");
+    let report = e.run(&RunOptions::default(), &mut NullObserver);
+    assert_eq!(report.cycles_completed, 2, "{:?}", services.logs.events());
+}
+
+/// `target` relative to `base` (both absolute), via `..` segments.
+fn pathdiff(target: &Path, base: &Path) -> PathBuf {
+    let t: Vec<_> = target.components().collect();
+    let b: Vec<_> = base.components().collect();
+    let common = t.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let mut out = PathBuf::new();
+    for _ in common..b.len() {
+        out.push("..");
+    }
+    for c in &t[common..] {
+        out.push(c);
+    }
+    out
+}

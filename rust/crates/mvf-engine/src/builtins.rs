@@ -167,6 +167,11 @@ const BUILTINS: &[Builtin] = &[
         factory: MeanF32::create,
     },
     Builtin {
+        name: "plc-sim",
+        contract: include_str!("contracts/plc-sim.yaml"),
+        factory: PlcSim::create,
+    },
+    Builtin {
         name: "folder-source",
         contract: include_str!("contracts/folder-source.yaml"),
         factory: FolderSource::create,
@@ -720,6 +725,68 @@ impl NodeHandle for MeanF32 {
             .sum();
         let mean = if count == 0 { 0.0 } else { sum / count as f64 };
         Ok(Execution::Produced(mean_outputs(mean, count)))
+    }
+}
+
+// ---------------------------------------------------------------- plc-sim
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct PlcConfig {
+    /// Labels that trigger a reject.
+    #[serde(default)]
+    reject_labels: Vec<String>,
+}
+
+/// Simulated PLC output: one committed effect per cycle, recorded as `plc` JSON. A second commit
+/// for the same cycle is a failure — the property a rollback must preserve.
+#[derive(Debug)]
+pub struct PlcSim {
+    reject: Vec<String>,
+    committed: std::collections::BTreeSet<u64>,
+    recorder: Recorder,
+}
+
+impl PlcSim {
+    fn create(
+        config: &serde_json::Map<String, serde_json::Value>,
+        services: &HostServices,
+    ) -> Result<Box<dyn NodeHandle>, NodeError> {
+        let c: PlcConfig = parse_config(config)?;
+        Ok(Box::new(Self {
+            reject: c.reject_labels,
+            committed: Default::default(),
+            recorder: services.recorder.clone(),
+        }))
+    }
+}
+
+impl NodeHandle for PlcSim {
+    fn execute(&mut self, ctx: &ExecContext<'_>, inputs: &Inputs) -> Result<Execution, NodeError> {
+        let Some(Value::Classification(c)) = inputs.get("class") else {
+            return Err(NodeError::failed("input `class` is missing"));
+        };
+        if !self.committed.insert(ctx.cycle) {
+            return Err(NodeError::failed(format!(
+                "duplicate PLC commit for cycle {}",
+                ctx.cycle
+            )));
+        }
+        let decision = if self.reject.contains(&c.label) {
+            "reject"
+        } else {
+            "accept"
+        };
+        self.recorder.push(Record {
+            cycle: ctx.cycle,
+            node: ctx.node_id.to_string(),
+            generation: ctx.generation,
+            port: "plc".into(),
+            value: RecordedValue::Json {
+                value: serde_json::json!({ "decision": decision, "label": c.label }),
+            },
+        });
+        Ok(Execution::Produced(Outputs::new()))
     }
 }
 

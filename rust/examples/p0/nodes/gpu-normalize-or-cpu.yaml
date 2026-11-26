@@ -1,0 +1,14 @@
+# GPU kernel preferred; CPU builtin when the host has no GPU (reported as a placement note).
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: any.normalize-u8-f32, version: 1.0.0 }
+spec:
+  ports:
+    inputs: [ { name: frame, channel: data, type: frame } ]
+    outputs: [ { name: tensor, channel: data, type: tensor } ]
+  artifacts:
+    - { backend: compute, api: wgpu, kernel: normalize-u8-f32, entryPoint: main }
+    - { backend: in-process, builtin: normalize-u8-f32 }
+  execution: { placement: { target: gpu, fallback: cpu } }
+  memory: { domain: device, zeroCopy: preferred }
+  lifecycle: { replacement: stateless }
