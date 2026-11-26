@@ -383,6 +383,56 @@ def run_processor(module_id, transform, on_checkpoint=None, on_restore=None, on_
            on_configure)
 
 
+class SourceFrame:
+    """One frame produced by a source: its bytes (an :class:`Output`) and its identity."""
+
+    def __init__(self, output, camera_id=None, sequence=None):
+        self.output = output
+        self.camera_id = camera_id
+        self.sequence = sequence
+
+
+def source_frame(data, camera_id=None, sequence=None):
+    """A raw-bytes frame for :func:`run_source` (``camera_id``/``sequence`` default to the node's
+    own id and a running count)."""
+    return SourceFrame(blob(data), camera_id, sequence)
+
+
+def run_source(module_id, produce, on_checkpoint=None, on_restore=None, on_start=None,
+               on_configure=None):
+    """Run the stdio loop for a source module (no input -> one frame out per cycle).
+
+    ``produce()`` returns a :class:`SourceFrame` (see :func:`source_frame`), or ``None`` when the
+    stream is exhausted (the run then ends cleanly, like a folder source running dry). It may block
+    until a frame exists, for example while waiting for a camera to upload one; the engine bounds that
+    wait only by the contract's ``executeTimeoutMs`` and by cancellation. The frame is written
+    straight into the engine-owned output slot.
+
+    The ``source`` capability is a protocol v1 extension: ``execute`` carries only an ``out`` slot,
+    and ``result`` carries the frame (``cameraId``, ``sequence``, ``shm``) or ``"exhausted": true``.
+    """
+    def on_execute(msg, request_id, arena_view):
+        produced = produce()
+        if produced is None:
+            _send({"type": "result", "id": request_id, "exhausted": True})
+            return
+        output = produced.output if isinstance(produced, SourceFrame) else produced
+        out = msg["out"]
+        _write_descriptor(
+            arena_view, int(out["offset"]), output.media_type, output.element_type,
+            output.shape, _as_bytes(output.data), int(out["capacity"]))
+        frame = {"shm": {"offset": int(out["offset"])}}
+        if isinstance(produced, SourceFrame):
+            if produced.camera_id is not None:
+                frame["cameraId"] = produced.camera_id
+            if produced.sequence is not None:
+                frame["sequence"] = int(produced.sequence)
+        _send({"type": "result", "id": request_id, "frame": frame})
+
+    _serve(module_id, "source", True, on_execute, on_checkpoint, on_restore, on_start,
+           on_configure)
+
+
 def run_analyzer(module_id, analyze, on_checkpoint=None, on_restore=None, on_start=None,
                  on_configure=None):
     """Run the stdio loop for an analyzer module (frame in -> multi-output result).

@@ -473,10 +473,28 @@ impl OciLauncher {
                     self.binding.as_ref(),
                 )
                 .map_err(fail)?;
+                // Generations of one pipeline node share its host ports (handover on promotion);
+                // a generic workload owns them alone.
+                let owner = self
+                    .logs
+                    .as_ref()
+                    .map_or_else(|| id.to_string(), |(_, node, _)| node.clone());
                 let net =
-                    network::NodeNetwork::setup(&support, &self.backend.state_dir, id, policy)
+                    network::NodeNetwork::setup(&support, &self.backend.state_dir, &owner, policy)
                         .map_err(|e| fail(format!("network: {e}")))?;
                 self.log(net.describe());
+                if !net.publishes() {
+                    let ports: Vec<String> = net
+                        .policy
+                        .host_ports()
+                        .iter()
+                        .map(|(p, n)| format!("{}/{n}", p.as_str()))
+                        .collect();
+                    self.log(format!(
+                        "network: standby until promoted (the previous generation publishes {})",
+                        ports.join(", ")
+                    ));
+                }
                 let path = net.netns_path();
                 self.network = Some(net);
                 Ok(Some(path))
@@ -603,6 +621,26 @@ impl Launcher for OciLauncher {
             let _ = std::fs::remove_dir_all(bundle);
         }
         self.release_network();
+    }
+
+    fn promote(&mut self) -> Result<(), NodeError> {
+        let Some(net) = self.network.as_mut() else {
+            return Ok(());
+        };
+        if net.publishes() {
+            return Ok(());
+        }
+        let t0 = Instant::now();
+        net.promote().map_err(|e| {
+            NodeError::new(NodeErrorKind::StartFailed, format!("network handover: {e}"))
+        })?;
+        let message = format!(
+            "network: promoted, new connections reach {} (handover {} us)",
+            net.node_ip,
+            t0.elapsed().as_micros()
+        );
+        self.log(message);
+        Ok(())
     }
 }
 

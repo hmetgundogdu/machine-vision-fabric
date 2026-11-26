@@ -339,3 +339,212 @@ fn a_private_arena_still_runs_processors_and_hands_outputs_downstream() {
     // Isolation costs one counted copy per worker input: 6 frames into `inv`, 6 outputs into `cls`.
     assert_eq!(private_copies, 12);
 }
+
+// ------------------------------------------------------------------------------------ sources
+
+#[test]
+fn a_python_source_worker_drives_the_graph_and_ends_when_exhausted() {
+    let text = "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: { name: src }\nspec:\n  nodes:\n    - { id: src, contract: counting-source.yaml }\n    - { id: sink, builtin: record }\n  edges:\n    data:\n      - { from: src.frame, to: sink.frame }\n";
+    let s = HostServices::default();
+    let r =
+        engine(text, WorkerBackend::from_env(), &s).run(&RunOptions::default(), &mut NullObserver);
+    assert_eq!(
+        r.end,
+        EndReason::SourceExhausted { node: "src".into() },
+        "{:?}",
+        s.logs.events()
+    );
+    assert_eq!(r.cycles_completed, 5);
+    let frames: Vec<(String, u64, String)> = s
+        .recorder
+        .records()
+        .into_iter()
+        .filter_map(|r| match r.value {
+            RecordedValue::Frame {
+                source,
+                sequence,
+                checksum,
+                ..
+            } => Some((source, sequence, checksum)),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<(String, u64, String)> = (1..=5u8)
+        .map(|n| {
+            (
+                "py-cam".to_string(),
+                u64::from(n),
+                format!("{:016x}", mvf_engine::fnv1a64(&[n; 16])),
+            )
+        })
+        .collect();
+    assert_eq!(frames, expected, "identity and bytes from the worker");
+    let arena = r.data_plane.arena.expect("arena");
+    assert_eq!(
+        (arena.copies_in, r.data_plane.arena_deliveries),
+        (0, 5),
+        "written straight into shared memory"
+    );
+}
+
+/// A minimal passive-mode FTP client (the camera simulator): logs in and STORes each file.
+/// Returns the per-file round trip (PASV .. 226) in microseconds.
+fn ftp_upload(addr: &str, user: &str, files: &[Vec<u8>]) -> Result<Vec<u128>, String> {
+    use std::io::{BufRead, BufReader, Write};
+    let control = std::net::TcpStream::connect(addr).map_err(|e| format!("connect: {e}"))?;
+    control
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(control.try_clone().map_err(|e| e.to_string())?);
+    let _ = control.set_nodelay(true);
+    let mut w = control;
+    let expect =
+        |reader: &mut BufReader<std::net::TcpStream>, code: &str| -> Result<String, String> {
+            let mut line = String::new();
+            reader.read_line(&mut line).map_err(|e| e.to_string())?;
+            if line.starts_with(code) {
+                Ok(line)
+            } else {
+                Err(format!("expected {code}, got {line:?}"))
+            }
+        };
+    expect(&mut reader, "220")?;
+    for (cmd, code) in [
+        (format!("USER {user}"), "331"),
+        ("PASS secret".into(), "230"),
+        ("TYPE I".into(), "200"),
+    ] {
+        w.write_all(format!("{cmd}\r\n").as_bytes())
+            .map_err(|e| e.to_string())?;
+        expect(&mut reader, code)?;
+    }
+    let mut timings = Vec::new();
+    for (i, bytes) in files.iter().enumerate() {
+        let t0 = Instant::now();
+        w.write_all(b"PASV\r\n").map_err(|e| e.to_string())?;
+        let line = expect(&mut reader, "227")?;
+        let inner = line
+            .split('(')
+            .nth(1)
+            .and_then(|r| r.split(')').next())
+            .ok_or("bad 227")?;
+        let n: Vec<u16> = inner
+            .split(',')
+            .filter_map(|x| x.trim().parse().ok())
+            .collect();
+        let [a, b, c, d, p1, p2] = n.as_slice() else {
+            return Err(format!("bad 227: {line}"));
+        };
+        let mut data = std::net::TcpStream::connect(format!("{a}.{b}.{c}.{d}:{}", p1 * 256 + p2))
+            .map_err(|e| format!("data: {e}"))?;
+        w.write_all(format!("STOR image-{i}.bin\r\n").as_bytes())
+            .map_err(|e| e.to_string())?;
+        expect(&mut reader, "150")?;
+        data.write_all(bytes).map_err(|e| e.to_string())?;
+        drop(data);
+        expect(&mut reader, "226")?;
+        timings.push(t0.elapsed().as_micros());
+    }
+    let _ = w.write_all(b"QUIT\r\n");
+    Ok(timings)
+}
+
+#[test]
+fn an_ftp_source_turns_each_uploaded_image_into_a_typed_frame() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let text = "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: { name: ftp }\nspec:\n  nodes:\n    - { id: ftp, module: py.ftp-source, config: { port: 2181, passiveRange: 50180-50189, maxFiles: 24 } }\n    - { id: sink, builtin: record }\n  edges:\n    data:\n      - { from: ftp.frame, to: sink.frame }\n";
+    let resolver = HostResolver::new(fixtures()).with_module_root(repo.join("modules"));
+    let graph = build_graph(text, &resolver).expect("graph");
+    let s = HostServices::default();
+    let mut e = Engine::build(
+        graph,
+        &default_backends().with(WorkerBackend::from_env()),
+        &s,
+    )
+    .expect("build");
+    // Four small checked files, then a measured batch of 20 x 256 KiB in the same session.
+    let files: Vec<Vec<u8>> = (0..4u8)
+        .map(|i| vec![i.wrapping_mul(37); 4096 + usize::from(i)])
+        .chain((0..20u8).map(|i| vec![i; 256 * 1024]))
+        .collect();
+    let uploads = files.clone();
+    let camera = std::thread::spawn(move || {
+        for _ in 0..80 {
+            match ftp_upload("127.0.0.1:2181", "cognex-1", &uploads) {
+                Ok(t) => return Ok(t),
+                Err(e) if e.starts_with("connect") => {
+                    std::thread::sleep(Duration::from_millis(100))
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err("server never came up".to_string())
+    });
+    let r = e.run(&RunOptions::default(), &mut NullObserver);
+    let timings = camera.join().expect("camera").expect("uploads");
+    assert_eq!(
+        r.end,
+        EndReason::SourceExhausted { node: "ftp".into() },
+        "{:?}",
+        s.logs.events()
+    );
+    let frames: Vec<(String, u64, usize, String)> = s
+        .recorder
+        .records()
+        .into_iter()
+        .filter_map(|r| match r.value {
+            RecordedValue::Frame {
+                source,
+                sequence,
+                bytes,
+                checksum,
+            } => Some((source, sequence, bytes, checksum)),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<(String, u64, usize, String)> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            (
+                "cognex-1".to_string(),
+                i as u64 + 1,
+                f.len(),
+                format!("{:016x}", mvf_engine::fnv1a64(f)),
+            )
+        })
+        .collect();
+    assert_eq!(
+        frames, expected,
+        "every upload, in order, byte for byte; camera = FTP user"
+    );
+    assert_eq!(timings.len(), 24);
+    let mut measured: Vec<u128> = timings[4..].to_vec();
+    measured.sort_unstable();
+    let pct = |p: f64| measured[((measured.len() - 1) as f64 * p).round() as usize] as f64 / 1000.0;
+    let total: u128 = measured.iter().sum();
+    let usage = s
+        .logs
+        .events()
+        .iter()
+        .find(|l| l.message.starts_with("ftp: done"))
+        .map(|l| l.message.clone())
+        .unwrap_or_default();
+    eprintln!(
+        "FTP native worker (host network, loopback): 20 x 256 KiB, upload round trip ms p50={:.2} p95={:.2} p99={:.2} max={:.2}, {:.1} MiB/s; {usage}",
+        pct(0.5),
+        pct(0.95),
+        pct(0.99),
+        pct(1.0),
+        5.0 / (total as f64 / 1e6)
+    );
+    let network_note = s
+        .logs
+        .events()
+        .iter()
+        .any(|e| e.message.starts_with("network: shares the host network"));
+    assert!(
+        network_note,
+        "a native worker says it is not network-isolated"
+    );
+}

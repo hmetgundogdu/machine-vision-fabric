@@ -1,0 +1,22 @@
+# Universal Node Contract for the Rust runtime (issue #23). An FTP server as a graph SOURCE: every
+# uploaded file becomes one typed frame. Run as a worker it shares the host network (not isolated);
+# packaged as an OCI node it gets `network: restricted` rules (see docs/rust-runtime/stages/17.md).
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: py.ftp-source
+  version: 1.0.0
+  description: Passive-mode FTP server; each uploaded image becomes a frame (camera = FTP user).
+spec:
+  ports:
+    outputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - { backend: worker, runtime: python, entry: ftp_source.py, protocol: 1 }
+  isolation:
+    minimum: process
+  permissions:
+    network: host
+  lifecycle:
+    readinessTimeoutMs: 10000
+    drainTimeoutMs: 2000

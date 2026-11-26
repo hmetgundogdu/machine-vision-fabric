@@ -209,6 +209,9 @@ impl NodeHandle for PanicGuard {
     fn rewind(&mut self) -> Result<bool, NodeError> {
         self.guard(|n| n.rewind())
     }
+    fn promote(&mut self) -> Result<(), NodeError> {
+        self.guard(|n| n.promote())
+    }
     fn set_value(&mut self, value: &serde_json::Value) -> Result<(), NodeError> {
         self.guard(|n| n.set_value(value))
     }

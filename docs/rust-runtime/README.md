@@ -55,6 +55,7 @@ demo. Windows: `pwsh rust/scripts/gate-a.ps1`. Baseline against the .NET engine:
 
 - [p0-report.md](p0-report.md) / [gate-b-report.json](gate-b-report.json) — P0 verdicts (Gate B; P0.1 re-evaluated after #24)
 - [adr-0002-p0-runtime.md](adr-0002-p0-runtime.md) — OCI, GPU and the decision after Gate B
+- [adr-0003-network-fabric.md](adr-0003-network-fabric.md) — per-node network policy, enforcement matrix, listener handover (#23)
 - [p0-thresholds.md](p0-thresholds.md) — go/no-go thresholds fixed before the final runs
 - [competitive-landscape.md](competitive-landscape.md) — closest alternatives, pinned versions
 

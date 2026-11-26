@@ -231,6 +231,11 @@ pub trait Launcher: Send {
     fn prepare(&mut self, arena: &Path) -> Result<LaunchSpec, NodeError>;
     /// Releases launcher resources (containers, bundles). Must be idempotent.
     fn cleanup(&mut self) {}
+    /// This generation became the active one: take over what the launcher exposes outside the
+    /// graph (published network listeners).
+    fn promote(&mut self) -> Result<(), NodeError> {
+        Ok(())
+    }
 }
 
 /// Launches a local process with `MVF_ARENA_PATH` pointing at the arena.
@@ -302,6 +307,7 @@ fn build_worker_node(
         }),
         recipe,
         pool: None,
+        produced: 0,
     }))
 }
 
@@ -312,7 +318,8 @@ fn unsupported(message: impl Into<String>) -> NodeError {
 /// How contract ports map onto protocol v1 messages (one frame in; frame/classification/json out).
 #[derive(Debug, Clone)]
 struct PortMapping {
-    input: String,
+    /// The frame input; `None` for a source.
+    input: Option<String>,
     frame_out: Option<String>,
     class_out: Option<String>,
     json_out: Option<String>,
@@ -321,18 +328,20 @@ struct PortMapping {
 impl PortMapping {
     fn from_contract(contract: &mvf_contract::NodeContract) -> Result<Self, NodeError> {
         let ports = &contract.spec.ports;
-        let [input] = ports.inputs.as_slice() else {
-            return Err(unsupported(
-                "protocol v1 workers take exactly one input port (a `frame` data port)",
-            ));
+        // A source (no input) is the `source` capability; everything else takes one frame.
+        let input = match ports.inputs.as_slice() {
+            [] => None,
+            [input] if input.channel == Channel::Data && input.port_type == PortType::Frame => {
+                Some(input.name.clone())
+            }
+            _ => {
+                return Err(unsupported(
+                    "protocol v1 workers take no input (a source) or exactly one `frame` data input",
+                ));
+            }
         };
-        if input.channel != Channel::Data || input.port_type != PortType::Frame {
-            return Err(unsupported(
-                "protocol v1 workers take exactly one input port (a `frame` data port)",
-            ));
-        }
         let mut mapping = Self {
-            input: input.name.clone(),
+            input,
             frame_out: None,
             class_out: None,
             json_out: None,
@@ -367,10 +376,12 @@ impl PortMapping {
             self.class_out.is_some(),
             self.json_out.is_some(),
         );
-        let ok = match capability {
-            Capability::Processor => outputs == (true, false, false),
-            Capability::Classifier => outputs == (false, true, false),
-            Capability::Analyzer => true,
+        let ok = match (capability, self.input.is_some()) {
+            (Capability::Source, false) => outputs == (true, false, false),
+            (Capability::Source, true) | (_, false) => false,
+            (Capability::Processor, true) => outputs == (true, false, false),
+            (Capability::Classifier, true) => outputs == (false, true, false),
+            (Capability::Analyzer, true) => true,
         };
         if ok {
             Ok(())
@@ -387,6 +398,8 @@ enum Capability {
     Classifier,
     Processor,
     Analyzer,
+    /// No input; one frame per execute (protocol v1 extension).
+    Source,
 }
 
 struct WorkerNode {
@@ -413,6 +426,8 @@ struct WorkerNode {
     pool: Option<std::sync::Arc<pool::WarmPool>>,
     /// Logged once started: what the node's network actually is (trusted workers share the host's).
     network_note: Option<String>,
+    /// Frames a source produced (default sequence numbers).
+    produced: u64,
 }
 
 impl WorkerNode {
@@ -504,6 +519,88 @@ impl WorkerNode {
             .unwrap_or(8);
         config.slot_count = slots.min(config.slot_count.max(1));
         config
+    }
+
+    /// A source cycle: hand the worker an output slot, get a frame (or exhaustion) back. The
+    /// frame stays in shared memory; downstream nodes share the lease.
+    fn produce(&mut self, ctx: &ExecContext<'_>) -> Result<Execution, NodeError> {
+        if let Some(info) = self.process.as_mut().and_then(WorkerProcess::exit) {
+            return Err(info.to_error("before execute"));
+        }
+        let arena = self.arena()?;
+        let reservation = arena.reserve().map_err(resource)?;
+        let id = self.next_id;
+        self.next_id += 1;
+        let line = protocol::execute_source(id, reservation.offset(), reservation.capacity());
+        let reply = match self.process.as_mut() {
+            Some(p) => p.send(&line).and_then(|_| {
+                p.wait_for(ctx.deadline, Some(ctx.cancel), |m| match m {
+                    ChildMessage::Result { id: r, .. } => *r == id,
+                    ChildMessage::Error { id: r, .. } => *r == Some(id),
+                    _ => false,
+                })
+            }),
+            None => {
+                return Err(NodeError::new(
+                    NodeErrorKind::ProcessExited,
+                    "worker is not running",
+                ));
+            }
+        };
+        let (frame, camera, sequence, exhausted) = match reply {
+            Ok(ChildMessage::Result {
+                frame,
+                camera_id,
+                sequence,
+                exhausted,
+                ..
+            }) => (frame, camera_id, sequence, exhausted),
+            Ok(ChildMessage::Error { message, .. }) => {
+                return Err(NodeError::failed(format!("worker error: {message}")));
+            }
+            Ok(_) => unreachable!("accept() only admits result/error"),
+            Err(e) => return Err(self.fail(e, &format!("execute (cycle {})", ctx.cycle))),
+        };
+        if exhausted {
+            return Ok(Execution::Exhausted);
+        }
+        let Some(Some(offset)) = frame else {
+            return Err(NodeError::new(
+                NodeErrorKind::Protocol,
+                "a source must return a frame or `exhausted`",
+            ));
+        };
+        if offset != reservation.offset() {
+            return Err(NodeError::new(
+                NodeErrorKind::Protocol,
+                format!(
+                    "worker returned offset {offset} but owns only the output slot at {}",
+                    reservation.offset()
+                ),
+            ));
+        }
+        let lease = reservation.seal().map_err(|e| {
+            NodeError::new(
+                NodeErrorKind::InvalidOutput,
+                format!("worker output rejected: {e}"),
+            )
+        })?;
+        self.produced += 1;
+        let port = self
+            .mapping
+            .frame_out
+            .clone()
+            .unwrap_or_else(|| "frame".into());
+        Ok(Execution::Produced(Outputs::new().with(
+            port,
+            Value::Frame(Frame {
+                meta: mvf_engine::FrameMeta {
+                    source: camera.unwrap_or_else(|| self.node_id.clone()),
+                    sequence: sequence.unwrap_or(self.produced),
+                },
+                payload: Payload::arena(lease),
+            }),
+        )))
     }
 
     /// The node's warm pool, created (and warming) on first use; shared with later generations.
@@ -703,6 +800,7 @@ impl NodeHandle for WorkerNode {
             "classifier" => Capability::Classifier,
             "processor" => Capability::Processor,
             "analyzer" => Capability::Analyzer,
+            "source" => Capability::Source,
             other => {
                 self.process.as_mut().map(WorkerProcess::kill);
                 return Err(NodeError::new(
@@ -742,12 +840,14 @@ impl NodeHandle for WorkerNode {
     }
 
     fn execute(&mut self, ctx: &ExecContext<'_>, inputs: &Inputs) -> Result<Execution, NodeError> {
-        let frame = match inputs.get(&self.mapping.input) {
+        let Some(input_port) = self.mapping.input.clone() else {
+            return self.produce(ctx);
+        };
+        let frame = match inputs.get(&input_port) {
             Some(Value::Frame(f)) => f.clone(),
             _ => {
                 return Err(NodeError::failed(format!(
-                    "input `{}` is missing",
-                    self.mapping.input
+                    "input `{input_port}` is missing"
                 )));
             }
         };
@@ -777,7 +877,7 @@ impl NodeHandle for WorkerNode {
             .then(|| mvf_engine::fnv1a64(input.payload()));
         let out = match self.capability {
             Capability::Classifier => None,
-            Capability::Processor | Capability::Analyzer => {
+            Capability::Processor | Capability::Analyzer | Capability::Source => {
                 Some(arena.reserve().map_err(resource)?)
             }
         };
@@ -951,6 +1051,10 @@ impl NodeHandle for WorkerNode {
 
     /// `restore` → `restored`: the blob from [`export_state`] is placed in a slot by copy (it lives
     /// on the host between runs) and the module rehydrates from it.
+    fn promote(&mut self) -> Result<(), NodeError> {
+        self.launcher.promote()
+    }
+
     fn reconfigure(
         &mut self,
         config: &serde_json::Map<String, serde_json::Value>,

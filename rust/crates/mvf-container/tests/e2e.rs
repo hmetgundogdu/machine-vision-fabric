@@ -930,6 +930,55 @@ fn net_helper() {
             }
             println!("NET: error timeout");
         }
+        ["ftp", ip, port, user, count, size] => {
+            let files: Vec<Vec<u8>> = (0..count.parse::<usize>().unwrap_or(1))
+                .map(|i| ftp_payload(i, size.parse().unwrap_or(1024)))
+                .collect();
+            match ftp_upload(&format!("{ip}:{port}"), user, &files) {
+                Ok(t) => println!(
+                    "NET: ok {}",
+                    t.iter()
+                        .map(|us| us.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                Err(e) => println!("NET: error {e}"),
+            }
+        }
+        ["poll", ip, port, every_ms, total_ms] => {
+            // Opens a new connection every `every_ms` and records the reply: `v1*12 v2*40 err*1`.
+            let addr: std::net::SocketAddr = format!("{ip}:{port}").parse().expect("addr");
+            let until =
+                std::time::Instant::now() + Duration::from_millis(total_ms.parse().unwrap_or(1000));
+            let every = Duration::from_millis(every_ms.parse().unwrap_or(20));
+            let mut runs: Vec<(String, u32)> = Vec::new();
+            while std::time::Instant::now() < until {
+                let reply =
+                    match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
+                        Ok(stream) => {
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                            let mut line = String::new();
+                            match std::io::BufReader::new(&stream).read_line(&mut line) {
+                                Ok(n) if n > 0 => line.trim().to_string(),
+                                _ => "err".to_string(),
+                            }
+                        }
+                        Err(_) => "err".to_string(),
+                    };
+                match runs.last_mut() {
+                    Some((r, n)) if *r == reply => *n += 1,
+                    _ => runs.push((reply, 1)),
+                }
+                std::thread::sleep(every);
+            }
+            println!(
+                "NET: {}",
+                runs.iter()
+                    .map(|(r, n)| format!("{r}*{n}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
         ["serve", port, count] => {
             let l = std::net::TcpListener::bind(format!("0.0.0.0:{port}")).expect("listen");
             println!("NET: listening");
@@ -1025,10 +1074,11 @@ fn restricted_inbound_admits_only_the_declared_source_and_return_traffic_flows()
 fn restricted_outbound_reaches_only_the_declared_destination() {
     let e = need_net!();
     let plc = in_ns("ext1", "serve 5020 1");
+    let plc_other_port = in_ns("ext1", "serve 5021 1");
     let other = in_ns("ext2", "serve 5020 1");
     std::thread::sleep(Duration::from_millis(500));
     let script = format!(
-        "import socket\ndef probe(host, port):\n    try:\n        s = socket.create_connection((host, port), timeout=3)\n        return s.recv(64).decode().strip()\n    except Exception as e:\n        return 'blocked ' + type(e).__name__\nprint('plc', probe('{ALLOWED}', 5020), flush=True)\nprint('other', probe('{DENIED}', 5020), flush=True)\nprint('host', probe('{LAN_HOST}', 22), flush=True)\n"
+        "import socket\ndef probe(host, port):\n    try:\n        s = socket.create_connection((host, port), timeout=3)\n        return s.recv(64).decode().strip()\n    except Exception as e:\n        return 'blocked ' + type(e).__name__\nprint('plc', probe('{ALLOWED}', 5020), flush=True)\nprint('other', probe('{DENIED}', 5020), flush=True)\nprint('port', probe('{ALLOWED}', 5021), flush=True)\nprint('host', probe('{LAN_HOST}', 22), flush=True)\n"
     );
     let contract = python_net_contract(
         e,
@@ -1037,10 +1087,14 @@ fn restricted_outbound_reaches_only_the_declared_destination() {
         ),
     );
     let out = python(e, contract, &script, None).join().expect("client");
-    for mut c in [plc, other] {
+    for mut c in [plc, plc_other_port, other] {
         let _ = c.kill();
         let _ = c.wait();
     }
+    assert!(
+        out.stdout.contains("port blocked"),
+        "the allowed host on an undeclared port is not (a server does listen there): {out:?}"
+    );
     assert!(
         out.stdout.contains("plc pong"),
         "the allowed PLC endpoint is reachable: {out:?}"
@@ -1162,4 +1216,389 @@ fn networks_left_by_a_dead_host_are_swept_before_the_next_allocation() {
     );
     assert!(!state.join("net/leases/9000").exists() && !state.join("net/ports/tcp-2141").exists());
     drop(net);
+}
+
+/// The deterministic content of the camera simulator's image `i`.
+fn ftp_payload(i: usize, size: usize) -> Vec<u8> {
+    (0..size).map(|j| ((i * 37 + j * 7) & 0xff) as u8).collect()
+}
+
+/// A minimal passive-mode FTP client (the camera simulator). Per-file round trips in microseconds.
+fn ftp_upload(addr: &str, user: &str, files: &[Vec<u8>]) -> Result<Vec<u128>, String> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut control = None;
+    for _ in 0..80 {
+        match std::net::TcpStream::connect_timeout(
+            &addr.parse().map_err(|e| format!("{e}"))?,
+            Duration::from_secs(3),
+        ) {
+            Ok(c) => {
+                control = Some(c);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                std::thread::sleep(Duration::from_millis(250))
+            }
+            Err(e) => return Err(format!("connect {:?}", e.kind())),
+        }
+    }
+    let control = control.ok_or("connect refused")?;
+    control
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(control.try_clone().map_err(|e| e.to_string())?);
+    let _ = control.set_nodelay(true);
+    let mut w = control;
+    let expect =
+        |reader: &mut BufReader<std::net::TcpStream>, code: &str| -> Result<String, String> {
+            let mut line = String::new();
+            reader.read_line(&mut line).map_err(|e| e.to_string())?;
+            if line.starts_with(code) {
+                Ok(line)
+            } else {
+                Err(format!("expected {code}, got {line:?}"))
+            }
+        };
+    expect(&mut reader, "220")?;
+    for (cmd, code) in [
+        (format!("USER {user}"), "331"),
+        ("PASS secret".to_string(), "230"),
+        ("TYPE I".to_string(), "200"),
+    ] {
+        w.write_all(format!("{cmd}\r\n").as_bytes())
+            .map_err(|e| e.to_string())?;
+        expect(&mut reader, code)?;
+    }
+    let mut timings = Vec::new();
+    for (i, bytes) in files.iter().enumerate() {
+        let t0 = std::time::Instant::now();
+        w.write_all(b"PASV\r\n").map_err(|e| e.to_string())?;
+        let line = expect(&mut reader, "227")?;
+        let inner = line
+            .split('(')
+            .nth(1)
+            .and_then(|r| r.split(')').next())
+            .ok_or("bad 227")?;
+        let n: Vec<u16> = inner
+            .split(',')
+            .filter_map(|x| x.trim().parse().ok())
+            .collect();
+        let [a, b, c, d, p1, p2] = n.as_slice() else {
+            return Err(format!("bad 227: {line}"));
+        };
+        let mut data = std::net::TcpStream::connect(format!("{a}.{b}.{c}.{d}:{}", p1 * 256 + p2))
+            .map_err(|e| format!("data connect: {e}"))?;
+        w.write_all(format!("STOR image-{i}.bin\r\n").as_bytes())
+            .map_err(|e| e.to_string())?;
+        expect(&mut reader, "150")?;
+        data.write_all(bytes).map_err(|e| e.to_string())?;
+        drop(data);
+        expect(&mut reader, "226")?;
+        timings.push(t0.elapsed().as_micros());
+    }
+    let _ = w.write_all(b"QUIT\r\n");
+    Ok(timings)
+}
+
+fn percentile(sorted: &[u128], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    sorted[((sorted.len() - 1) as f64 * p).round() as usize] as f64 / 1000.0
+}
+
+#[test]
+fn a_camera_uploads_over_ftp_into_a_restricted_oci_source_node() {
+    let e = need_net!();
+    let (_, contract_file) = node_image(
+        e,
+        "mvf-e2e/ftp-source:1",
+        &repo().join("modules/py-ftp-source"),
+        "ftp_source.py",
+    );
+    // The packager decides the enforced policy of the OCI node: the camera, and only the camera,
+    // may reach the control port and the passive data range; no new outbound connections.
+    let mut contract =
+        parse_contract(&std::fs::read_to_string(&contract_file).expect("contract")).expect("parse");
+    contract.spec.permissions.network =
+        mvf_contract::NetworkPermission::Rules(mvf_contract::NetworkRules {
+            mode: mvf_contract::NetworkPolicy::Restricted,
+            inbound: vec![
+                mvf_contract::InboundRule {
+                    protocol: mvf_contract::Protocol::Tcp,
+                    port: Some(2121),
+                    port_range: None,
+                    source: Some(format!("{ALLOWED}/32")),
+                },
+                mvf_contract::InboundRule {
+                    protocol: mvf_contract::Protocol::Tcp,
+                    port: None,
+                    port_range: Some("50000-50009".into()),
+                    source: Some(format!("{ALLOWED}/32")),
+                },
+            ],
+            outbound: mvf_contract::Outbound::default(),
+        });
+    std::fs::write(&contract_file, contract_text(&contract)).expect("write");
+    let file = contract_file
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or_default()
+        .to_string();
+    const N: usize = 20;
+    const SIZE: usize = 256 * 1024;
+    let text = format!(
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: ftp }}\nspec:\n  nodes:\n    - {{ id: ftp, contract: {file}, config: {{ port: 2121, passiveRange: 50000-50009, user: cognex-1, password: secret, maxFiles: {N} }}, network: {{ advertise: {LAN_HOST} }} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: ftp.frame, to: sink.frame }}\n"
+    );
+    let graph = build_graph(&text, &HostResolver::new(e.work.join("contracts"))).expect("graph");
+    let mut services = HostServices::default();
+    services.arena_config.slot_size = 512 * 1024;
+    services.arena_config.slot_count = 8;
+    let registry = default_backends().with(e.backend.clone());
+    let mut engine = Engine::build(graph, &registry, &services).expect("build");
+    let run = std::thread::spawn(move || engine.run(&RunOptions::default(), &mut NullObserver));
+    let stranger = helper_says(in_ns("ext2", &format!("ftp {LAN_HOST} 2121 intruder 1 64")));
+    let camera = helper_says(in_ns(
+        "ext1",
+        &format!("ftp {LAN_HOST} 2121 cognex-1 {N} {SIZE}"),
+    ));
+    let report = run.join().expect("run");
+    let logs = services.logs.events();
+    assert_eq!(
+        report.end,
+        EndReason::SourceExhausted { node: "ftp".into() },
+        "{logs:?}"
+    );
+    assert!(
+        stranger.starts_with("error"),
+        "the stranger cannot reach the FTP node: {stranger}"
+    );
+    let mut timings: Vec<u128> = camera
+        .strip_prefix("ok ")
+        .unwrap_or_else(|| panic!("camera upload failed: {camera}"))
+        .split(',')
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    let frames: Vec<(String, u64, String)> = services
+        .recorder
+        .records()
+        .into_iter()
+        .filter_map(|r| match r.value {
+            RecordedValue::Frame {
+                source,
+                sequence,
+                checksum,
+                ..
+            } => Some((source, sequence, checksum)),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<(String, u64, String)> = (0..N)
+        .map(|i| {
+            (
+                "cognex-1".to_string(),
+                i as u64 + 1,
+                format!("{:016x}", fnv1a64(&ftp_payload(i, SIZE))),
+            )
+        })
+        .collect();
+    assert_eq!(
+        frames, expected,
+        "every image arrives in the graph, in order, byte for byte"
+    );
+    let arena = report.data_plane.arena.expect("arena");
+    assert_eq!(
+        arena.copies_in, 0,
+        "the node writes each image straight into its output slot"
+    );
+    let policy = logs
+        .iter()
+        .find(|l| l.message.starts_with("network: restricted"))
+        .expect("effective policy logged");
+    assert!(
+        !policy.message.contains("secret"),
+        "no credentials in the effective policy"
+    );
+    let counters = logs
+        .iter()
+        .find(|l| l.message.starts_with("network counters"))
+        .expect("counters")
+        .message
+        .clone();
+    timings.sort_unstable();
+    let total: u128 = timings.iter().sum();
+    eprintln!(
+        "FTP OCI restricted: {N} x {} KiB, upload round trip ms p50={:.2} p95={:.2} p99={:.2} max={:.2}, {:.1} MiB/s; {}; {}",
+        SIZE / 1024,
+        percentile(&timings, 0.5),
+        percentile(&timings, 0.95),
+        percentile(&timings, 0.99),
+        percentile(&timings, 1.0),
+        (N * SIZE) as f64 / (1024.0 * 1024.0) / (total as f64 / 1e6),
+        policy.message,
+        counters
+    );
+    let usage = logs
+        .iter()
+        .find(|l| l.message.starts_with("ftp: done"))
+        .map(|l| l.message.clone())
+        .unwrap_or_default();
+    eprintln!("FTP OCI node usage: {usage}");
+}
+
+/// A processor that also listens on TCP 2151 and answers its version: the "listening node" whose
+/// live replacement must hand its published port over. `v3` crashes on its 20th frame.
+fn listener_image(e: &Env, version: &str) -> PathBuf {
+    let module = e.work.join(format!("listener-{version}"));
+    std::fs::create_dir_all(&module).expect("dir");
+    let script = format!(
+        "import os, socket, threading\nfrom mvf_sdk import run_processor, blob\nVERSION = '{version}'\ndef serve():\n    s = socket.socket()\n    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind(('0.0.0.0', 2151))\n    s.listen(64)\n    while True:\n        c, _ = s.accept()\n        try:\n            c.sendall((VERSION + '\\n').encode())\n        finally:\n            c.close()\nthreading.Thread(target=serve, daemon=True).start()\nseen = [0]\ndef transform(payload, meta):\n    seen[0] += 1\n    if VERSION == 'v3' and seen[0] >= 20:\n        os._exit(3)\n    return blob(bytes(payload.memory))\nrun_processor('e2e.listener', transform)\n"
+    );
+    std::fs::write(module.join("listener.py"), script).expect("py");
+    std::fs::write(
+        module.join("node.yaml"),
+        std::fs::read_to_string(repo().join("modules/py-invert-transformer/node.yaml"))
+            .expect("y")
+            .replace("py.invert-transformer", "e2e.listener")
+            .replace("transformer.py", "listener.py"),
+    )
+    .expect("yaml");
+    let (_, file) = node_image(
+        e,
+        &format!("mvf-e2e/listener:{version}"),
+        &module,
+        "listener.py",
+    );
+    let mut contract =
+        parse_contract(&std::fs::read_to_string(&file).expect("contract")).expect("parse");
+    contract.spec.permissions.network =
+        mvf_contract::NetworkPermission::Rules(mvf_contract::NetworkRules {
+            mode: mvf_contract::NetworkPolicy::Restricted,
+            inbound: vec![mvf_contract::InboundRule {
+                protocol: mvf_contract::Protocol::Tcp,
+                port: Some(2151),
+                port_range: None,
+                source: Some(format!("{ALLOWED}/32")),
+            }],
+            outbound: mvf_contract::Outbound::default(),
+        });
+    std::fs::write(&file, contract_text(&contract)).expect("write");
+    file
+}
+
+#[test]
+fn a_listening_node_hands_its_port_over_on_live_replacement_and_rollback() {
+    let e = need_net!();
+    let v1 = listener_image(e, "v1");
+    let v2 = listener_image(e, "v2");
+    let v3 = listener_image(e, "v3");
+    let name = |f: &Path| f.file_name().expect("f").to_string_lossy().to_string();
+    struct Driver {
+        control: ControlHandle,
+        steps: Vec<(u64, ReplacementRequest)>,
+    }
+    impl Observer for Driver {
+        fn cycle_completed(&mut self, cycle: u64) {
+            for (at, r) in &self.steps {
+                if *at == cycle + 1 {
+                    self.control.replace(r.clone());
+                }
+            }
+        }
+    }
+    let text = format!(
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: listener }}\nspec:\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ frames: 700, intervalMs: 10, arena: true }} }}\n    - {{ id: lst, contract: {} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: lst.frame }}\n      - {{ from: lst.frame, to: sink.frame }}\n",
+        name(&v1)
+    );
+    let resolver = HostResolver::new(e.work.join("contracts"));
+    let graph = build_graph(&text, &resolver).expect("graph");
+    let services = HostServices::default();
+    let mut engine = Engine::build(
+        graph,
+        &default_backends().with(e.backend.clone()),
+        &services,
+    )
+    .expect("build");
+    let request = |f: &Path, probation: u64| {
+        ReplacementRequest::resolve(
+            &resolver,
+            "lst",
+            &NodeReference::Contract(name(f)),
+            Default::default(),
+            probation,
+        )
+        .expect("request")
+    };
+    let mut driver = Driver {
+        control: engine.control(),
+        steps: vec![(150, request(&v2, 20)), (400, request(&v3, 200))],
+    };
+    let clients = in_ns("ext1", &format!("poll {LAN_HOST} 2151 15 9000"));
+    let report = engine.run(&RunOptions::default(), &mut driver);
+    let seen = helper_says(clients);
+    let logs = services.logs.events();
+    eprintln!("replies: {seen}");
+    for r in &report.replacements {
+        eprintln!(
+            "  {:?} cycle {} {:?} cutover_us={:?}",
+            r.kind, r.cycle, r.code, r.cutover_us
+        );
+    }
+    for l in logs
+        .iter()
+        .filter(|l| l.message.contains("promoted") || l.message.contains("standby"))
+    {
+        eprintln!("  [{} g{}] {}", l.node, l.generation, l.message);
+    }
+    assert_eq!(
+        report.end,
+        EndReason::SourceExhausted { node: "cam".into() },
+        "{logs:?}"
+    );
+    use mvf_engine::ReplacementEventKind as K;
+    let kinds: Vec<K> = report.replacements.iter().map(|r| r.kind).collect();
+    assert!(
+        kinds.contains(&K::Promoted) && kinds.contains(&K::RolledBack),
+        "{kinds:?}"
+    );
+    let runs: Vec<(&str, u32)> = seen
+        .split_whitespace()
+        .filter_map(|t| t.split_once('*').map(|(r, n)| (r, n.parse().unwrap_or(0))))
+        .collect();
+    let order: Vec<&str> = runs
+        .iter()
+        .map(|(r, _)| *r)
+        .filter(|r| *r != "err")
+        .collect();
+    let first = |v: &str| order.iter().position(|r| *r == v);
+    assert!(
+        first("v1") < first("v2"),
+        "v1 served first, then v2: {seen}"
+    );
+    // Promotion v1 -> v2 is seamless for new connections: no failure between them.
+    let v1_last = runs.iter().rposition(|(r, _)| *r == "v1").expect("v1");
+    let v2_first = runs.iter().position(|(r, _)| *r == "v2").expect("v2");
+    assert!(
+        runs[v1_last..v2_first].iter().all(|(r, _)| *r != "err"),
+        "no refused connection at the v1 -> v2 handover: {seen}"
+    );
+    // After v3 crashed, the rollback gave the port back to v2, which serves until the end.
+    assert_eq!(
+        runs.iter()
+            .rev()
+            .find(|(r, _)| *r != "err")
+            .map(|(r, _)| *r),
+        Some("v2"),
+        "{seen}"
+    );
+    // Nothing is left: one table/namespace per live generation, all gone after the run.
+    let tables = String::from_utf8_lossy(
+        &Command::new("nft")
+            .args(["list", "tables"])
+            .output()
+            .expect("nft")
+            .stdout,
+    )
+    .to_string();
+    assert!(!tables.contains("mvf_"), "{tables}");
 }

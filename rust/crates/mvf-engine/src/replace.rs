@@ -684,6 +684,26 @@ impl Engine {
                 return;
             }
         }
+        // The candidate takes over what it exposes outside the graph (published listeners) before
+        // the first cycle routes to it; if it cannot, the active generation keeps serving.
+        if let Err(e) = candidate.promote() {
+            let slot = &self.slots[i];
+            let ctx = LifecycleContext {
+                node_id: &slot.id,
+                generation: pending.generation,
+                budget: Duration::from_millis(request.contract.spec.lifecycle.drain_timeout_ms),
+                cancel,
+            };
+            candidate.stop(&ctx);
+            let _ = self.event(
+                i,
+                ReplacementEventKind::Rejected,
+                to,
+                Some("replace.endpoint-handover-failed"),
+                Some(e.to_string()),
+            );
+            return;
+        }
         let backend = self
             .backends
             .negotiate(&request.contract)
@@ -737,6 +757,8 @@ impl Engine {
         slot.stats.generation = standby.generation;
         slot.stats.backend = standby.backend;
         slot.probation = 0;
+        // The restored generation takes its listeners back before the failed one stops.
+        let handover = slot.handle.promote().err();
         let cancel = CancellationToken::new();
         let ctx = LifecycleContext {
             node_id: &slot.id,
@@ -757,7 +779,10 @@ impl Engine {
             from_version: label(&failed_contract),
             to_version: Some(restored),
             code: Some(code),
-            message: Some(message),
+            message: Some(match handover {
+                Some(e) => format!("{message}; endpoint handover back failed: {e}"),
+                None => message,
+            }),
             preparation_ms: None,
             cutover_us: Some(u64::try_from(cutover.as_micros()).unwrap_or(u64::MAX)),
         });

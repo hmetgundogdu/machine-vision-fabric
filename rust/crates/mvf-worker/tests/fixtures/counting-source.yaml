@@ -1,0 +1,9 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: test.counting-source, version: 1.0.0 }
+spec:
+  ports:
+    outputs: [ { name: frame, channel: data, type: frame } ]
+  artifacts: [ { backend: worker, runtime: python, entry: counting_source.py, protocol: 1 } ]
+  isolation: { minimum: process }
+  lifecycle: { readinessTimeoutMs: 10000, executeTimeoutMs: 10000, drainTimeoutMs: 2000 }

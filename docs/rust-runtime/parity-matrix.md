@@ -24,7 +24,7 @@ Updated by every slice; the stage reports carry the details.
 | Readiness budget (`hello ready:false` → `ready`) | `protocol/README.md`, `WorkerReadinessTests` | `spec.lifecycle.readinessTimeoutMs` | ported |
 | Typed payload descriptor (192-byte header, `MVF1`) | `PayloadDescriptor.cs` | `mvf_memory::Descriptor` | ported — byte-for-byte golden + Python SDK cross-check |
 | Isolation / resource / memory / placement policy | — | `spec.isolation`, `spec.resources`, `spec.memory`, `spec.execution` | new |
-| Live replacement + versioned state | — | `spec.lifecycle.replacement`, `spec.lifecycle.state`, `mvf_engine::replace` | new — stateless + stateful (in-process, worker since #24), rollback, update plans |
+| Live replacement + versioned state | — | `spec.lifecycle.replacement`, `spec.lifecycle.state`, `mvf_engine::replace` | new — stateless + stateful (in-process, worker since #24), rollback, update plans; listening nodes hand host ports over at cut-over (#23) |
 | Backend capability negotiation | — | `mvf_contract::negotiate` | new |
 | Strict YAML (dup keys, no anchors/tags, bounded) | JSON via `System.Text.Json` | `mvf_contract::yaml` | new |
 
@@ -58,6 +58,7 @@ Updated by every slice; the stage reports carry the details.
 | Supervised worker, readiness, warm pool | `SupervisedWorkerTests`, `WorkerReadinessTests`, `WarmWorkerPoolTests` | `mvf-worker` (`MVF_WARM_SPARES`) | ported — readiness, deadlines, kill, reaping, restart (#24), warm pool (#28) |
 | Orphan prevention when the host dies | — (cooperative stdin EOF) | `mvf_worker::spawner` | new (#28) — Linux PDEATHSIG, Windows Job Object; macOS cooperative only |
 | Per-node arena isolation | — | `spec.memory.arena: private`, `MVF_ISOLATE_ARENAS` | new (#28) |
+| Source workers (a worker with no input) | — (sources are in-process modules) | worker capability `source`, Python `run_source` | new (#23) |
 | Per-node network policy (inbound listeners, outbound destinations, return traffic) | — (host networking only) | `permissions.network`, `mvf_container::network`, pipeline `network` binding | new (#23) — Linux OCI enforced (netns + nftables); Windows BLOCKED |
 | OCI layer-level rootfs cache, seccomp allowlist, LSM option | — | `mvf_oci::LayerCache`, `isolation.syscalls`, `isolation.lsm` | new (#28) — LSM enforcement BLOCKED on the test host |
 | Worker logs / observability | `WorkerLoggingTests`, `WorkerObservabilityTests` | `HostServices.logs` | partial — logs, stderr, supervisor events; no RPC latency metrics |

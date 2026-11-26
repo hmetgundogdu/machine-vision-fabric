@@ -49,7 +49,13 @@ fn the_ruleset_is_default_deny_with_stateful_return_traffic() {
         None,
     )
     .expect("policy");
-    let rules = render_rules("mvf_7", "mvfh7", Ipv4Addr::new(10, 89, 0, 30), &p);
+    let rules = render_rules("mvf_7", "mvfh7", Ipv4Addr::new(10, 89, 0, 30), &p, true);
+    let standby = render_rules("mvf_7", "mvfh7", Ipv4Addr::new(10, 89, 0, 30), &p, false);
+    assert!(
+        !standby.contains("dnat"),
+        "an unpromoted successor publishes nothing"
+    );
+    assert!(standby.contains("in-accept"), "but its filter is in place");
     let pos = |needle: &str| {
         rules
             .find(needle)

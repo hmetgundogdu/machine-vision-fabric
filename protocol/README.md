@@ -70,6 +70,22 @@ metadata:
 {"type":"result","id":1,"frame":{"shm":{"offset":8388608}},"classification":{"label":"ok","measurement":127.5,"unit":"mean-byte","details":null},"value":{"mean":127.5,"label":"ok"}}
 ```
 
+Engine → child, run one cycle (source capability, Rust runtime, #23): a source has no input, so
+`execute` carries only the output slot. The child may block until it has a frame (for example an FTP
+upload), bounded by the contract's `executeTimeoutMs` and by cancellation:
+```json
+{"type":"execute","id":1,"out":{"offset":8388608,"capacity":8388416}}
+```
+
+Child → engine, result (source capability) — the frame in the output slot with its identity, or the
+end of the stream:
+```json
+{"type":"result","id":1,"frame":{"cameraId":"cognex-1","sequence":7,"shm":{"offset":8388608}}}
+{"type":"result","id":1,"exhausted":true}
+```
+`cameraId` and `sequence` default to the node id and a running count. The Python SDK's `run_source`
+implements it; the .NET engine does not host source workers.
+
 Engine → child, apply the node's config to the **running** module. Sent once after `ready` (before the
 first `execute`) when the node declares a config, and again whenever an operator edits one of its
 `bindings`. The child applies it and replies `configured`:

@@ -206,13 +206,6 @@ impl Policy {
 
     /// One-line description of the effective policy (logs, reports).
     pub fn describe(&self, node_ip: Ipv4Addr) -> String {
-        let span = |(a, b): (u16, u16)| {
-            if a == b {
-                a.to_string()
-            } else {
-                format!("{a}-{b}")
-            }
-        };
         let inbound: Vec<String> = self
             .inbound
             .iter()
@@ -251,15 +244,51 @@ impl Policy {
     }
 }
 
-/// The nftables ruleset of one node (pure; unit-tested on every host).
-pub fn render_rules(table: &str, host_if: &str, node_ip: Ipv4Addr, policy: &Policy) -> String {
-    let span = |(a, b): (u16, u16)| {
-        if a == b {
-            a.to_string()
-        } else {
-            format!("{a}-{b}")
-        }
-    };
+fn span((a, b): (u16, u16)) -> String {
+    if a == b {
+        a.to_string()
+    } else {
+        format!("{a}-{b}")
+    }
+}
+
+/// The DNAT rules that publish a node's listeners (rule bodies, without a chain).
+pub fn publish_rules(host_if: &str, node_ip: Ipv4Addr, policy: &Policy) -> Vec<String> {
+    policy
+        .inbound
+        .iter()
+        .map(|p| {
+            let daddr = p
+                .host_ip
+                .map(|i| format!("ip daddr {i} "))
+                .unwrap_or_default();
+            let saddr = p
+                .source
+                .map(|c| format!("ip saddr {c} "))
+                .unwrap_or_default();
+            let to = if p.host == p.node {
+                format!("{node_ip}")
+            } else {
+                format!("{node_ip}:{}", span(p.node))
+            };
+            format!(
+                "iifname != \"{host_if}\" {daddr}{saddr}{} dport {} counter dnat ip to {to} comment \"publish\"",
+                p.protocol.as_str(),
+                span(p.host)
+            )
+        })
+        .collect()
+}
+
+/// The nftables ruleset of one node (pure; unit-tested on every host). With `publish: false` (a
+/// successor generation during a live replacement) the listeners are not published yet.
+pub fn render_rules(
+    table: &str,
+    host_if: &str,
+    node_ip: Ipv4Addr,
+    policy: &Policy,
+    publish: bool,
+) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "table inet {table} {{");
     // Published listeners: DNAT from the host address to the node.
@@ -267,26 +296,10 @@ pub fn render_rules(table: &str, host_if: &str, node_ip: Ipv4Addr, policy: &Poli
         s,
         "  chain prerouting {{ type nat hook prerouting priority dstnat; policy accept;"
     );
-    for p in &policy.inbound {
-        let daddr = p
-            .host_ip
-            .map(|i| format!("ip daddr {i} "))
-            .unwrap_or_default();
-        let saddr = p
-            .source
-            .map(|c| format!("ip saddr {c} "))
-            .unwrap_or_default();
-        let to = if p.host == p.node {
-            format!("{node_ip}")
-        } else {
-            format!("{node_ip}:{}", span(p.node))
-        };
-        let _ = writeln!(
-            s,
-            "    iifname != \"{host_if}\" {daddr}{saddr}{} dport {} counter dnat ip to {to} comment \"publish\"",
-            p.protocol.as_str(),
-            span(p.host)
-        );
+    if publish {
+        for rule in publish_rules(host_if, node_ip, policy) {
+            let _ = writeln!(s, "    {rule}");
+        }
     }
     let _ = writeln!(s, "  }}");
     // Permitted outbound leaves behind the host's address.
@@ -389,7 +402,21 @@ pub struct NodeNetwork {
     /// The effective policy.
     pub policy: Policy,
     leases: Vec<PathBuf>,
+    /// Host-port leases (shared by the generations of one node; only the publisher releases them).
+    ports: Vec<PathBuf>,
+    /// `<pid> <node>`: generations of the same node may share host ports.
+    owner: String,
     torn_down: bool,
+}
+
+/// A host-port lease: `<pid> <node> <publishing slot>`.
+fn read_lease(path: &Path) -> Option<(String, u32)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut parts = text.split_whitespace();
+    let pid = parts.next()?;
+    let node = parts.next()?;
+    let slot = parts.next()?.parse().ok()?;
+    Some((format!("{pid} {node}"), slot))
 }
 
 impl NodeNetwork {
@@ -403,7 +430,9 @@ impl NodeNetwork {
         self.policy.describe(self.node_ip)
     }
 
-    /// Creates namespace, veth, addresses, routes and rules for `node`. Fails closed: on any error
+    /// Creates namespace, veth, addresses, routes and rules for one generation of pipeline node
+    /// `node`. A host port already published by *another* generation of the same node is shared:
+    /// this generation starts unpublished until [`NodeNetwork::promote`]. Fails closed: on any error
     /// everything created so far is removed.
     pub fn setup(
         support: &NetworkSupport,
@@ -411,6 +440,7 @@ impl NodeNetwork {
         node: &str,
         policy: Policy,
     ) -> Result<Self, String> {
+        let node = node.split_whitespace().next().unwrap_or("node");
         let dir = state_dir.join("net");
         std::fs::create_dir_all(dir.join("leases"))
             .map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -426,9 +456,12 @@ impl NodeNetwork {
             node_ip: Ipv4Addr::UNSPECIFIED,
             policy,
             leases: Vec::new(),
+            ports: Vec::new(),
+            owner: format!("{} {node}", std::process::id()),
             torn_down: false,
         };
-        let stamp = format!("{} {node}", std::process::id());
+        let stamp = net.owner.clone();
+        let mut publish = true;
         // Host ports first: a collision is the most likely failure and costs nothing to detect.
         for (protocol, port) in net.policy.host_ports() {
             let lease = dir
@@ -440,15 +473,25 @@ impl NodeNetwork {
                 .open(&lease)
                 .is_err()
             {
-                let owner = std::fs::read_to_string(&lease).unwrap_or_default();
-                return Err(format!(
-                    "host {} port {port} is already published by another MVF node ({})",
-                    protocol.as_str(),
-                    owner.trim()
-                ));
+                match read_lease(&lease) {
+                    // Another generation of this node publishes it: share; publish on promotion.
+                    Some((owner, _)) if owner == net.owner => {
+                        publish = false;
+                        net.ports.push(lease);
+                        continue;
+                    }
+                    _ => {
+                        let owner = std::fs::read_to_string(&lease).unwrap_or_default();
+                        return Err(format!(
+                            "host {} port {port} is already published by another MVF node ({})",
+                            protocol.as_str(),
+                            owner.trim()
+                        ));
+                    }
+                }
             }
-            let _ = std::fs::write(&lease, &stamp);
-            net.leases.push(lease);
+            let _ = std::fs::write(&lease, format!("{stamp} {}", u32::MAX));
+            net.ports.push(lease);
             let host = net
                 .policy
                 .inbound
@@ -481,6 +524,11 @@ impl NodeNetwork {
             .ok_or("the node subnet pool (10.89.0.0/16) is exhausted")?;
         net.leases.push(dir.join("leases").join(slot.to_string()));
         net.slot = slot;
+        if publish {
+            for lease in &net.ports {
+                let _ = std::fs::write(lease, format!("{stamp} {slot}"));
+            }
+        }
         net.netns = format!("mvf-{slot}");
         net.host_if = format!("mvfh{slot:x}");
         net.table = format!("mvf_{slot}");
@@ -513,9 +561,46 @@ impl NodeNetwork {
             std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
                 .map_err(|e| format!("enable IPv4 forwarding: {e}"))?;
         }
-        let rules = render_rules(&net.table, &net.host_if, net.node_ip, &net.policy);
+        let rules = render_rules(&net.table, &net.host_if, net.node_ip, &net.policy, publish);
         support.nft(&["-f", "-"], Some(&rules))?;
         Ok(net)
+    }
+
+    /// Whether this generation currently publishes its node's listeners.
+    pub fn publishes(&self) -> bool {
+        self.ports
+            .iter()
+            .all(|lease| read_lease(lease).is_some_and(|(_, slot)| slot == self.slot))
+    }
+
+    /// Makes this generation the publisher of its node's listeners: in one atomic nftables batch the
+    /// previous publisher's DNAT rules are flushed and this generation's are added. New connections
+    /// reach this generation from then on; connections already established with the previous one
+    /// keep their translation until that generation stops. Idempotent.
+    pub fn promote(&mut self) -> Result<(), String> {
+        if self.ports.is_empty() || self.publishes() {
+            return Ok(());
+        }
+        let mut previous: Vec<u32> = self
+            .ports
+            .iter()
+            .filter_map(|lease| read_lease(lease).map(|(_, slot)| slot))
+            .filter(|slot| *slot != self.slot && *slot != u32::MAX)
+            .collect();
+        previous.sort_unstable();
+        previous.dedup();
+        let mut batch = String::new();
+        for slot in previous {
+            let _ = writeln!(batch, "flush chain inet mvf_{slot} prerouting");
+        }
+        for rule in publish_rules(&self.host_if, self.node_ip, &self.policy) {
+            let _ = writeln!(batch, "add rule inet {} prerouting {rule}", self.table);
+        }
+        self.support.nft(&["-f", "-"], Some(&batch))?;
+        for lease in &self.ports {
+            let _ = std::fs::write(lease, format!("{} {}", self.owner, self.slot));
+        }
+        Ok(())
     }
 
     /// Packet counters per rule kind (`in-accept`, `in-deny`, `out-accept`, `out-deny`, …).
@@ -564,6 +649,15 @@ impl NodeNetwork {
         }
         for lease in &self.leases {
             let _ = std::fs::remove_file(lease);
+        }
+        // A host port is released by the generation that publishes it; a superseded generation
+        // leaves it to its successor.
+        for lease in &self.ports {
+            if read_lease(lease).is_some_and(|(owner, slot)| {
+                owner == self.owner && (slot == self.slot || slot == u32::MAX)
+            }) {
+                let _ = std::fs::remove_file(lease);
+            }
         }
     }
 }

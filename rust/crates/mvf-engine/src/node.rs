@@ -273,6 +273,13 @@ pub trait NodeHandle: Send {
         ))
     }
 
+    /// Called when this generation becomes the active one (live replacement cut-over, or the
+    /// previous generation restored by a rollback): it takes over whatever it exposes outside the
+    /// graph, such as published network listeners. An error aborts the promotion.
+    fn promote(&mut self) -> Result<(), NodeError> {
+        Ok(())
+    }
+
     /// Restarts a finite stream from its beginning (the `loop` primitive's `forever` mode).
     /// `Ok(false)` = not rewindable: `forever` then degrades to `until-exhausted` for this source.
     fn rewind(&mut self) -> Result<bool, NodeError> {

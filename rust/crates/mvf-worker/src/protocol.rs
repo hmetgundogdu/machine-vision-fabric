@@ -34,6 +34,12 @@ pub enum ChildMessage {
         classification: Option<Value>,
         /// Structured metadata output.
         value: Option<Value>,
+        /// Source capability: the produced frame's camera id.
+        camera_id: Option<String>,
+        /// Source capability: the produced frame's sequence.
+        sequence: Option<u64>,
+        /// Source capability: the stream is exhausted (no frame).
+        exhausted: bool,
     },
     /// Per-request failure.
     Error {
@@ -112,6 +118,16 @@ pub fn parse_line(line: &str) -> Result<ChildMessage, String> {
             },
             classification: v.get("classification").filter(|c| !c.is_null()).cloned(),
             value: v.get("value").filter(|c| !c.is_null()).cloned(),
+            camera_id: v
+                .get("frame")
+                .and_then(|f| f.get("cameraId"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            sequence: v
+                .get("frame")
+                .and_then(|f| f.get("sequence"))
+                .and_then(Value::as_u64),
+            exhausted: v.get("exhausted").and_then(Value::as_bool).unwrap_or(false),
         },
         "error" => ChildMessage::Error {
             id: v.get("id").and_then(Value::as_u64),
@@ -161,6 +177,16 @@ pub fn execute(
         msg["out"] = json!({ "offset": offset, "capacity": capacity });
     }
     msg.to_string()
+}
+
+/// `execute` for a source (capability `source`, a v1 extension): only an output slot.
+pub fn execute_source(id: u64, offset: u64, capacity: usize) -> String {
+    json!({
+        "type": "execute",
+        "id": id,
+        "out": { "offset": offset, "capacity": capacity },
+    })
+    .to_string()
 }
 
 /// `checkpoint` request: the child writes its state into the reserved slot.
