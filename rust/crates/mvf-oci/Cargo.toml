@@ -1,0 +1,20 @@
+[package]
+name = "mvf-oci"
+description = "MVF OCI image support: offline import of OCI layouts and Docker archives into a digest-verified content store, safe rootfs unpacking and OCI/Docker export. No daemon, no network."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+flate2 = "1.1.11"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.2"
+tar = "0.4.46"
+thiserror = "2.0.21"
+
+[lints]
+workspace = true

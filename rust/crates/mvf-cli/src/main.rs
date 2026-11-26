@@ -6,6 +6,8 @@
 //! Output: sink records go to stdout (text or `--json` lines); node logs and the run summary go to
 //! stderr, so stdout stays machine-readable.
 
+mod image;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -82,6 +84,14 @@ enum Command {
     },
     /// List the builtins and backends this host provides.
     Host,
+    /// Offline OCI image store: import, verify, export, unpack (no Docker daemon, no network).
+    Image {
+        /// Store directory (default: `MVF_STORE` or `~/.mvf/store`).
+        #[arg(long, global = true)]
+        store: Option<PathBuf>,
+        #[command(subcommand)]
+        command: image::ImageCommand,
+    },
 }
 
 fn main() -> ExitCode {
@@ -108,6 +118,9 @@ fn main() -> ExitCode {
             }),
         ),
         Command::Host => host(),
+        Command::Image { store, command } => {
+            image::run(&store.unwrap_or_else(image::default_store), command)
+        }
     }
 }
 
