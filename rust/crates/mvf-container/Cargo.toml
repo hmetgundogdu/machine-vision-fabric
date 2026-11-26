@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 mvf-contract = { path = "../mvf-contract" }
+mvf-display = { path = "../mvf-display" }
 mvf-engine = { path = "../mvf-engine" }
 mvf-graph = { path = "../mvf-graph" }
 mvf-oci = { path = "../mvf-oci" }

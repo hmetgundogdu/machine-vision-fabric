@@ -30,7 +30,7 @@ use mvf_oci::{ContentStore, ImageRecord};
 use mvf_worker::process::LaunchSpec;
 use mvf_worker::{Launcher, worker_node};
 
-use crate::spec::{DeviceNode, IdMapping, Lsm, SpecInput, runtime_spec};
+use crate::spec::{CONTAINER_DISPLAY, DeviceNode, IdMapping, Lsm, SpecInput, runtime_spec};
 
 /// A detected low-level OCI runtime and what this host lets it enforce.
 #[derive(Debug, Clone)]
@@ -247,7 +247,15 @@ impl ExecutionBackend for OciBackend {
                 lsm: self.lsm.iter().map(Lsm::grant).collect(),
             },
             private_arenas: true,
-            display: Default::default(),
+            // Managed surfaces are bind-mounted files; a container is never given a display
+            // server socket, so native windows are not granted.
+            display: mvf_contract::DisplaySupport {
+                native: false,
+                managed_surface: true,
+                fullscreen: false,
+                session: "OCI sandbox: managed surfaces only, no display server socket is mounted"
+                    .into(),
+            },
         }
     }
 
@@ -363,7 +371,7 @@ fn ensure_rootfs(
 /// (set once per cached layer), so only what is created here is chowned.
 fn prepare_rootfs(root: &Path, userns: Option<IdMapping>) -> std::io::Result<()> {
     let mut created = Vec::new();
-    for d in ["proc", "sys", "dev", "tmp", "mvf"] {
+    for d in ["proc", "sys", "dev", "tmp", "mvf", "mvf/display"] {
         let p = root.join(d);
         if std::fs::symlink_metadata(&p).is_err() {
             std::fs::create_dir_all(&p)?;
@@ -458,6 +466,58 @@ impl OciLauncher {
     fn log(&self, message: String) {
         if let Some((services, node, generation)) = &self.logs {
             services.log(node, *generation, "supervisor", message);
+        }
+    }
+
+    /// The node's managed surfaces (allocated per pipeline node, so every generation and every
+    /// restart gets the same files), owned by the mapped container root.
+    fn display_surfaces(&self, userns: Option<IdMapping>) -> Result<Vec<PathBuf>, NodeError> {
+        use mvf_contract::DisplayMode;
+        let d = self.contract.spec.permissions.display;
+        let Some((services, node, _)) = &self.logs else {
+            return Ok(Vec::new());
+        };
+        let fail = |m: String| NodeError::new(NodeErrorKind::StartFailed, m);
+        match d.mode {
+            DisplayMode::None => Ok(Vec::new()),
+            // Negotiation admits this only for `required: false`.
+            DisplayMode::Native => {
+                self.log(
+                    "display: headless — a container is never given a display server socket".into(),
+                );
+                Ok(Vec::new())
+            }
+            DisplayMode::ManagedSurface => {
+                let request = mvf_worker::surface_request(node, &self.contract);
+                let paths = match services.display.surfaces(node, &request) {
+                    Ok(p) => p,
+                    Err(e) if !d.required => {
+                        self.log(format!("display: headless — {e}"));
+                        return Ok(Vec::new());
+                    }
+                    Err(e) => return Err(fail(e.to_string())),
+                };
+                #[cfg(unix)]
+                if let Some(m) = userns {
+                    for p in &paths {
+                        for f in [p.clone(), mvf_display::surface::writer_lock_path(p)] {
+                            std::os::unix::fs::chown(&f, Some(m.host_id), Some(m.host_id))
+                                .map_err(|e| fail(format!("chown {}: {e}", f.display())))?;
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                let _ = userns;
+                self.log(format!(
+                    "display: {} managed surface(s) bind-mounted at {CONTAINER_DISPLAY} (input: \
+                     keyboard={}, mouse={}); no display server socket, host lock or other \
+                     node's surface is visible",
+                    paths.len(),
+                    d.keyboard,
+                    d.mouse
+                ));
+                Ok(paths)
+            }
         }
     }
 
@@ -560,12 +620,34 @@ impl OciLauncher {
             IDS.fetch_add(1, Ordering::Relaxed)
         );
         let netns = self.prepare_network(&id)?;
+        let surfaces = self
+            .display_surfaces(userns)
+            .inspect_err(|_| self.release_network())?;
+        let display: Vec<(String, PathBuf)> = surfaces
+            .iter()
+            .enumerate()
+            .flat_map(|(k, p)| {
+                [
+                    (format!("{CONTAINER_DISPLAY}/{k}.surface"), p.clone()),
+                    (
+                        format!("{CONTAINER_DISPLAY}/{k}.surface.writer.lock"),
+                        mvf_display::surface::writer_lock_path(p),
+                    ),
+                ]
+            })
+            .collect();
         let mut extra_env = vec![
             "PYTHONUNBUFFERED=1".to_string(),
             "PYTHONDONTWRITEBYTECODE=1".to_string(),
         ];
         if let Some(ip) = self.binding.as_ref().and_then(|b| b.advertise.clone()) {
             extra_env.push(format!("MVF_ADVERTISE_IP={ip}"));
+        }
+        if !surfaces.is_empty() {
+            let paths: Vec<String> = (0..surfaces.len())
+                .map(|k| format!("{CONTAINER_DISPLAY}/{k}.surface"))
+                .collect();
+            extra_env.push(format!("MVF_DISPLAY_SURFACES={}", paths.join(":")));
         }
         let spec = runtime_spec(&SpecInput {
             rootfs: &rootfs,
@@ -584,6 +666,7 @@ impl OciLauncher {
             },
             lsm: self.backend.lsm.clone(),
             netns,
+            display,
         })
         .map_err(|e| {
             self.release_network();

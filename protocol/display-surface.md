@@ -17,11 +17,17 @@ no window library in the node. Reference implementations: `rust/crates/mvf-displ
   being copied. The input ring drops events when full; it never waits.
 - **Untrusted peers.** The host validates the header geometry, every frame's size/stride/format
   and the CRC before touching pixels. The node validates every event's CRC.
-- **Ownership by file lock.** The writing generation holds an exclusive lock on
-  `<surface>.writer.lock`, the presenting host on `<surface>.host.lock` (`flock` on Unix,
-  `LockFileEx` / `msvcrt.locking` on Windows). The OS releases both when a process dies. A
-  successor generation that cannot take the writer lock is on *standby*: `present` writes
-  nothing and returns at once. It retries at most every 50 ms.
+- **Exclusion by file lock.**
+  - A writer holds an exclusive lock on `<surface>.writer.lock` only for **one present or one
+    input drain**. While another process holds it, `present` writes nothing and returns
+    *standby* at once.
+  - The presenting host holds `<surface>.host.lock` for as long as it shows the surface.
+  - Locks are `flock` on Unix and `LockFileEx` / `msvcrt.locking` on Windows. The OS releases
+    them when a process dies.
+  - The frame sequence and the input tail live in the surface, not in a process. So any
+    generation of the node continues them: a live replacement moves the window to the
+    candidate at its first frame, a rollback moves it back, and a restart continues the same
+    window. The engine is not involved.
 
 All integers are little-endian.
 
@@ -85,10 +91,12 @@ nothing. Input the node's contract does not grant is refused by the host and nev
 
 **Present (node).**
 
-1. If not owned, try the writer lock (at most every 50 ms). On failure return *standby*.
+1. Try the writer lock. On failure return *standby*.
 2. Read `published` and `reading`. Pick the first buffer index in 0..3 that is neither.
+   `seq = (published >> 2) + 1`.
 3. Write the pixels and the record, CRC last.
-4. Store `published = (seq << 2) | index` (release order where the language offers it).
+4. Store the writer pid, then `published = (seq << 2) | index` (release order where the language
+   offers it). Unlock.
 
 **Take latest (host).**
 
@@ -99,9 +107,12 @@ nothing. Input the node's contract does not grant is refused by the host and nev
 4. Accept only if the CRC verifies and the record's `seq` matches. Otherwise count a rejected read
    and try again on the next poll.
 
-**Input.** The host writes event `head + 1` into slot `head % 256`, then `head`, but only while
-`head - tail < 256`; otherwise it counts a drop. The node reads slot `tail % 256` while its CRC
-verifies and its `seq` is `tail + 1` (a larger `seq` means events were lost), then stores `tail`.
+**Input.**
+- *Host:* writes event `head + 1` into slot `head % 256`, then stores `head`. It does this only
+  while `head - tail < 256`; otherwise it counts a drop.
+- *Node:* under the writer lock, reads `tail` from the surface and consumes slot `tail % 256`
+  while its CRC verifies and its `seq` is `tail + 1`. A larger `seq` means events were lost. Then
+  it stores `tail`.
 
 ## Rendezvous
 
@@ -119,5 +130,7 @@ another user owns or others may write.
 ```
 
 A node receives its surface paths in `MVF_DISPLAY_SURFACES`, joined with the platform path
-separator. The descriptor is written by the engine, never by the node. The host takes the window
+separator. An OCI node gets them under `/mvf/display/<k>.surface` (with
+`<k>.surface.writer.lock`), bind-mounted into a private tmpfs. The run directory, the host lock,
+other nodes' surfaces and any display server socket are not visible to it. The descriptor is written by the engine, never by the node. The host takes the window
 title, initial size and input grants only from it.

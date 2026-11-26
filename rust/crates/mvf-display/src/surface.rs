@@ -13,7 +13,7 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering, fence};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use memmap2::MmapMut;
 
@@ -711,20 +711,21 @@ fn try_lock(file: &File) -> bool {
 }
 
 /// The node side of a surface.
+///
+/// The writer lock is held only for one present or one input drain, never between frames: any
+/// generation of the node may present next and continues the shared sequence. A live replacement
+/// therefore moves the window to the candidate at its first frame, and a rollback moves it back,
+/// with no engine involvement; a crashed writer's lock is released by the OS.
 #[derive(Debug)]
 pub struct SurfaceWriter {
     path: PathBuf,
     map: MmapMut,
     geometry: Geometry,
     lock: File,
-    owned: bool,
-    last_attempt: Option<Instant>,
-    seq: u64,
-    tail: u64,
 }
 
 impl SurfaceWriter {
-    /// Opens a surface the engine created. Ownership is taken on first present.
+    /// Opens a surface the engine created.
     pub fn open(path: &Path) -> Result<Self, SurfaceError> {
         let (map, geometry) = map_surface(path)?;
         let lock = open_rw(&writer_lock_path(path))?;
@@ -733,10 +734,6 @@ impl SurfaceWriter {
             map,
             geometry,
             lock,
-            owned: false,
-            last_attempt: None,
-            seq: 0,
-            tail: 0,
         })
     }
 
@@ -748,29 +745,6 @@ impl SurfaceWriter {
     /// The surface file.
     pub fn path(&self) -> &Path {
         &self.path
-    }
-
-    /// Whether this writer owns the surface (another generation may, during a replacement).
-    pub fn owned(&mut self) -> bool {
-        if self.owned {
-            return true;
-        }
-        // A standby generation retries at most every 50 ms: one syscall, never a wait.
-        if self
-            .last_attempt
-            .is_some_and(|t| t.elapsed() < Duration::from_millis(50))
-        {
-            return false;
-        }
-        self.last_attempt = Some(Instant::now());
-        if !try_lock(&self.lock) {
-            return false;
-        }
-        self.owned = true;
-        self.seq = atomic(&self.map, W_PUBLISHED).load(Ordering::Acquire) >> 2;
-        self.tail = atomic(&self.map, W_TAIL).load(Ordering::Acquire);
-        atomic(&self.map, W_PID).store(u64::from(std::process::id()), Ordering::Release);
-        true
     }
 
     /// Presents a frame (copied into a free buffer). Never blocks.
@@ -798,7 +772,8 @@ impl SurfaceWriter {
     }
 
     /// Presents a frame rendered directly into the surface buffer (no extra copy): `render`
-    /// receives the buffer and its stride.
+    /// receives the buffer and its stride. Returns [`Presented::Standby`] without waiting when
+    /// another generation is presenting at this instant.
     pub fn present_with(
         &mut self,
         width: u32,
@@ -813,9 +788,22 @@ impl SurfaceWriter {
                 g.max_width, g.max_height
             )));
         }
-        if !self.owned() {
+        if !try_lock(&self.lock) {
             return Ok(Presented::Standby);
         }
+        let seq = self.publish(width, height, format, render);
+        let _ = self.lock.unlock();
+        Ok(Presented::Shown { seq })
+    }
+
+    fn publish(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        render: impl FnOnce(&mut [u8], usize),
+    ) -> u64 {
+        let g = self.geometry;
         let stride = width as usize * format.bytes_per_pixel() as usize;
         let len = stride * height as usize;
         let published = atomic(&self.map, W_PUBLISHED).load(Ordering::Acquire);
@@ -829,9 +817,10 @@ impl SurfaceWriter {
             .unwrap_or(0);
         let off = g.buffers_offset + idx * g.capacity;
         render(&mut self.map[off..off + len], stride);
-        self.seq += 1;
+        // The sequence is the surface's, not this process's: a successor continues it.
+        let seq = (published >> 2) + 1;
         let mut meta = [0u8; M_LEN + 4];
-        meta[0..8].copy_from_slice(&self.seq.to_le_bytes());
+        meta[0..8].copy_from_slice(&seq.to_le_bytes());
         meta[8..12].copy_from_slice(&width.to_le_bytes());
         meta[12..16].copy_from_slice(&height.to_le_bytes());
         meta[16..20].copy_from_slice(&(stride as u32).to_le_bytes());
@@ -845,9 +834,15 @@ impl SurfaceWriter {
         let m = M_BASE + idx * M_STRIDE;
         self.map[m..m + M_LEN + 4].copy_from_slice(&meta);
         fence(Ordering::Release);
-        atomic(&self.map, W_PUBLISHED).store((self.seq << 2) | idx as u64, Ordering::Release);
+        atomic(&self.map, W_PID).store(u64::from(std::process::id()), Ordering::Release);
+        atomic(&self.map, W_PUBLISHED).store((seq << 2) | idx as u64, Ordering::Release);
         atomic(&self.map, W_PRESENTED).fetch_add(1, Ordering::Relaxed);
-        Ok(Presented::Shown { seq: self.seq })
+        seq
+    }
+
+    /// The surface's newest frame sequence, shared by every generation of the node.
+    pub fn sequence(&self) -> u64 {
+        atomic(&self.map, W_PUBLISHED).load(Ordering::Acquire) >> 2
     }
 
     /// The host's last status, if a host ever attached and the record verifies.
@@ -858,41 +853,35 @@ impl SurfaceWriter {
         HostStatus::decode(&b)
     }
 
-    /// Drains routed input into `out`. Returns how many events were lost (overwritten before the
-    /// node read them). Only the owning generation consumes input.
+    /// Drains routed input into `out`. Returns how many events were lost (overwritten before any
+    /// generation read them). Nothing is drained while another generation holds the lock.
     pub fn poll_input(&mut self, out: &mut Vec<InputEvent>) -> u64 {
-        if !self.owned() {
+        if !try_lock(&self.lock) {
             return 0;
         }
         let g = self.geometry;
+        let mut tail = atomic(&self.map, W_TAIL).load(Ordering::Acquire);
         let mut lost = 0;
         for _ in 0..g.ring_slots {
-            let off = g.ring_offset + (self.tail as usize % g.ring_slots) * SLOT_SIZE;
+            let off = g.ring_offset + (tail as usize % g.ring_slots) * SLOT_SIZE;
             let mut b = [0u8; SLOT_SIZE];
             copy_out(&self.map, off, &mut b);
             fence(Ordering::Acquire);
             let Some((seq, event)) = InputEvent::decode(&b) else {
                 break;
             };
-            if seq <= self.tail {
+            if seq <= tail {
                 break;
             }
-            if seq > self.tail + 1 {
-                lost += seq - (self.tail + 1);
+            if seq > tail + 1 {
+                lost += seq - (tail + 1);
             }
-            self.tail = seq;
+            tail = seq;
             out.push(event);
         }
-        atomic(&self.map, W_TAIL).store(self.tail, Ordering::Release);
+        atomic(&self.map, W_TAIL).store(tail, Ordering::Release);
+        let _ = self.lock.unlock();
         lost
-    }
-}
-
-impl Drop for SurfaceWriter {
-    fn drop(&mut self) {
-        if self.owned {
-            atomic(&self.map, W_PID).store(0, Ordering::Release);
-        }
     }
 }
 

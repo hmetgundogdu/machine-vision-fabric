@@ -210,3 +210,137 @@ fn the_graph_never_waits_for_a_missing_display_host() {
         elapsed.as_secs_f64() * 1000.0 / 200.0
     );
 }
+
+/// A presenter version `v` (gray level `v × 60`); v3 crashes on its 20th frame.
+fn presenter(base: &Path, version: u8) -> String {
+    let dir = base.join(format!("v{version}"));
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(
+        dir.join("presenter.py"),
+        format!(
+            "import os\nfrom mvf_sdk import analysis, run_analyzer\nfrom mvf_sdk import display\nVERSION = {version}\nseen = [0]\ndef analyze(payload, meta):\n    seen[0] += 1\n    if VERSION == 3 and seen[0] >= 20:\n        os._exit(3)\n    shown = [s.present(bytes([VERSION * 60]) * (32 * 24), 32, 24, 'gray8') for s in display.surfaces()]\n    return analysis(value={{'version': VERSION, 'shown': shown}})\nrun_analyzer('t.presenter', analyze)\n"
+        ),
+    )
+    .expect("py");
+    std::fs::write(
+        dir.join("node.yaml"),
+        format!(
+            "apiVersion: mvf.dev/v1alpha1\nkind: NodeContract\nmetadata: {{ id: t.presenter, version: {version}.0.0 }}\nspec:\n  ports:\n    inputs: [ {{ name: frame, channel: data, type: frame }} ]\n    outputs: [ {{ name: status, channel: data, type: json }} ]\n  artifacts: [ {{ backend: worker, runtime: python, entry: presenter.py, protocol: 1 }} ]\n  isolation: {{ minimum: process }}\n  lifecycle: {{ replacement: stateless, readinessTimeoutMs: 10000 }}\n  permissions:\n    display: {{ mode: managed-surface, maxWidth: 64, maxHeight: 64 }}\n  presentation: {{ title: Presenter }}\n"
+        ),
+    )
+    .expect("yaml");
+    format!("v{version}/node.yaml")
+}
+
+#[test]
+fn the_window_follows_live_replacement_and_rollback() {
+    let base = temp("replace");
+    std::fs::create_dir_all(&base).expect("base");
+    let root = base.join("display");
+    let (v1, v2, v3) = (
+        presenter(&base, 1),
+        presenter(&base, 2),
+        presenter(&base, 3),
+    );
+    let s = HostServices {
+        display: Arc::new(DisplayRegistry::new(&root)),
+        ..HostServices::default()
+    };
+    let text = format!(
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: replace }}\nspec:\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ width: 8, height: 8, channels: 1, frames: 260, intervalMs: 8 }} }}\n    - {{ id: show, contract: {v1} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: show.frame }}\n      - {{ from: show.status, to: sink.json }}\n"
+    );
+    let resolver = HostResolver::new(&base);
+    let graph = build_graph(&text, &resolver).expect("graph");
+    let worker = WorkerBackend::from_env().with_python_sdk(repo().join("src/sdk/python"));
+    let mut engine = Engine::build(graph, &default_backends().with(worker), &s).expect("build");
+    struct Driver {
+        control: ControlHandle,
+        steps: Vec<(u64, ReplacementRequest)>,
+    }
+    impl Observer for Driver {
+        fn cycle_completed(&mut self, cycle: u64) {
+            for (at, r) in &self.steps {
+                if *at == cycle + 1 {
+                    self.control.replace(r.clone());
+                }
+            }
+        }
+    }
+    let request = |c: &str, probation: u64| {
+        ReplacementRequest::resolve(
+            &resolver,
+            "show",
+            &NodeReference::Contract(c.to_string()),
+            Default::default(),
+            probation,
+        )
+        .expect("request")
+    };
+    let mut driver = Driver {
+        control: engine.control(),
+        steps: vec![(60, request(&v2, 20)), (140, request(&v3, 200))],
+    };
+    let (report, shown) = std::thread::scope(|scope| {
+        let run = scope.spawn(|| engine.run(&RunOptions::default(), &mut driver));
+        let found = loop {
+            let found = discover(&root);
+            if !found.is_empty() {
+                break found;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // One host reader for the whole run: the window is never reopened.
+        let mut host = SurfaceReader::open(&found[0].surface).expect("host");
+        let (mut px, mut shown) = (Vec::new(), Vec::<(u64, u8)>::new());
+        while !run.is_finished() {
+            if let Some(info) = host.take_latest(&mut px) {
+                shown.push((info.seq, px[0]));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(host.rejected, 0);
+        (run.join().expect("run"), shown)
+    });
+    use mvf_engine::ReplacementEventKind as K;
+    let kinds: Vec<K> = report.replacements.iter().map(|r| r.kind).collect();
+    assert_eq!(
+        report.end,
+        EndReason::SourceExhausted { node: "cam".into() },
+        "{:?}",
+        s.logs.events()
+    );
+    assert!(
+        kinds.windows(2).any(|w| w == [K::Promoted, K::Committed])
+            && kinds.contains(&K::RolledBack),
+        "{kinds:?}"
+    );
+    // The versions the window showed, in order, collapsed: v1 -> v2 -> v3 -> back to v2.
+    let mut order: Vec<u8> = shown.iter().map(|(_, g)| *g).collect();
+    order.dedup();
+    assert_eq!(order, vec![60, 120, 180, 120], "{shown:?}");
+    assert!(
+        shown.windows(2).all(|w| w[0].0 < w[1].0),
+        "one sequence across generations"
+    );
+    let values = statuses(&s);
+    assert_eq!(
+        values.len(),
+        260,
+        "rollback re-ran the failed cycle: none lost, none doubled"
+    );
+    assert!(
+        values
+            .iter()
+            .all(|v| v["shown"] == serde_json::json!([true]))
+    );
+    let cutovers: Vec<String> = report
+        .replacements
+        .iter()
+        .filter(|r| matches!(r.kind, K::Promoted | K::RolledBack))
+        .map(|r| format!("{:?} {:?}us", r.kind, r.cutover_us))
+        .collect();
+    eprintln!(
+        "window across replacement: {} frames shown, versions {order:?}, {cutovers:?}",
+        shown.len()
+    );
+}

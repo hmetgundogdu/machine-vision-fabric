@@ -84,18 +84,38 @@ class InputEvent:
             self.kind, self.x, self.y, self.text)
 
 
-def _lock(f):
+def _try_lock(f):
+    """Non-blocking exclusive lock of the surface's writer lock file."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock(f):
     if os.name == "nt":
         import msvcrt
         f.seek(0)
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
     else:
         import fcntl
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 class Surface:
-    """The node side of one surface (one window)."""
+    """The node side of one surface (one window).
+
+    The writer lock is held only while one frame is presented or the input is drained: any
+    generation of the node may present next and continues the surface's sequence, so a live
+    replacement moves the window to the new generation at its first frame.
+    """
 
     def __init__(self, path):
         self.path = path
@@ -111,34 +131,11 @@ class Surface:
          self._ring_off, self._ring_slots, _slot, self.index) = struct.unpack_from(
             "<IIIIQQQIII", header, 8)
         self._lock_file = open(path + ".writer.lock", "r+b")
-        self._owned = False
-        self._last_try = None
-        self._seq = 0
-        self._tail = 0
         self.lost_events = 0
 
-    def owned(self):
-        """Whether this process owns the surface. During a live replacement the other generation
-        does; presenting is then a no-op until it lets go (checked at most every 50 ms)."""
-        if self._owned:
-            return True
-        now = time.monotonic()
-        # monotonic() may start near zero, so "never tried" is None, not 0.0.
-        if self._last_try is not None and now - self._last_try < 0.05:
-            return False
-        self._last_try = now
-        try:
-            _lock(self._lock_file)
-        except OSError:
-            return False
-        self._owned = True
-        self._seq = self._u64[_W_PUBLISHED // 8] >> 2
-        self._tail = self._u64[_W_TAIL // 8]
-        self._u64[_W_PID // 8] = os.getpid()
-        return True
-
     def present(self, data, width, height, format="bgra8", stride=None):
-        """Publish one frame. Returns True when published, False on standby. Never blocks."""
+        """Publish one frame. Returns True when published, False when another generation is
+        presenting at this instant. Never blocks."""
         if format not in FORMATS:
             raise ValueError("unknown pixel format {!r}".format(format))
         code, bpp = FORMATS[format]
@@ -150,8 +147,15 @@ class Surface:
         src = memoryview(data).cast("B")
         if stride < row or len(src) < stride * (height - 1) + row:
             raise ValueError("{} bytes do not hold {}x{} {}".format(len(src), width, height, format))
-        if not self.owned():
+        if not _try_lock(self._lock_file):
             return False
+        try:
+            self._publish(src, width, height, code, row, stride)
+        finally:
+            _unlock(self._lock_file)
+        return True
+
+    def _publish(self, src, width, height, code, row, stride):
         published = self._u64[_W_PUBLISHED // 8]
         reading = self._u64[_R_READING // 8]
         busy = set()
@@ -167,16 +171,21 @@ class Surface:
         else:
             for y in range(height):
                 self._view[off + y * row:off + (y + 1) * row] = src[y * stride:y * stride + row]
-        self._seq += 1
-        meta = struct.pack("<QIIIIQQ", self._seq, width, height, row, code,
+        seq = (published >> 2) + 1   # the surface's sequence: a successor continues it
+        meta = struct.pack("<QIIIIQQ", seq, width, height, row, code,
                            int(time.time() * 1_000_000), length)
         crc = zlib.crc32(self._view[off:off + length], zlib.crc32(meta)) & 0xFFFFFFFF
         m = _M_BASE + idx * _M_STRIDE
         self._view[m:m + 40] = meta
         struct.pack_into("<I", self._map, m + 40, crc)
-        self._u64[_W_PUBLISHED // 8] = (self._seq << 2) | idx
+        self._u64[_W_PID // 8] = os.getpid()
+        self._u64[_W_PUBLISHED // 8] = (seq << 2) | idx
         self._u64[_W_PRESENTED // 8] += 1
-        return True
+
+    @property
+    def sequence(self):
+        """The surface's newest frame sequence, shared by every generation of the node."""
+        return self._u64[_W_PUBLISHED // 8] >> 2
 
     def host(self):
         """The host's last status, or None when no host ever attached (or the record is torn)."""
@@ -188,23 +197,30 @@ class Surface:
 
     def poll_input(self):
         """Routed input and window events since the last call (only what the contract grants)."""
-        if not self.owned():
+        if not _try_lock(self._lock_file):
             return []
+        try:
+            return self._drain()
+        finally:
+            _unlock(self._lock_file)
+
+    def _drain(self):
+        tail = self._u64[_W_TAIL // 8]
         events = []
         for _ in range(self._ring_slots):
-            off = self._ring_off + (self._tail % self._ring_slots) * _SLOT
+            off = self._ring_off + (tail % self._ring_slots) * _SLOT
             b = bytes(self._view[off:off + _SLOT])
             if zlib.crc32(b[:56]) & 0xFFFFFFFF != struct.unpack_from("<I", b, 56)[0]:
                 break
             seq, kind, mods, code, x, y, dx, dy = struct.unpack_from("<QHHIffff", b, 0)
-            if seq <= self._tail:
+            if seq <= tail:
                 break
-            if seq > self._tail + 1:
-                self.lost_events += seq - self._tail - 1
-            self._tail = seq
+            if seq > tail + 1:
+                self.lost_events += seq - tail - 1
+            tail = seq
             text = b[32:56].split(b"\0", 1)[0].decode("utf-8", "replace")
             events.append(InputEvent(_KINDS.get(kind, "unknown"), mods, code, x, y, dx, dy, text))
-        self._u64[_W_TAIL // 8] = self._tail
+        self._u64[_W_TAIL // 8] = tail
         return events
 
     def close(self):

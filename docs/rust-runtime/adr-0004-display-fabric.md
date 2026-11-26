@@ -4,7 +4,7 @@
 - **Date:** 2026-11-26
 - **Issues:** #30, part of #10. Related: #23 (Network Fabric), #21 (event-driven execution), #27
   (Windows, rootless OCI).
-- **Evidence:** [stage 18](stages/18.md). Format: [`protocol/display-surface.md`](../../protocol/display-surface.md).
+- **Evidence:** [stage 18](stages/18.md) (P0 + P1), [stage 19](stages/19.md) (P2). Format: [`protocol/display-surface.md`](../../protocol/display-surface.md).
 
 ## Context
 
@@ -44,9 +44,11 @@ the runtime knew nothing about. Nothing negotiated, labelled or survived it.
    - Every field has one writer process.
    - Frames and input events carry a CRC-32 the reader verifies, so a producer without memory-order
      control (Python) is as safe as Rust: a torn frame is detected, not shown.
-   - Ownership is a file lock that the OS releases on death: one writer generation, one host.
-   - Surfaces belong to the **pipeline node**, so a restarted or replacing generation reuses them
-     and the window stays.
+   - Exclusion is a file lock that the OS releases on death. A writer holds it for one present
+     only; the host holds its own lock while it shows the surface.
+   - Surfaces belong to the **pipeline node**, and the frame sequence lives in the surface. So a
+     restarted, replacing or rolled-back generation simply continues the same window, with no
+     engine hook (measured: v1 → v2 → v3 → rollback to v2 in one window with no gap).
 5. **Least privilege for display access.**
    - Surfaces and descriptors live in a per-user 0700 rendezvous directory; an engine refuses a
      shared or foreign one.
@@ -57,7 +59,15 @@ the runtime knew nothing about. Nothing negotiated, labelled or survived it.
    - Window events (focus, resize, close) inform the node and trigger nothing.
    - A node without a `native` grant does not inherit `DISPLAY`, `WAYLAND_DISPLAY` or `XAUTHORITY`.
      For trusted backends this is hygiene, not enforcement, and it is labelled as such.
-6. **Window libraries are the host's choice only.**
+6. **Containers get surfaces, never a display server.**
+   - An OCI node's surfaces (and their writer locks) are bind-mounted into a private tmpfs at
+     `/mvf/display`, owned by the mapped container root.
+   - The run directory, the host lock, other nodes' surfaces, the X11 socket and the Wayland
+     socket are not visible to it.
+   - `native` is not granted to containers. X11 gives every client the whole display. A Wayland
+     socket would give a node full compositor-client access, which is a decision for the
+     operator: design-gated.
+7. **Window libraries are the host's choice only.**
    - `mvf-display-host` uses winit 0.30 + softbuffer 0.4: CPU blit on Win32, AppKit, X11 and
      Wayland.
    - Node applications link nothing. The Python SDK is stdlib-only; the Rust renderer uses
@@ -73,10 +83,11 @@ the runtime knew nothing about. Nothing negotiated, labelled or survived it.
 | Linux X11 (Xvfb) | yes | yes | **xdotool/XTEST**: granted node gets click/key/resize, ungranted only window events | **PASS** |
 | Linux Wayland (weston 10, headless) | yes | yes | not injected | **PASS** |
 | Linux headless (no server) | rejected | node side yes, host absent | — | **PASS** |
-| Windows interactive session | CI smoke (`MVF_DISPLAY_SMOKE=1`) | CI smoke | not injected | see stage 18 |
+| Windows interactive session (CI `windows-latest`) | yes (native-window smoke passed) | yes (2 real windows) | not injected | **PASS** |
 | Windows Session 0 service | rejected (`session 0`) | node side yes; host in the user session needs a cross-session ACL'd directory | — | **BLOCKED** (no service host available) |
-| Linux OCI node | rejected (part 2: authorized Wayland socket) | part 2 (bind-mounted surface file) | — | not started |
-| Windows/macOS guest VM (WSLg, Lima) | — | needs an explicit guest/host transport | — | **BLOCKED** |
+| Linux OCI node (runc, no Docker daemon) | not granted (no display socket; Wayland design-gated) | yes: bind-mounted surface, denial, crash/restart, disconnect, cleanup | through the host, as for workers | **PASS** ([stage 19](stages/19.md)) |
+| Windows, Linux OCI in WSL2 | WSLg's Wayland socket would carry native windows | engine and host both inside WSL2 is the Linux path; a host on the Windows side cannot map WSL2 files coherently (9p) | — | **BLOCKED** (no Windows/WSL2 machine) |
+| macOS, Linux OCI in a VM (Lima, Virtualization.framework) | — | needs a guest → host transport (virtio-fs without DAX gives no shared pages; vsock copy) | — | **BLOCKED** (no VM in scope) |
 | GPU shared textures (D3D, DMA-BUF, IOSurface) | — | — | — | P4, not started |
 
 ## Consequences
@@ -111,12 +122,15 @@ the runtime knew nothing about. Nothing negotiated, labelled or survived it.
    - display host on CPU shared memory;
    - Python camera preview and Rust interactive 3D renderer;
    - input, resize, close, multiple windows, host crash and reattach.
-2. P2, next:
-   - Linux OCI nodes presenting through a bind-mounted surface (and, for `native`, an
-     authorized Wayland socket), with denial, crash and cleanup tests;
-   - live replacement keeping the window;
-   - Windows Session 0 → user-session host;
-   - guest/host paths marked BLOCKED where unavailable.
+2. P2, done ([stage 19](stages/19.md)):
+   - Linux OCI nodes presenting through bind-mounted surfaces, with denial, crash/restart,
+     disconnect and cleanup tests;
+   - live replacement and rollback keeping the window;
+   - guest/host paths evaluated and marked BLOCKED.
+
+   Open: Windows Session 0 → user-session host (BLOCKED, needs a cross-session ACL'd directory
+   and a Windows service host); native windows for containers via an authorized Wayland socket
+   (design-gated).
 3. P3 inspector, P4 GPU sharing, P5 Studio embedding: design-gated, discuss first.
 
 ## Threat model

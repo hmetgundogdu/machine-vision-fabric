@@ -145,29 +145,47 @@ fn a_torn_forged_or_truncated_surface_is_never_shown() {
 }
 
 #[test]
-fn one_generation_writes_at_a_time_and_one_host_presents() {
+fn generations_share_one_sequence_and_one_host_presents() {
     let dir = temp("owners");
     let path = dir.join("s.surface");
     surface::create(&path, 32, 32, 0).expect("create");
     let data = pattern(32, 32, 0);
 
-    let mut active = SurfaceWriter::open(&path).expect("active");
+    // Two generations of the node (a live replacement): whoever presents continues the surface's
+    // sequence, so the window follows the active one with no gap and no engine involvement.
+    let mut old = SurfaceWriter::open(&path).expect("old");
+    let mut new = SurfaceWriter::open(&path).expect("new");
     assert_eq!(
-        active.present(&frame(&data, 32, 32)).expect("present"),
+        old.present(&frame(&data, 32, 32)).expect("present"),
         Presented::Shown { seq: 1 }
     );
-    let mut successor = SurfaceWriter::open(&path).expect("successor");
     assert_eq!(
-        successor.present(&frame(&data, 32, 32)).expect("present"),
-        Presented::Standby,
-        "a second generation waits on standby instead of tearing frames"
+        new.present(&frame(&data, 32, 32)).expect("present"),
+        Presented::Shown { seq: 2 }
     );
-    drop(active);
-    std::thread::sleep(Duration::from_millis(60));
     assert_eq!(
-        successor.present(&frame(&data, 32, 32)).expect("present"),
-        Presented::Shown { seq: 2 },
-        "the successor takes over and continues the sequence"
+        old.present(&frame(&data, 32, 32)).expect("present"),
+        Presented::Shown { seq: 3 }
+    );
+
+    // While another generation is in the middle of a present (holds the writer lock), a present
+    // returns at once instead of tearing the frame or waiting.
+    let busy = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(surface::writer_lock_path(&path))
+        .expect("lock file");
+    busy.try_lock().expect("take the writer lock");
+    assert_eq!(
+        new.present(&frame(&data, 32, 32)).expect("present"),
+        Presented::Standby
+    );
+    let mut events = Vec::new();
+    assert_eq!(new.poll_input(&mut events), 0);
+    busy.unlock().expect("unlock");
+    assert_eq!(
+        new.present(&frame(&data, 32, 32)).expect("present"),
+        Presented::Shown { seq: 4 }
     );
 
     let first = SurfaceReader::open(&path).expect("first host");
@@ -178,7 +196,7 @@ fn one_generation_writes_at_a_time_and_one_host_presents() {
     drop(first);
     let mut second = SurfaceReader::open(&path).expect("reattach after the host is gone");
     let mut out = Vec::new();
-    assert_eq!(second.take_latest(&mut out).map(|i| i.seq), Some(2));
+    assert_eq!(second.take_latest(&mut out).map(|i| i.seq), Some(4));
 }
 
 #[test]

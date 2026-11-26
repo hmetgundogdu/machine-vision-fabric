@@ -1602,3 +1602,334 @@ fn a_listening_node_hands_its_port_over_on_live_replacement_and_rollback() {
     .to_string();
     assert!(!tables.contains("mvf_"), "{tables}");
 }
+
+// ---- Display Fabric (#30 part 2): OCI nodes present through bind-mounted surfaces only ----
+
+fn display_services(e: &Env, name: &str) -> (HostServices, PathBuf) {
+    let root = e.work.join(format!("display-{name}"));
+    let s = HostServices {
+        display: std::sync::Arc::new(mvf_display::DisplayRegistry::new(&root)),
+        ..HostServices::default()
+    };
+    (s, root)
+}
+
+fn display_engine(e: &Env, text: &str, s: &HostServices) -> Engine {
+    let resolver = HostResolver::new(e.work.join("contracts"));
+    let graph = build_graph(text, &resolver).expect("graph");
+    Engine::build(graph, &default_backends().with(e.backend.clone()), s).expect("build")
+}
+
+fn json_values(s: &HostServices, node: &str) -> Vec<serde_json::Value> {
+    s.recorder
+        .records()
+        .into_iter()
+        .filter(|r| r.node == node)
+        .filter_map(|r| match r.value {
+            RecordedValue::Json { value } => Some(value),
+            _ => None,
+        })
+        .collect()
+}
+
+fn wait_surfaces(root: &Path, n: usize) -> Vec<mvf_display::Discovered> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let found = mvf_display::discover(root);
+        if found.len() >= n || std::time::Instant::now() > deadline {
+            return found;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn an_oci_preview_presents_through_bind_mounted_surfaces_and_survives_a_host_disconnect() {
+    let e = need_env!();
+    let (_, contract) = node_image(
+        e,
+        "mvf-e2e/preview:1",
+        &repo().join("modules/py-camera-preview"),
+        "preview.py",
+    );
+    let (s, root) = display_services(e, "preview");
+    let text = format!(
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: oci-preview }}\nspec:\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ width: 64, height: 48, channels: 3, frames: 90, intervalMs: 20, arena: true }} }}\n    - {{ id: prev, contract: {} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: prev.frame }}\n      - {{ from: prev.status, to: sink.json }}\n",
+        contract.file_name().expect("f").to_string_lossy()
+    );
+    let mut engine = display_engine(e, &text, &s);
+    let row = 64 * 3;
+    let (report, shown, marked, latency) = std::thread::scope(|scope| {
+        let run = scope.spawn(|| engine.run(&RunOptions::default(), &mut NullObserver));
+        let found = wait_surfaces(&root, 2);
+        assert_eq!(found.len(), 2, "live + detail surfaces");
+        let open = || mvf_display::SurfaceReader::open(&found[0].surface).expect("host");
+        let mut host = Some(open());
+        let (mut px, mut shown, mut marked, mut clicked, mut latency) =
+            (Vec::new(), 0u32, 0u32, None, Vec::new());
+        let mut beat = std::time::Instant::now();
+        while !run.is_finished() {
+            match host.as_mut() {
+                // Disconnect after 25 frames, reconnect 400 ms later: the node never notices.
+                Some(_) if shown == 25 && clicked.is_some() => {
+                    drop(host.take()); // the host goes away (clean detach)
+                    std::thread::sleep(Duration::from_millis(400));
+                    host = Some(open());
+                    shown += 1;
+                }
+                Some(h) => {
+                    if beat.elapsed() > Duration::from_millis(200) {
+                        h.update_status(|_| {});
+                        beat = std::time::Instant::now();
+                    }
+                    if let Some(info) = h.take_latest(&mut px) {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_micros() as u64)
+                            .unwrap_or(0);
+                        latency.push(now.saturating_sub(info.timestamp_us));
+                        shown += 1;
+                        let base = px[0];
+                        match clicked {
+                            None if shown >= 3 => {
+                                h.push(&mvf_display::InputEvent::pointer(
+                                    mvf_display::InputKind::PointerDown,
+                                    10.0,
+                                    12.0,
+                                ));
+                                clicked = Some(info.seq);
+                            }
+                            Some(at) if info.seq > at + 2 => {
+                                let i = 12 * row + 10 * 3;
+                                assert_eq!(px[i], 255 - base.wrapping_add(i as u8));
+                                marked += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                None => {}
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        latency.sort_unstable();
+        (run.join().expect("run"), shown, marked, latency)
+    });
+    let logs = s.logs.events();
+    assert_eq!(
+        report.end,
+        EndReason::SourceExhausted { node: "cam".into() },
+        "{logs:?}"
+    );
+    assert_eq!(
+        report
+            .nodes
+            .iter()
+            .find(|n| n.id == "prev")
+            .map(|n| n.backend.as_str()),
+        Some("oci")
+    );
+    let v = json_values(&s, "sink");
+    assert_eq!(v.len(), 90, "the host disconnect cost the pipeline nothing");
+    assert_eq!(v.last().expect("last")["roi"], serde_json::json!([10, 12]));
+    assert!(
+        v.iter().any(|x| x["hostAttached"] == false),
+        "the node saw the disconnect"
+    );
+    assert_eq!(
+        v.last().expect("last")["hostAttached"],
+        true,
+        "and the reconnect"
+    );
+    assert!(shown >= 50 && marked >= 10, "{shown} {marked}");
+    assert!(
+        logs.iter()
+            .any(|l| l.message.contains("bind-mounted at /mvf/display")),
+        "{logs:?}"
+    );
+    let p = |q: f64| latency[((latency.len() - 1) as f64 * q).round() as usize] as f64 / 1000.0;
+    eprintln!(
+        "OCI preview: {shown} frames shown through the bind-mounted surface; present -> host ms p50={:.2} p95={:.2} p99={:.2}",
+        p(0.5),
+        p(0.95),
+        p(0.99)
+    );
+    let run_dir = s.display.run_dir().expect("run dir");
+    drop(engine);
+    drop(s);
+    assert!(!run_dir.exists(), "surfaces removed with the engine");
+    assert!(list_containers(&e.backend).is_empty());
+}
+
+fn probe_module(e: &Env, name: &str, display: &str, host_root: &Path) -> PathBuf {
+    let module = e.work.join(name);
+    std::fs::create_dir_all(&module).expect("dir");
+    std::fs::write(
+        module.join("probe.py"),
+        format!(
+            "import os\nfrom mvf_sdk import analysis, run_analyzer\nfrom mvf_sdk import display\ndef analyze(payload, meta):\n    d = '/mvf/display'\n    return analysis(value={{\n        'surfacesEnv': os.environ.get('MVF_DISPLAY_SURFACES'),\n        'displayDir': sorted(os.listdir(d)) if os.path.isdir(d) else None,\n        'displayEnv': [k for k in ('DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'WAYLAND_SOCKET') if k in os.environ],\n        'hostRootVisible': os.path.exists({root:?}),\n        'x11Socket': os.path.exists('/tmp/.X11-unix'),\n        'presented': [s.present(bytes([77]) * 256, 16, 16, 'gray8') for s in display.surfaces()],\n    }})\nrun_analyzer('e2e.probe', analyze)\n",
+            root = host_root.display().to_string()
+        ),
+    )
+    .expect("py");
+    std::fs::write(
+        module.join("node.yaml"),
+        format!(
+            "apiVersion: mvf.dev/v1alpha1\nkind: NodeContract\nmetadata: {{ id: e2e.{name}, version: 1.0.0 }}\nspec:\n  ports:\n    inputs: [ {{ name: frame, channel: data, type: frame }} ]\n    outputs: [ {{ name: status, channel: data, type: json }} ]\n  artifacts: [ {{ backend: worker, runtime: python, entry: probe.py, protocol: 1 }} ]\n  lifecycle: {{ readinessTimeoutMs: 20000 }}\n  permissions:\n    display: {display}\n"
+        ),
+    )
+    .expect("yaml");
+    let (_, contract) = node_image(e, &format!("mvf-e2e/{name}:1"), &module, "probe.py");
+    contract
+}
+
+#[test]
+fn an_oci_node_sees_only_its_own_surfaces_and_no_display_server() {
+    let e = need_env!();
+    let (s, root) = display_services(e, "probe");
+    let granted = probe_module(
+        e,
+        "probe-granted",
+        "{ mode: managed-surface, maxWidth: 64, maxHeight: 64 }",
+        &root,
+    );
+    let denied = probe_module(e, "probe-denied", "{ mode: none }", &root);
+    let name = |f: &Path| f.file_name().expect("f").to_string_lossy().to_string();
+    let text = format!(
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: oci-probe }}\nspec:\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ frames: 3, arena: true }} }}\n    - {{ id: granted, contract: {} }}\n    - {{ id: denied, contract: {} }}\n    - {{ id: sa, builtin: record }}\n    - {{ id: sb, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: granted.frame }}\n      - {{ from: cam.frame, to: denied.frame }}\n      - {{ from: granted.status, to: sa.json }}\n      - {{ from: denied.status, to: sb.json }}\n",
+        name(&granted),
+        name(&denied)
+    );
+    let mut engine = display_engine(e, &text, &s);
+    let report = engine.run(&RunOptions::default(), &mut NullObserver);
+    assert_eq!(
+        report.end,
+        EndReason::SourceExhausted { node: "cam".into() },
+        "{:?}",
+        s.logs.events()
+    );
+    let a = json_values(&s, "sa").pop().expect("granted");
+    let b = json_values(&s, "sb").pop().expect("denied");
+    eprintln!("granted node sees: {a}\ndenied node sees: {b}");
+    assert_eq!(a["surfacesEnv"], "/mvf/display/0.surface");
+    assert_eq!(
+        a["displayDir"],
+        serde_json::json!(["0.surface", "0.surface.writer.lock"]),
+        "its own surface and writer lock: no host lock, no other node's surface"
+    );
+    assert_eq!(a["presented"], serde_json::json!([true]));
+    assert_eq!(b["surfacesEnv"], serde_json::Value::Null);
+    assert_eq!(
+        b["displayDir"],
+        serde_json::json!([]),
+        "nothing mounted without a grant"
+    );
+    for v in [&a, &b] {
+        assert_eq!(v["displayEnv"], serde_json::json!([]));
+        assert_eq!(
+            v["hostRootVisible"], false,
+            "the rendezvous directory is not reachable"
+        );
+        assert_eq!(v["x11Socket"], false);
+    }
+    // What the granted container presented reached the host intact.
+    let found = mvf_display::discover(&root);
+    assert_eq!(found.len(), 1, "only the granted node has a surface");
+    let mut host = mvf_display::SurfaceReader::open(&found[0].surface).expect("host");
+    let mut px = Vec::new();
+    let info = host.take_latest(&mut px).expect("frame from the container");
+    assert_eq!((info.width, info.height, info.seq), (16, 16, 3));
+    assert!(px.iter().all(|&g| g == 77));
+}
+
+#[test]
+fn an_oci_presenter_that_crashes_restarts_into_the_same_window_and_nothing_is_left() {
+    let e = need_env!();
+    let module = e.work.join("crash-presenter");
+    std::fs::create_dir_all(&module).expect("dir");
+    // Crashes once, when the surface (shared by every generation) reaches frame 30.
+    std::fs::write(
+        module.join("presenter.py"),
+        "import os\nfrom mvf_sdk import analysis, run_analyzer\nfrom mvf_sdk import display\ndef analyze(payload, meta):\n    s = display.surfaces()[0]\n    shown = s.present(bytes([90]) * (32 * 24), 32, 24, 'gray8')\n    if s.sequence == 30:\n        os._exit(3)\n    return analysis(value={'shown': shown, 'pid': os.getpid(), 'sequence': s.sequence})\nrun_analyzer('e2e.crash-presenter', analyze)\n",
+    )
+    .expect("py");
+    std::fs::write(
+        module.join("node.yaml"),
+        "apiVersion: mvf.dev/v1alpha1\nkind: NodeContract\nmetadata: { id: e2e.crash-presenter, version: 1.0.0 }\nspec:\n  ports:\n    inputs: [ { name: frame, channel: data, type: frame } ]\n    outputs: [ { name: status, channel: data, type: json } ]\n  artifacts: [ { backend: worker, runtime: python, entry: presenter.py, protocol: 1 } ]\n  lifecycle: { readinessTimeoutMs: 20000 }\n  permissions:\n    display: { mode: managed-surface, maxWidth: 64, maxHeight: 64 }\n",
+    )
+    .expect("yaml");
+    let (_, contract) = node_image(e, "mvf-e2e/crash-presenter:1", &module, "presenter.py");
+    let (s, root) = display_services(e, "crash");
+    let text = format!(
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: oci-crash }}\nspec:\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ frames: 80, intervalMs: 15, arena: true }} }}\n    - {{ id: show, contract: {}, onError: {{ mode: restart, limit: 2, backoffMs: 10 }} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: show.frame }}\n      - {{ from: show.status, to: sink.json }}\n",
+        contract.file_name().expect("f").to_string_lossy()
+    );
+    let mut engine = display_engine(e, &text, &s);
+    let (report, seqs) = std::thread::scope(|scope| {
+        let run = scope.spawn(|| engine.run(&RunOptions::default(), &mut NullObserver));
+        let found = wait_surfaces(&root, 1);
+        // One reader for the whole run: the window is never reopened across the restart.
+        let mut host = mvf_display::SurfaceReader::open(&found[0].surface).expect("host");
+        let (mut px, mut seqs) = (Vec::new(), Vec::new());
+        while !run.is_finished() {
+            if let Some(info) = host.take_latest(&mut px) {
+                seqs.push(info.seq);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(host.rejected, 0);
+        (run.join().expect("run"), seqs)
+    });
+    let logs = s.logs.events();
+    assert_eq!(
+        report.end,
+        EndReason::SourceExhausted { node: "cam".into() },
+        "{logs:?}"
+    );
+    let show = report.nodes.iter().find(|n| n.id == "show").expect("show");
+    assert_eq!(show.restarts, 1, "{logs:?}");
+    assert!(
+        seqs.windows(2).all(|w| w[0] < w[1]),
+        "one sequence across the restart: {seqs:?}"
+    );
+    assert!(
+        seqs.iter().any(|&q| q < 30) && seqs.iter().any(|&q| q > 31),
+        "{seqs:?}"
+    );
+    // The writer pid is namespace-local (1 in every container); the engine's log shows the second
+    // container that took over the same surface.
+    let containers = logs
+        .iter()
+        .filter(|l| l.node == "show" && l.message.starts_with("ready pid="))
+        .count();
+    assert_eq!(
+        containers, 2,
+        "a new container took over the same surface: {logs:?}"
+    );
+    let v = json_values(&s, "sink");
+    assert!(v.iter().all(|x| x["shown"] == true));
+    eprintln!(
+        "OCI presenter crash at frame 30: restarts={}, window kept {} frames in one sequence (last {:?}), {containers} containers, {} statuses",
+        show.restarts,
+        seqs.len(),
+        seqs.last(),
+        v.len()
+    );
+    let run_dir = s.display.run_dir().expect("run dir");
+    drop(engine);
+    drop(s);
+    assert!(!run_dir.exists(), "the surface is removed with the engine");
+    assert!(
+        list_containers(&e.backend).is_empty(),
+        "no container is left"
+    );
+    let bundles: Vec<String> = std::fs::read_dir(e.work.join("state/bundles"))
+        .map(|d| {
+            d.flatten()
+                .map(|x| x.file_name().to_string_lossy().to_string())
+                .filter(|n| n.contains("-show-g"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(bundles.is_empty(), "no bundle is left: {bundles:?}");
+}

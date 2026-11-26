@@ -33,6 +33,7 @@ fn spec(
     userns: Option<IdMapping>,
 ) -> serde_json::Value {
     runtime_spec(&SpecInput {
+        display: vec![],
         rootfs: Path::new("/state/rootfs/abc"),
         arena: Path::new("/tmp/mvf-arena-1.bin"),
         image: &image(),
@@ -207,6 +208,7 @@ fn unsupported_network_policy_fails_closed() {
     c.spec.permissions.network = NetworkPolicy::Loopback.into();
     assert!(
         runtime_spec(&SpecInput {
+            display: vec![],
             rootfs: Path::new("/r"),
             arena: Path::new("/a"),
             image: &image(),
@@ -349,6 +351,7 @@ fn a_host_security_module_profile_lands_in_the_process() {
     let c = contract("");
     let input_spec = |lsm| {
         runtime_spec(&SpecInput {
+            display: vec![],
             rootfs: Path::new("/r"),
             arena: Path::new("/a"),
             image: &image(),
@@ -374,4 +377,81 @@ fn a_host_security_module_profile_lands_in_the_process() {
         "system_u:system_r:container_t:s0"
     );
     assert!(input_spec(None)["process"].get("apparmorProfile").is_none());
+}
+
+#[test]
+fn display_surfaces_are_the_only_display_paths_a_container_sees() {
+    let c = contract("");
+    let plain = spec(&c, vec![], None);
+    let dests = |s: &serde_json::Value| -> Vec<String> {
+        s["mounts"]
+            .as_array()
+            .expect("mounts")
+            .iter()
+            .map(|m| m["destination"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    assert!(
+        dests(&plain).iter().all(|d| !d.starts_with("/mvf/display")),
+        "no display mount without a grant"
+    );
+    let with = runtime_spec(&SpecInput {
+        display: vec![
+            (
+                "/mvf/display/0.surface".into(),
+                "/run/user/1000/mvf-display/run-1/n.0.surface".into(),
+            ),
+            (
+                "/mvf/display/0.surface.writer.lock".into(),
+                "/run/user/1000/mvf-display/run-1/n.0.surface.writer.lock".into(),
+            ),
+        ],
+        rootfs: Path::new("/state/rootfs/abc"),
+        arena: Path::new("/tmp/mvf-arena-1.bin"),
+        image: &image(),
+        contract: &c,
+        args: None,
+        extra_env: vec![],
+        devices: vec![],
+        userns: None,
+        hostname: "mvf-node".into(),
+        syscalls: c.spec.isolation.syscalls,
+        lsm: None,
+        netns: None,
+    })
+    .expect("spec");
+    let mounts = with["mounts"].as_array().expect("mounts");
+    let display: Vec<&serde_json::Value> = mounts
+        .iter()
+        .filter(|m| {
+            m["destination"]
+                .as_str()
+                .is_some_and(|d| d.starts_with("/mvf/display"))
+        })
+        .collect();
+    assert_eq!(
+        display.len(),
+        3,
+        "a private tmpfs plus the surface and its writer lock"
+    );
+    assert_eq!(
+        display[0]["type"], "tmpfs",
+        "the directory is the container's own"
+    );
+    for m in &display[1..] {
+        assert_eq!(m["type"], "bind");
+        let opts: Vec<&str> = m["options"]
+            .as_array()
+            .expect("o")
+            .iter()
+            .filter_map(|o| o.as_str())
+            .collect();
+        assert!(opts.contains(&"noexec") && opts.contains(&"nosuid") && opts.contains(&"nodev"));
+        assert!(
+            !m["source"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with("host.lock")
+        );
+    }
 }

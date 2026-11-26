@@ -59,7 +59,7 @@ Updated by every slice; the stage reports carry the details.
 | Orphan prevention when the host dies | — (cooperative stdin EOF) | `mvf_worker::spawner` | new (#28) — Linux PDEATHSIG, Windows Job Object; macOS cooperative only |
 | Per-node arena isolation | — | `spec.memory.arena: private`, `MVF_ISOLATE_ARENAS` | new (#28) |
 | Source workers (a worker with no input) | — (sources are in-process modules) | worker capability `source`, Python `run_source` | new (#23) |
-| Node presentation (windows, input) | — (no display concept; `mvf` TUI only) | `permissions.display` (`native`, `managed-surface`), `mvf-display` surfaces, `mvf-display-host` | new (#30) — macOS, Linux X11/Wayland verified; Windows CI smoke; OCI presentation part 2 |
+| Node presentation (windows, input) | — (no display concept; `mvf` TUI only) | `permissions.display` (`native`, `managed-surface`), `mvf-display` surfaces, `mvf-display-host` | new (#30) — macOS, Linux X11/Wayland, Windows (CI) verified; Linux OCI nodes present through bind-mounted surfaces; the window follows restarts, live replacement and rollback |
 | Per-node network policy (inbound listeners, outbound destinations, return traffic) | — (host networking only) | `permissions.network`, `mvf_container::network`, pipeline `network` binding | new (#23) — Linux OCI enforced (netns + nftables); Windows BLOCKED |
 | OCI layer-level rootfs cache, seccomp allowlist, LSM option | — | `mvf_oci::LayerCache`, `isolation.syscalls`, `isolation.lsm` | new (#28) — LSM enforcement BLOCKED on the test host |
 | Worker logs / observability | `WorkerLoggingTests`, `WorkerObservabilityTests` | `HostServices.logs` | partial — logs, stderr, supervisor events; no RPC latency metrics |

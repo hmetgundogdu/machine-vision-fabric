@@ -23,6 +23,8 @@ use serde_json::{Value, json};
 
 /// Path of the arena inside the container (`MVF_ARENA_PATH`).
 pub const CONTAINER_ARENA: &str = "/mvf/arena";
+/// Directory of a node's display surfaces inside the container (`MVF_DISPLAY_SURFACES`).
+pub const CONTAINER_DISPLAY: &str = "/mvf/display";
 
 /// Syscalls denied by the default profile.
 pub const DENIED_SYSCALLS: &[&str] = &[
@@ -126,6 +128,10 @@ pub struct SpecInput<'a> {
     pub lsm: Option<Lsm>,
     /// For `network: restricted`: the prepared namespace the container joins.
     pub netns: Option<std::path::PathBuf>,
+    /// Display Fabric surfaces: `(path inside the container, host file)`, each surface with its
+    /// writer lock. Bind-mounted into a private tmpfs at [`CONTAINER_DISPLAY`]; nothing else of
+    /// the display — no server socket, no host lock, no other node's surface — is visible.
+    pub display: Vec<(String, std::path::PathBuf)>,
 }
 
 /// A Linux security module profile the host provides.
@@ -332,6 +338,17 @@ pub fn runtime_spec(input: &SpecInput<'_>) -> Result<Value, String> {
         ],
         "linux": linux,
     });
+    if !input.display.is_empty()
+        && let Some(mounts) = spec["mounts"].as_array_mut()
+    {
+        mounts.push(
+            json!({"destination": CONTAINER_DISPLAY, "type": "tmpfs", "source": "tmpfs",
+                           "options": ["nosuid", "nodev", "noexec", "mode=755", "size=64k"]}),
+        );
+        for (dest, src) in &input.display {
+            mounts.push(ro_bind(dest, src));
+        }
+    }
     match &input.lsm {
         Some(Lsm::AppArmor(profile)) => spec["process"]["apparmorProfile"] = json!(profile),
         Some(Lsm::SeLinux(label)) => spec["process"]["selinuxLabel"] = json!(label),

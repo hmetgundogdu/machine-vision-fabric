@@ -2,7 +2,7 @@
 
 Research branch `research/rust-runtime`. Implements the ordered backlog of
 [#10](https://github.com/hmetgundogdu/machine-vision-fabric/issues/10): Gate A (#11–#16) and Gate B
-(#17–#20), then the follow-ups #24–#28 (stage 11: #24; stages 12–13: #25), the Network Fabric #23 (stages 16–17) and the Display Fabric #30 (stage 18). The shipping .NET engine is **unchanged** and remains the behavioural reference.
+(#17–#20), then the follow-ups #24–#28 (stage 11: #24; stages 12–13: #25), the Network Fabric #23 (stages 16–17) and the Display Fabric #30 (stages 18–19). The shipping .NET engine is **unchanged** and remains the behavioural reference.
 
 ## Layout decision
 

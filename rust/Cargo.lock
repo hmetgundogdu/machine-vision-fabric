@@ -1021,6 +1021,7 @@ name = "mvf-container"
 version = "0.1.0"
 dependencies = [
  "mvf-contract",
+ "mvf-display",
  "mvf-engine",
  "mvf-graph",
  "mvf-oci",

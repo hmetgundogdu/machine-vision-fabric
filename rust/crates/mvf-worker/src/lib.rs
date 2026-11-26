@@ -105,6 +105,13 @@ impl WorkerBackend {
         self
     }
 
+    /// Uses the Python SDK at `sdk` (the directory holding `mvf_sdk/`) for every module, instead of
+    /// discovering `src/sdk/python` above each module (also `MVF_PYTHON_SDK`).
+    pub fn with_python_sdk(mut self, sdk: impl Into<PathBuf>) -> Self {
+        self.python_sdk = Some(sdk.into());
+        self
+    }
+
     /// Uses `python` as the interpreter.
     pub fn with_python(mut self, python: impl Into<OsString>) -> Self {
         self.python = python.into();
@@ -336,6 +343,29 @@ fn build_worker_node(
     }))
 }
 
+/// The surfaces a managed-surface node asks for (title, sizes, input grants), from its contract.
+pub fn surface_request(
+    node_id: &str,
+    contract: &mvf_contract::NodeContract,
+) -> mvf_display::SurfaceRequest {
+    let d = &contract.spec.permissions.display;
+    let p = contract.spec.presentation.as_ref();
+    mvf_display::SurfaceRequest {
+        title: p
+            .and_then(|p| p.title.clone())
+            .unwrap_or_else(|| node_id.to_string()),
+        width: p.and_then(|p| p.width).unwrap_or(d.max_width.min(1280)),
+        height: p.and_then(|p| p.height).unwrap_or(d.max_height.min(720)),
+        max_width: d.max_width,
+        max_height: d.max_height,
+        windows: d.max_windows,
+        grants: mvf_display::Grants {
+            keyboard: d.keyboard,
+            mouse: d.mouse,
+        },
+    }
+}
+
 /// What a worker gets for `permissions.display`.
 struct DisplayPlan {
     env: Vec<(String, OsString)>,
@@ -384,21 +414,7 @@ fn display_plan(
             session.detail
         ))),
         DisplayMode::ManagedSurface => {
-            let p = request.contract.spec.presentation.as_ref();
-            let surface_request = mvf_display::SurfaceRequest {
-                title: p
-                    .and_then(|p| p.title.clone())
-                    .unwrap_or_else(|| request.node_id.to_string()),
-                width: p.and_then(|p| p.width).unwrap_or(d.max_width.min(1280)),
-                height: p.and_then(|p| p.height).unwrap_or(d.max_height.min(720)),
-                max_width: d.max_width,
-                max_height: d.max_height,
-                windows: d.max_windows,
-                grants: mvf_display::Grants {
-                    keyboard: d.keyboard,
-                    mouse: d.mouse,
-                },
-            };
+            let surface_request = surface_request(request.node_id, request.contract);
             let surfaces = match request
                 .services
                 .display
