@@ -1,0 +1,19 @@
+# expect: contract.artifact.unsafe-path
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.invert
+  version: 1.0.0
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - backend: worker
+      runtime: python
+      protocol: 1
+      entry: ../../etc/evil.py
+    - backend: in-process
+      builtin: invert

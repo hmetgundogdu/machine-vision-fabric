@@ -1,0 +1,8 @@
+# expect: contract.port.none
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: mvf.nothing, version: 1.0.0 }
+spec:
+  ports: {}
+  artifacts:
+    - { backend: in-process, builtin: nothing }

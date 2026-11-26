@@ -49,6 +49,30 @@ jobs:
       - run: npm test
         working-directory: clients/mvf-egress-client
 
+  # Research workspace for the Pure Rust core (issue #10). Isolated under rust/; it never touches the
+  # .NET jobs above, and a failure here says nothing about the shipping .NET engine.
+  rust:
+    name: Rust runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      # Worker-backend tests spawn real Python modules through the existing MVF Python SDK.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
   cpp-sdk:
     name: C++ SDK (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -1,0 +1,20 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.counter
+  version: 2.0.0
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+      - { name: reset, channel: control, type: signal, required: false }
+    outputs:
+      - { name: count, channel: data, type: value }
+  artifacts:
+    - backend: in-process
+      builtin: counter
+  lifecycle:
+    replacement: stateful
+    state:
+      schemaVersion: 2
+      migratesFrom: [1]

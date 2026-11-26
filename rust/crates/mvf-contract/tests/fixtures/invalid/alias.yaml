@@ -1,0 +1,15 @@
+# expect: yaml.anchor-forbidden (aliases need an anchor, which is rejected first; an unknown alias is a syntax error)
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.invert
+  version: 1.0.0
+spec:
+  ports:
+    inputs:
+      - &frame { name: frame, channel: data, type: frame }
+    outputs:
+      - *frame
+  artifacts:
+    - backend: in-process
+      builtin: invert

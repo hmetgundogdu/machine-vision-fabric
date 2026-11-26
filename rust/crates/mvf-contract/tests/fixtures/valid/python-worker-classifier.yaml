@@ -1,0 +1,37 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: py.brightness-classifier
+  version: 2.1.0
+spec:
+  ports:
+    inputs:
+      - name: frame
+        channel: data
+        type: frame
+    outputs:
+      - name: class
+        channel: data
+        type: classification
+      - name: dark
+        channel: control
+        type: signal
+  artifacts:
+    - backend: worker
+      runtime: python
+      entry: classifier.py
+      protocol: 1
+  execution:
+    backend: worker
+  isolation:
+    minimum: process
+  memory:
+    zeroCopy: required
+  lifecycle:
+    activation: resident
+    readinessTimeoutMs: 15000
+    executeTimeoutMs: 2000
+    replacement: stateless
+  resources:
+    memoryMib: 512
+    enforcement: best-effort

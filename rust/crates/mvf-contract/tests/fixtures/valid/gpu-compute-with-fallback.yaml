@@ -1,0 +1,26 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: vision.preprocess
+  version: 0.3.0
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: tensor, channel: data, type: tensor }
+  artifacts:
+    - backend: compute
+      api: wgpu
+      kernel: kernels/normalize.wgsl
+      entryPoint: main
+    - backend: in-process
+      builtin: normalize-cpu
+  execution:
+    backend: auto
+    placement:
+      target: gpu
+      fallback: cpu
+  memory:
+    domain: device
+    zeroCopy: preferred

@@ -1,0 +1,26 @@
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: vision.detector
+  version: 1.4.2
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: detections, channel: data, type: json }
+  artifacts:
+    - backend: oci
+      image: registry.local/vision/detector:1.4.2
+      digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  execution:
+    backend: oci
+  isolation:
+    minimum: sandbox
+  resources:
+    memoryMib: 1024
+    cpuMillis: 2000
+    pids: 64
+    enforcement: required
+  lifecycle:
+    replacement: stateless

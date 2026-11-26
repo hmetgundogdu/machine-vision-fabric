@@ -1,0 +1,15 @@
+# expect: contract.metadata.invalid-version
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.invert
+  version: one
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - backend: in-process
+      builtin: invert

@@ -1,0 +1,15 @@
+# expect: yaml.tag-forbidden
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: !!python/object:os.system mvf.invert
+  version: 1.0.0
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - backend: in-process
+      builtin: invert

@@ -1,0 +1,16 @@
+# expect: contract.execution.backend-without-artifact
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.invert
+  version: 1.0.0
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - backend: in-process
+      builtin: invert
+  execution: { backend: oci }

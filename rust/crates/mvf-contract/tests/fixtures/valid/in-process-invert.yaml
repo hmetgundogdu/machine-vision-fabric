@@ -1,0 +1,18 @@
+# A trusted builtin processor: frame in -> inverted frame out.
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: mvf.invert
+  version: 1.0.0
+  description: Inverts every byte of a frame.
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: frame, channel: data, type: frame }
+  artifacts:
+    - backend: in-process
+      builtin: invert
+  lifecycle:
+    replacement: stateless
