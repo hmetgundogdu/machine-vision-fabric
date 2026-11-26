@@ -30,7 +30,7 @@ use mvf_contract::{
 use mvf_engine::{
     Classification, ExecContext, Execution, ExecutionBackend, Frame, HostServices, Inputs,
     InstantiateRequest, LifecycleContext, NodeError, NodeErrorKind, NodeHandle, Outputs, Payload,
-    StopOutcome, Value,
+    StateBlob, StopOutcome, Value,
 };
 use mvf_graph::ContractOrigin;
 use mvf_memory::{ArenaError, MediaType};
@@ -107,7 +107,8 @@ impl ExecutionBackend for WorkerBackend {
             enforces_memory_limit: false,
             enforces_cpu_limit: false,
             enforces_pids_limit: false,
-            replacement: vec![Replacement::Stateless],
+            // Stateful through the protocol's `checkpoint`/`restore` messages.
+            replacement: vec![Replacement::Stateless, Replacement::Stateful],
             grants: Default::default(),
         }
     }
@@ -216,6 +217,14 @@ pub fn worker_node(
         config: request.config.clone(),
         services: request.services.clone(),
         mapping: PortMapping::from_contract(request.contract)?,
+        state_schema: request
+            .contract
+            .spec
+            .lifecycle
+            .state
+            .as_ref()
+            .map(|s| s.schema_version)
+            .unwrap_or(1),
         process: None,
         capability: Capability::Classifier,
         next_id: 1,
@@ -314,6 +323,8 @@ struct WorkerNode {
     config: serde_json::Map<String, serde_json::Value>,
     services: HostServices,
     mapping: PortMapping,
+    /// Schema version stamped on exported state (`lifecycle.state.schemaVersion`, default 1).
+    state_schema: u32,
     process: Option<WorkerProcess>,
     capability: Capability,
     next_id: u64,
@@ -363,7 +374,7 @@ impl WorkerNode {
 }
 
 fn resource(e: ArenaError) -> NodeError {
-    NodeError::new(NodeErrorKind::Resource, e.to_string())
+    NodeError::from_arena(&e)
 }
 
 impl NodeHandle for WorkerNode {
@@ -637,6 +648,107 @@ impl NodeHandle for WorkerNode {
             outputs.insert(port, Value::Json(v));
         }
         Ok(Execution::Produced(outputs))
+    }
+
+    /// `checkpoint` → `state`: the module serializes its state into a host-owned slot (as
+    /// `[descriptor | bytes]`); the blob keeps the header so `restore` can hand it back verbatim.
+    fn export_state(&mut self) -> Result<Option<StateBlob>, NodeError> {
+        let arena = self.arena()?;
+        let slot = arena.reserve().map_err(resource)?;
+        let id = self.next_id;
+        self.next_id += 1;
+        let line = protocol::checkpoint(id, slot.offset(), slot.capacity());
+        let deadline = Some(Instant::now() + Duration::from_secs(10));
+        let reply = match self.process.as_mut() {
+            Some(p) => p.send(&line).and_then(|_| {
+                p.wait_for(deadline, None, |m| match m {
+                    ChildMessage::State { id: r, .. } => *r == id,
+                    ChildMessage::Error { id: r, .. } => *r == Some(id),
+                    _ => false,
+                })
+            }),
+            None => {
+                return Err(NodeError::new(
+                    NodeErrorKind::ProcessExited,
+                    "worker is not running",
+                ));
+            }
+        };
+        match reply {
+            Ok(ChildMessage::State { empty: true, .. }) => Ok(None),
+            Ok(ChildMessage::State { .. }) => {
+                let lease = slot.seal().map_err(|e| {
+                    NodeError::new(
+                        NodeErrorKind::InvalidOutput,
+                        format!("worker state rejected: {e}"),
+                    )
+                })?;
+                let mut bytes = vec![0u8; mvf_memory::HEADER_SIZE];
+                lease
+                    .descriptor()
+                    .write_header(&mut bytes)
+                    .map_err(|e| NodeError::failed(e.to_string()))?;
+                bytes.extend_from_slice(lease.payload());
+                Ok(Some(StateBlob {
+                    schema_version: self.state_schema,
+                    bytes,
+                }))
+            }
+            Ok(ChildMessage::Error { message, .. }) => Err(NodeError::failed(format!(
+                "worker checkpoint failed: {message}"
+            ))),
+            Ok(_) => unreachable!("accept() only admits state/error"),
+            Err(e) => Err(self.fail(e, "checkpoint")),
+        }
+    }
+
+    /// `restore` → `restored`: the blob from [`export_state`] is placed in a slot by copy (it lives
+    /// on the host between runs) and the module rehydrates from it.
+    fn import_state(&mut self, state: &StateBlob) -> Result<(), NodeError> {
+        let header = state.bytes.get(..mvf_memory::HEADER_SIZE).ok_or_else(|| {
+            NodeError::new(
+                NodeErrorKind::InvalidConfig,
+                "worker state shorter than its header",
+            )
+        })?;
+        let descriptor = mvf_memory::Descriptor::read_header(header).map_err(|e| {
+            NodeError::new(
+                NodeErrorKind::InvalidConfig,
+                format!("worker state header: {e}"),
+            )
+        })?;
+        let arena = self.arena()?;
+        let lease = arena
+            .publish_copy(&descriptor, &state.bytes[mvf_memory::HEADER_SIZE..])
+            .map_err(resource)?;
+        let id = self.next_id;
+        self.next_id += 1;
+        let line = protocol::restore(id, lease.offset());
+        let deadline = Some(Instant::now() + Duration::from_secs(10));
+        let reply = match self.process.as_mut() {
+            Some(p) => p.send(&line).and_then(|_| {
+                p.wait_for(deadline, None, |m| match m {
+                    ChildMessage::Restored { id: r } => *r == id,
+                    ChildMessage::Error { id: r, .. } => *r == Some(id),
+                    _ => false,
+                })
+            }),
+            None => {
+                return Err(NodeError::new(
+                    NodeErrorKind::ProcessExited,
+                    "worker is not running",
+                ));
+            }
+        };
+        drop(lease);
+        match reply {
+            Ok(ChildMessage::Restored { .. }) => Ok(()),
+            Ok(ChildMessage::Error { message, .. }) => Err(NodeError::failed(format!(
+                "worker restore failed: {message}"
+            ))),
+            Ok(_) => unreachable!("accept() only admits restored/error"),
+            Err(e) => Err(self.fail(e, "restore")),
+        }
     }
 
     fn stop(&mut self, ctx: &LifecycleContext<'_>) -> StopOutcome {

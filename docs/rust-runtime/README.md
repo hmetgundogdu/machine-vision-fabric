@@ -2,7 +2,7 @@
 
 Research branch `research/rust-runtime`. Implements the ordered backlog of
 [#10](https://github.com/hmetgundogdu/machine-vision-fabric/issues/10): Gate A (#11–#16) and Gate B
-(#17–#20). The shipping .NET engine is **unchanged** and remains the behavioural reference.
+(#17–#20), then the follow-ups #24–#28 (stage 11 on: #24). The shipping .NET engine is **unchanged** and remains the behavioural reference.
 
 ## Layout decision
 
@@ -17,7 +17,7 @@ mechanical change once the .NET host retires.
 |---|---|---|
 | `mvf-contract` | #11 | Universal Node Contract: strict YAML loader, typed model, validation, capability negotiation. No host dependencies. |
 | `mvf-graph` | #12 | Pipeline document, typed graph validation (separate data/control edges), deterministic order. Pure. |
-| `mvf-engine` | #12– | Single scheduling authority: typed values, node handles, backends, builtins, executor. |
+| `mvf-engine` | #12– | Single scheduling authority: typed values, node handles, backends, builtins, executor, recovery (failure policy, backpressure, epoch checkpoints — #24). |
 | `mvf-memory` | #13–#14 | Descriptor codec (compatible with .NET/Python/C++), engine-owned file-backed arena, leases. |
 | `mvf-worker` | #13 | Supervised stdio worker backend (protocol v1): readiness, deadlines, kill, exit classification, logs. |
 | `mvf-oci` | #17 | Offline OCI layout / Docker archive import, verified content store, safe unpack, export, layer builder. |
@@ -53,7 +53,7 @@ demo. Windows: `pwsh rust/scripts/gate-a.ps1`. Baseline against the .NET engine:
 
 ## Documents
 
-- [p0-report.md](p0-report.md) / [gate-b-report.json](gate-b-report.json) — P0 verdicts (Gate B)
+- [p0-report.md](p0-report.md) / [gate-b-report.json](gate-b-report.json) — P0 verdicts (Gate B; P0.1 re-evaluated after #24)
 - [adr-0002-p0-runtime.md](adr-0002-p0-runtime.md) — OCI, GPU and the decision after Gate B
 - [p0-thresholds.md](p0-thresholds.md) — go/no-go thresholds fixed before the final runs
 - [competitive-landscape.md](competitive-landscape.md) — closest alternatives, pinned versions

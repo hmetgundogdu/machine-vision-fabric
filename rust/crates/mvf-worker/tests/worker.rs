@@ -276,6 +276,7 @@ fn cancellation_is_enforced_by_terminating_the_process() {
         &RunOptions {
             max_cycles: None,
             cancel,
+            ..RunOptions::default()
         },
         &mut NullObserver,
     );

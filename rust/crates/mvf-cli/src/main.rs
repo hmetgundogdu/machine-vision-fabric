@@ -90,6 +90,12 @@ enum Command {
         /// Fail unless this host provides the daemonless OCI backend.
         #[arg(long)]
         require_oci: bool,
+        /// Capture node state every N completed cycles (overrides `run.checkpoint.everyCycles`).
+        #[arg(long)]
+        checkpoint_every: Option<u64>,
+        /// Durable checkpoint directory; a run that finds one resumes after its last epoch.
+        #[arg(long)]
+        checkpoint_dir: Option<PathBuf>,
     },
     /// List the builtins and backends this host provides.
     Host,
@@ -119,6 +125,8 @@ fn main() -> ExitCode {
             max_cutover_us,
             require_gpu,
             require_oci,
+            checkpoint_every,
+            checkpoint_dir,
         } => {
             if require_gpu && gpu_context().is_none() {
                 return fail(
@@ -139,7 +147,12 @@ fn main() -> ExitCode {
             }
             run(
                 &args,
-                max_cycles,
+                RunOptions {
+                    max_cycles,
+                    checkpoint_every,
+                    checkpoint_dir,
+                    ..RunOptions::default()
+                },
                 json,
                 updates.as_deref(),
                 verify.then_some(Expectations {
@@ -552,7 +565,7 @@ fn verify(report: &RunReport, services: &HostServices, expect: Expectations, jso
 
 fn run(
     args: &PipelineArgs,
-    max_cycles: Option<u64>,
+    mut options: RunOptions,
     json: bool,
     updates: Option<&Path>,
     expect: Option<Expectations>,
@@ -582,7 +595,8 @@ fn run(
         last: std::time::Instant::now(),
         cycle_ms: Vec::new(),
     };
-    let report = engine.run(&RunOptions { max_cycles, cancel }, &mut driver);
+    options.cancel = cancel;
+    let report = engine.run(&options, &mut driver);
     print_report(&report, json);
     print_metrics(&report, &mut driver.cycle_ms, json);
     if let Some(expect) = expect

@@ -170,6 +170,7 @@ fn cancellation_is_honoured_at_the_next_cycle_boundary() {
         &RunOptions {
             max_cycles: None,
             cancel: cancel.clone(),
+            ..RunOptions::default()
         },
         &mut CancelAt(4, cancel),
     );
@@ -200,6 +201,7 @@ fn cooperative_cancellation_reaches_a_stalled_node() {
         &RunOptions {
             max_cycles: None,
             cancel,
+            ..RunOptions::default()
         },
         &mut NullObserver,
     );

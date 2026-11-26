@@ -84,6 +84,138 @@ pub struct NodeRef {
     /// Instance configuration handed to the implementation (validated by it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Map<String, serde_json::Value>>,
+    /// What to do when this node fails (overrides the run default for its role).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_error: Option<FailurePolicySpec>,
+    /// What to do when this node cannot get a shared-memory slot (overrides the run default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backpressure: Option<Backpressure>,
+}
+
+/// Failure handling modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailureMode {
+    /// End the run, reporting the node, cycle and cause.
+    #[default]
+    Fail,
+    /// Skip the node's outputs for this cycle and keep running (the .NET mid-graph default).
+    Skip,
+    /// Dispose the node, bring up a fresh instance (restoring its last checkpoint) and retry the
+    /// same inputs; when the attempts run out, fall through to `fail`.
+    Restart,
+}
+
+/// `onError`: a mode, or a mode with restart bounds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FailurePolicySpec {
+    /// `onError: restart`
+    Mode(FailureMode),
+    /// `onError: { mode: restart, limit: 3, backoffMs: 100, maxBackoffMs: 2000 }`
+    Detailed(FailurePolicy),
+}
+
+impl FailurePolicySpec {
+    /// The policy with defaults filled in.
+    pub fn policy(&self) -> FailurePolicy {
+        match self {
+            FailurePolicySpec::Mode(mode) => FailurePolicy {
+                mode: *mode,
+                ..FailurePolicy::default()
+            },
+            FailurePolicySpec::Detailed(p) => p.clone(),
+        }
+    }
+}
+
+/// A resolved failure policy (same shape and defaults as the .NET `NodeFailurePolicy`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FailurePolicy {
+    /// Mode.
+    pub mode: FailureMode,
+    /// Restart attempts before falling through to `fail`; `0` = forever.
+    #[serde(default)]
+    pub limit: u32,
+    /// First backoff, doubled each attempt.
+    #[serde(default = "default_backoff")]
+    pub backoff_ms: u64,
+    /// Upper bound of one backoff.
+    #[serde(default = "default_max_backoff")]
+    pub max_backoff_ms: u64,
+}
+
+fn default_backoff() -> u64 {
+    500
+}
+
+fn default_max_backoff() -> u64 {
+    5_000
+}
+
+impl Default for FailurePolicy {
+    fn default() -> Self {
+        Self {
+            mode: FailureMode::Fail,
+            limit: 0,
+            backoff_ms: default_backoff(),
+            max_backoff_ms: default_max_backoff(),
+        }
+    }
+}
+
+impl FailurePolicy {
+    /// Whether restart attempt `attempt` (1-based) is allowed.
+    pub fn allows(&self, attempt: u32) -> bool {
+        self.mode == FailureMode::Restart && (self.limit == 0 || attempt <= self.limit)
+    }
+
+    /// Backoff before restart attempt `attempt` (1-based): exponential, capped.
+    pub fn backoff(&self, attempt: u32) -> std::time::Duration {
+        let shift = attempt.saturating_sub(1).min(30);
+        std::time::Duration::from_millis(
+            self.backoff_ms
+                .saturating_mul(1u64 << shift)
+                .min(self.max_backoff_ms),
+        )
+    }
+}
+
+/// Backpressure when a node cannot get a shared-memory slot because the arena is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Backpressure {
+    /// Lossless: never drop. The serial executor has no concurrent drain to wait for, so a full
+    /// arena ends the run with an actionable error (raise the slot count).
+    #[default]
+    Stall,
+    /// Lossy: drop this node's output for the cycle, count it, keep running.
+    Drop,
+}
+
+/// Run-level failure defaults by role.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FailureDefaults {
+    /// Default for source nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<FailurePolicySpec>,
+    /// Default for every other node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<FailurePolicySpec>,
+}
+
+/// Periodic checkpointing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CheckpointSpec {
+    /// Capture every N completed cycles (`0` disables).
+    #[serde(default)]
+    pub every_cycles: u64,
+    /// Directory for durable checkpoints (relative to the pipeline file); absent = memory only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
 }
 
 /// Edges, by channel.
@@ -115,6 +247,15 @@ pub struct RunSpec {
     /// Stop after this many cycles. `None` = until a source is exhausted or the run is cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_cycles: Option<u64>,
+    /// Failure defaults by role (`{ sources: fail, nodes: skip }` reproduces the .NET defaults).
+    #[serde(default)]
+    pub on_error: FailureDefaults,
+    /// Default backpressure policy.
+    #[serde(default)]
+    pub backpressure: Backpressure,
+    /// Periodic checkpoints.
+    #[serde(default)]
+    pub checkpoint: CheckpointSpec,
 }
 
 /// Where a node's contract came from.
@@ -157,6 +298,10 @@ pub struct GraphNode {
     pub origin: ContractOrigin,
     /// Instance config (empty when absent).
     pub config: serde_json::Map<String, serde_json::Value>,
+    /// Effective failure policy (node override, else the run default for its role).
+    pub on_error: FailurePolicy,
+    /// Effective backpressure policy.
+    pub backpressure: Backpressure,
 }
 
 impl GraphNode {
@@ -225,6 +370,8 @@ pub struct Graph {
     pub order: Vec<usize>,
     /// Run bound.
     pub max_cycles: Option<u64>,
+    /// Periodic checkpoints.
+    pub checkpoint: CheckpointSpec,
 }
 
 impl Graph {
@@ -428,12 +575,25 @@ pub fn build_from_document(
             }
         };
         if let Some((origin, contract)) = resolved {
+            let role_default = if contract.spec.ports.inputs.is_empty() {
+                &spec.run.on_error.sources
+            } else {
+                &spec.run.on_error.nodes
+            };
+            let on_error = node
+                .on_error
+                .as_ref()
+                .or(role_default.as_ref())
+                .map(FailurePolicySpec::policy)
+                .unwrap_or_default();
             nodes.push(GraphNode {
                 id: node.id.clone(),
                 index: i,
                 contract,
                 origin,
                 config: node.config.clone().unwrap_or_default(),
+                on_error,
+                backpressure: node.backpressure.unwrap_or(spec.run.backpressure),
             });
         }
     }
@@ -628,6 +788,7 @@ pub fn build_from_document(
         control_edges,
         order,
         max_cycles: spec.run.max_cycles,
+        checkpoint: spec.run.checkpoint.clone(),
     })
 }
 

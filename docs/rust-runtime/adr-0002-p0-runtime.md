@@ -35,10 +35,11 @@
 
 ## Decision on proceeding
 
-P0 is **not** achieved (P0.1 incomplete, single-host demo blocked). Recommendation:
+P0 is **not** achieved as a single demonstration (the single-host demo is blocked by hardware).
+P0.1 was first evaluated as incomplete and passes for DAG graphs since #24. Recommendation:
 
 1. keep the .NET engine as the shipping implementation and the reference;
-2. continue the Rust runtime as research on this branch, prioritising P0.1 parity
-   (checkpoint/restore, backpressure policies, primitives) and a Linux + GPU host for the
-   single-host P0 run;
+2. continue the Rust runtime as research on this branch, prioritising graph-semantics parity
+   (primitives, joins, pipelined executor — #25) and a Linux + GPU host for the single-host P0 run
+   (#26);
 3. revisit migration only after those pass; do not merge to `main` or release from this branch.

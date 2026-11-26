@@ -198,3 +198,89 @@ fn verify_fails_with_exit_code_3_when_expectations_are_not_met() {
     .expect("json");
     assert_eq!(last["verify"]["pass"], false);
 }
+
+#[test]
+fn killed_engine_resumes_from_its_durable_checkpoint() {
+    use std::io::{BufRead, BufReader};
+    let dir = std::env::temp_dir().join(format!("mvf-cli-crash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let pipeline = dir.join("pipeline.yaml");
+    std::fs::write(
+        &pipeline,
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: { name: crash }\nspec:\n  nodes:\n    - { id: cam, builtin: synthetic-source, config: { frames: 120, intervalMs: 5 } }\n    - { id: count, builtin: counter }\n    - { id: sink, builtin: record }\n  edges:\n    data:\n      - { from: cam.frame, to: count.frame }\n      - { from: count.count, to: sink.json }\n      - { from: cam.frame, to: sink.frame }\n",
+    )
+    .expect("pipeline");
+    let ckpt = dir.join("ckpt");
+    let args = |cmd: &mut Command| {
+        cmd.args([
+            "run",
+            "--json",
+            "--checkpoint-every",
+            "10",
+            "--checkpoint-dir",
+        ])
+        .arg(&ckpt)
+        .arg(&pipeline);
+    };
+
+    // Run 1: SIGKILL (TerminateProcess on Windows) once cycle 35 has been recorded — no shutdown.
+    let mut first = mvf();
+    args(&mut first);
+    let mut child = first
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let stdout = child.stdout.take().expect("stdout");
+    for line in BufReader::new(stdout).lines() {
+        let v: serde_json::Value = serde_json::from_str(&line.expect("line")).expect("json");
+        if v["record"]["cycle"].as_u64().is_some_and(|c| c >= 35) {
+            break;
+        }
+    }
+    child.kill().expect("kill");
+    let _ = child.wait();
+    let epoch: u64 = std::fs::read_to_string(ckpt.join("CURRENT"))
+        .expect("a published epoch survived the kill")
+        .trim()
+        .parse()
+        .expect("number");
+    assert!(epoch >= 30 && epoch.is_multiple_of(10), "epoch {epoch}");
+
+    // Run 2: resumes right after the published epoch and runs to the end.
+    let mut second = mvf();
+    args(&mut second);
+    let out = second.output().expect("run 2");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json"))
+        .collect();
+    let counts: Vec<(u64, u64)> = lines
+        .iter()
+        .filter(|l| l["record"]["port"] == "json")
+        .map(|l| {
+            (
+                l["record"]["cycle"].as_u64().unwrap_or(0),
+                l["record"]["value"]["value"]["count"].as_u64().unwrap_or(0),
+            )
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        ((epoch + 1)..=120).map(|c| (c, c)).collect::<Vec<_>>()
+    );
+    let report = lines
+        .iter()
+        .find(|l| l.get("report").is_some())
+        .expect("report");
+    assert_eq!(report["report"]["resumedFromCycle"], epoch);
+    assert_eq!(report["report"]["end"]["reason"], "source-exhausted");
+    assert!(!ckpt.exists(), "cleared after the fully consumed run");
+    let _ = std::fs::remove_dir_all(dir);
+}

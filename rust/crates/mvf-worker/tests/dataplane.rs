@@ -148,8 +148,13 @@ fn full_arena_is_refused_explicitly_and_cleaned_up() {
         EndReason::NodeFailed { node, cycle, error } => {
             assert_eq!(node, "inv");
             assert_eq!(*cycle, 1);
-            assert_eq!(error.kind, NodeErrorKind::Resource);
+            assert_eq!(error.kind, NodeErrorKind::Backpressure);
             assert!(error.message.contains("arena full"), "{}", error.message);
+            assert!(
+                error.message.contains("backpressure: stall"),
+                "actionable: {}",
+                error.message
+            );
         }
         other => panic!("unexpected {other:?}"),
     }

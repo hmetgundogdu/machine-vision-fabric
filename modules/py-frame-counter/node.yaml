@@ -1,0 +1,21 @@
+# Universal Node Contract for the Rust runtime (issue #10). The .NET engine keeps using module.json.
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata:
+  id: py.frame-counter
+  version: 1.0.0
+  description: Stateful classifier counting frames; its count survives restarts via checkpoint/restore.
+spec:
+  ports:
+    inputs:
+      - { name: frame, channel: data, type: frame }
+    outputs:
+      - { name: class, channel: data, type: classification }
+  artifacts:
+    - { backend: worker, runtime: python, entry: classifier.py, protocol: 1 }
+  isolation:
+    minimum: process
+  lifecycle:
+    replacement: stateful
+    state:
+      schemaVersion: 1

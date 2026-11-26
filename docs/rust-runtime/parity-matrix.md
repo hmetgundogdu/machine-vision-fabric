@@ -19,12 +19,12 @@ Updated by every slice; the stage reports carry the details.
 | `runtime: dotnet \| python \| node` | `ModuleManifest.Runtime` | `artifacts[].backend` + `worker.runtime: python \| executable` | partial — Python ported (existing SDK modules run unchanged); `node` not mapped; .NET modules → OCI (#18) |
 | `"module": "py.…"` references | pipeline JSON | `module:` + `modules/<dir>/node.yaml` | ported |
 | `lifecycle: resident \| on-demand` | `ModuleManifest.Lifecycle` | `spec.lifecycle.activation` | ported (schema) |
-| `backpressure: stall \| drop` | `ModuleManifest.Backpressure` | — | not yet (bounded admission in #14) |
+| `backpressure: stall \| drop` | `ModuleManifest.Backpressure` | node `backpressure`, `run.backpressure` | ported (#24) |
 | `maxParallelism` | `ModuleManifest.MaxParallelism` | — | not yet (serial executor only) |
 | Readiness budget (`hello ready:false` → `ready`) | `protocol/README.md`, `WorkerReadinessTests` | `spec.lifecycle.readinessTimeoutMs` | ported |
 | Typed payload descriptor (192-byte header, `MVF1`) | `PayloadDescriptor.cs` | `mvf_memory::Descriptor` | ported — byte-for-byte golden + Python SDK cross-check |
 | Isolation / resource / memory / placement policy | — | `spec.isolation`, `spec.resources`, `spec.memory`, `spec.execution` | new |
-| Live replacement + versioned state | — | `spec.lifecycle.replacement`, `spec.lifecycle.state`, `mvf_engine::replace` | new — stateless + in-process stateful, rollback, update plans |
+| Live replacement + versioned state | — | `spec.lifecycle.replacement`, `spec.lifecycle.state`, `mvf_engine::replace` | new — stateless + stateful (in-process, worker since #24), rollback, update plans |
 | Backend capability negotiation | — | `mvf_contract::negotiate` | new |
 | Strict YAML (dup keys, no anchors/tags, bounded) | JSON via `System.Text.Json` | `mvf_contract::yaml` | new |
 
@@ -51,11 +51,11 @@ Updated by every slice; the stage reports carry the details.
 | Fork / if / switch / select / value / loop primitives | `*PrimitiveNodeRunnerTests` | — | not yet |
 | Pipelined executor, joins, per-node parallelism | `PipelinedGraphExecutorTests` | — | not yet (out of Gate A) |
 | Shared-memory arena, refcounts, fan-out | `SharedMemoryArenaTests`, `PipelineGraphExecutorDataPlaneTests` | `mvf_memory::Arena` + `Payload::Arena` | ported — plus generation-checked handles and copy accounting |
-| Backpressure stall/drop | `PipelineGraphExecutorBackpressureTests` | bounded admission | partial — refusal only; no stall/drop policies |
+| Backpressure stall/drop | `PipelineGraphExecutorBackpressureTests` | `mvf_engine::recovery` | ported (#24) — serial semantics |
 | Supervised worker, readiness, warm pool | `SupervisedWorkerTests`, `WorkerReadinessTests`, `WarmWorkerPoolTests` | `mvf-worker` | partial — readiness, deadlines, kill, reaping; no warm pool, no restart |
 | Worker logs / observability | `WorkerLoggingTests`, `WorkerObservabilityTests` | `HostServices.logs` | partial — logs, stderr, supervisor events; no RPC latency metrics |
-| Epoch checkpoint / restore / resume | `PipelineGraphExecutorCheckpointTests`, `CheckpointResumeTests`, `WorkerCheckpointTests` | — | not yet |
-| Node failure policy (fail / restart) | `NodeResilienceTests`, `SourceFailureTests` | — | not yet |
+| Epoch checkpoint / restore / resume | `PipelineGraphExecutorCheckpointTests`, `CheckpointResumeTests`, `WorkerCheckpointTests` | `run.checkpoint`, worker `checkpoint`/`restore` | ported (#24) — atomic epochs, durable resume, worker state |
+| Node failure policy (fail / restart) | `NodeResilienceTests`, `SourceFailureTests` | `onError`, `run.onError` | ported (#24) — plus explicit `skip`; Rust default `fail` for all roles |
 | Live config (`configure`) | `LiveConfigureTests` | — | not yet |
 | Egress / TUI / web studio | `Egress*Tests`, `GlyphsAsciiTests` | — | out of scope (adapters at the edges) |
 
@@ -68,6 +68,5 @@ Updated by every slice; the stage reports carry the details.
 | GPU compute nodes, device-resident payloads | `mvf-compute` | new — tested on Apple M4/Metal (stage 09) |
 | PLC simulator with duplicate-commit detection | `plc-sim` builtin | new — stage 10 |
 
-Still missing for P0.1 parity (follow-up issues): epoch checkpoint/restore, stall/drop backpressure,
-graph primitives (fork/if/switch/select/value/loop), joins and the pipelined executor, node restart
-policy and warm worker pool.
+Still missing (follow-up issues): graph primitives (fork/if/switch/select/value/loop), joins and the
+pipelined executor (#25); warm worker pool (#28).

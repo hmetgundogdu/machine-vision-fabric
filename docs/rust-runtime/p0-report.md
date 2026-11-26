@@ -8,14 +8,15 @@ Machine-readable: [gate-b-report.json](gate-b-report.json). Decision record:
 
 | Gate | Verdict | Why |
 |---|---|---|
-| **P0.1** Pure Rust graph execution | **FAIL (incomplete)** | No CLR; strict typed polyglot graph; separate data/control edges; cycle semantics; bounded admission — all measured. **Not ported**: epoch checkpoint/restore and stall/drop backpressure, which the gate lists. Not a hardware block; it is missing work (follow-up issue). |
+| **P0.1** Pure Rust graph execution | **PASS** for DAG graphs (re-evaluated after #24, [stage 11](stages/11.md)) | No CLR; strict typed polyglot graph; separate data/control edges; cycle semantics; `stall`/`drop` backpressure; epoch checkpoint/restore with durable resume (incl. a SIGKILLed engine) and worker state recovery; restart policy. Scope: DAG graphs — control primitives, joins and the pipelined executor are #25. *First evaluation (before #24): FAIL (incomplete).* |
 | **P0.2** Daemonless OCI execution | **PASS on Linux** · Windows **BLOCKED** | Real OCI images run through `runc` with no Docker daemon or host Python; digest-verified import; default-deny sandbox; lifecycle; typed graph node; Docker interop both ways. Windows needs WSL2/HCS, not implemented. |
 | **P0.3** CPU and GPU zero-copy data plane | **PASS** (CPU everywhere; GPU on Apple M4/Metal) | `copiesIn = copiesOut = 0` on the shared-memory path; GPU chain with one upload and a 256-byte readback per frame, device hand-offs by handle. GPU sharing is in-process only (no cross-process/OCI GPU buffers). |
 | **P0.4** Live node replacement | **PASS** | Prepared while running, atomic cut-over at a cycle boundary, probation, rollback with the failed cycle replayed; in-process, Python worker and OCI candidates; lossless (every cycle exactly once), no duplicate PLC commit. |
 | **All four on one host** (#20 criterion 1) | **BLOCKED** | No available machine offers both a Linux OCI host and a GPU: the Mac has the GPU but cannot run Linux OCI images natively; the Linux VM runs OCI but exposes no GPU. Two integrated runs cover P0.1/P0.3/P0.4 + GPU (macOS) and P0.1/P0.2/P0.3/P0.4 (Linux). |
 
-**Overall: P0 is not achieved.** P0.2–P0.4 pass where their hardware exists, P0.1 is incomplete, and
-the single-host flagship demo is blocked by hardware. Nothing here authorizes a migration.
+**Overall: P0 is not achieved as a single demonstration.** P0.1–P0.4 each pass where their hardware
+exists (P0.1 for DAG graphs), but the single-host flagship demo with OCI and a GPU together is
+blocked by hardware (#26). Nothing here authorizes a migration.
 
 ## Integrated runs
 
@@ -96,7 +97,7 @@ default `/var/lib/mvf/oci` for root, plus a clear error when a state path is not
 | Backend | macOS arm64 | Linux | Windows | Isolation | Zero copy | Replacement |
 |---|---|---|---|---|---|---|
 | in-process | tested | tested (CI) | tested (CI) | none (engine domain) | host (`Arc`/lease) | stateless, stateful |
-| worker (stdio v1) | tested | tested (CI) | tested (CI) | process (not a security boundary) | host (arena) | stateless |
+| worker (stdio v1) | tested | tested (CI) | tested (CI) | process (not a security boundary) | host (arena) | stateless, stateful (#24) |
 | OCI (`runc`) | n/a (no Linux kernel) | tested (test host, root) | **BLOCKED** (WSL2/HCS) | sandbox (namespaces, no caps, no-new-privs, seccomp denylist, cgroups, device deny) | host (arena bind mount) | stateless |
 | compute (wgpu) | tested on Apple M4 | builds in CI, **no GPU to test** | builds in CI, **no GPU to test** | none (trusted kernels) | device (same context) | stateless |
 
@@ -111,6 +112,7 @@ in-process code. Details: stages 04 and 08.
 - GPU overlap admission (budget for a candidate's device memory during preparation) — not
   implemented; the software budget applies per context.
 - Cross-process GPU buffers, CDI device injection, Windows OCI.
-- Checkpoint/restore, stall/drop backpressure, graph primitives and the pipelined executor.
+- Graph primitives, joins and the pipelined executor (#25). Checkpoint/restore, backpressure
+  policies and the restart policy were added afterwards in #24 ([stage 11](stages/11.md)).
 
 Follow-up issues are opened for these; the existing C# host is not retired.

@@ -256,6 +256,12 @@ struct SyntheticSourceConfig {
     /// downstream workers receive them by handle with no copy). Default: host heap.
     #[serde(default)]
     arena: bool,
+    /// Test fault: fail when about to emit this sequence…
+    #[serde(default)]
+    fail_at_sequence: Option<u64>,
+    /// …only in this generation (a restarted instance has a newer one), i.e. a transient fault.
+    #[serde(default)]
+    fail_generation: Option<u64>,
 }
 
 fn one() -> u64 {
@@ -312,6 +318,15 @@ impl SyntheticSource {
 }
 
 impl NodeHandle for SyntheticSource {
+    fn export_state(&mut self) -> Result<Option<StateBlob>, NodeError> {
+        Ok(Some(self.export_cursor()))
+    }
+
+    fn import_state(&mut self, state: &StateBlob) -> Result<(), NodeError> {
+        self.next_sequence = cursor_from(state)?;
+        Ok(())
+    }
+
     fn execute(&mut self, ctx: &ExecContext<'_>, _: &Inputs) -> Result<Execution, NodeError> {
         if self
             .config
@@ -323,6 +338,17 @@ impl NodeHandle for SyntheticSource {
         if self.config.interval_ms > 0 {
             std::thread::sleep(Duration::from_millis(self.config.interval_ms));
         }
+        if self.config.fail_at_sequence == Some(self.next_sequence)
+            && self
+                .config
+                .fail_generation
+                .is_none_or(|g| g == ctx.generation)
+        {
+            return Err(NodeError::failed(format!(
+                "synthetic-source: configured failure before sequence {}",
+                self.next_sequence
+            )));
+        }
         let sequence = self.next_sequence;
         self.next_sequence += 1;
         let c = &self.config;
@@ -332,10 +358,8 @@ impl NodeHandle for SyntheticSource {
             let arena = self
                 .services
                 .arena()
-                .map_err(|e| NodeError::new(NodeErrorKind::Resource, e.to_string()))?;
-            let mut slot = arena
-                .reserve()
-                .map_err(|e| NodeError::new(NodeErrorKind::Resource, e.to_string()))?;
+                .map_err(|e| NodeError::from_arena(&e))?;
+            let mut slot = arena.reserve().map_err(|e| NodeError::from_arena(&e))?;
             let out = slot.payload_mut();
             if out.len() < len {
                 return Err(NodeError::new(
@@ -353,7 +377,7 @@ impl NodeHandle for SyntheticSource {
             slot.write_header(&descriptor)
                 .and_then(|_| slot.seal())
                 .map(Payload::arena)
-                .map_err(|e| NodeError::new(NodeErrorKind::Resource, e.to_string()))?
+                .map_err(|e| NodeError::from_arena(&e))?
         } else {
             Payload::heap(descriptor, Self::pixels(c.seed, sequence, len))
                 .map_err(NodeError::failed)?
@@ -369,6 +393,36 @@ impl NodeHandle for SyntheticSource {
                 payload,
             }),
         )))
+    }
+}
+
+/// Sources checkpoint their cursor (the next sequence), so a resumed run continues the stream.
+fn cursor_state(next: u64) -> StateBlob {
+    StateBlob {
+        schema_version: 1,
+        bytes: next.to_le_bytes().to_vec(),
+    }
+}
+
+fn cursor_from(state: &StateBlob) -> Result<u64, NodeError> {
+    let raw: [u8; 8] = state.bytes.as_slice().try_into().map_err(|_| {
+        NodeError::new(
+            NodeErrorKind::InvalidConfig,
+            "source cursor state must be 8 bytes",
+        )
+    })?;
+    if state.schema_version != 1 {
+        return Err(NodeError::new(
+            NodeErrorKind::Unsupported,
+            format!("source cursor schema {} is not 1", state.schema_version),
+        ));
+    }
+    Ok(u64::from_le_bytes(raw))
+}
+
+impl SyntheticSource {
+    fn export_cursor(&self) -> StateBlob {
+        cursor_state(self.next_sequence)
     }
 }
 
@@ -402,8 +456,7 @@ impl NodeHandle for Invert {
     fn execute(&mut self, _: &ExecContext<'_>, inputs: &Inputs) -> Result<Execution, NodeError> {
         let frame = frame_input(inputs, "frame")?;
         let input = frame.payload.bytes();
-        let resource =
-            |e: mvf_memory::ArenaError| NodeError::new(NodeErrorKind::Resource, e.to_string());
+        let resource = |e: mvf_memory::ArenaError| NodeError::from_arena(&e);
         let payload = if frame.payload.lease().is_some() {
             let arena = self.services.arena().map_err(resource)?;
             let mut slot = arena.reserve().map_err(resource)?;
@@ -583,6 +636,9 @@ struct FaultConfig {
     delay_ms: u64,
     #[serde(default)]
     fail_start: bool,
+    /// Fail only in this generation (a transient fault that a restart cures).
+    #[serde(default)]
+    fail_generation: Option<u64>,
 }
 
 /// Pass-through test fixture that can fail, panic, stall or refuse to start on demand.
@@ -630,7 +686,12 @@ impl NodeHandle for Fault {
         if self.config.panic_at_cycle == Some(ctx.cycle) {
             panic!("fault: configured panic at cycle {}", ctx.cycle);
         }
-        if self.config.fail_at_cycle == Some(ctx.cycle) {
+        if self.config.fail_at_cycle == Some(ctx.cycle)
+            && self
+                .config
+                .fail_generation
+                .is_none_or(|g| g == ctx.generation)
+        {
             return Err(NodeError::failed(format!(
                 "fault: configured failure at cycle {}",
                 ctx.cycle
@@ -862,6 +923,15 @@ impl FolderSource {
 }
 
 impl NodeHandle for FolderSource {
+    fn export_state(&mut self) -> Result<Option<StateBlob>, NodeError> {
+        Ok(Some(cursor_state(self.next)))
+    }
+
+    fn import_state(&mut self, state: &StateBlob) -> Result<(), NodeError> {
+        self.next = cursor_from(state)?;
+        Ok(())
+    }
+
     fn execute(&mut self, ctx: &ExecContext<'_>, _: &Inputs) -> Result<Execution, NodeError> {
         let count = self.frames.len() as u64;
         if !self.looping && self.next >= count {
@@ -874,11 +944,11 @@ impl NodeHandle for FolderSource {
             let arena = self
                 .services
                 .arena()
-                .map_err(|e| NodeError::new(NodeErrorKind::Resource, e.to_string()))?;
+                .map_err(|e| NodeError::from_arena(&e))?;
             Payload::arena(
                 arena
                     .publish_copy(&descriptor, bytes)
-                    .map_err(|e| NodeError::new(NodeErrorKind::Resource, e.to_string()))?,
+                    .map_err(|e| NodeError::from_arena(&e))?,
             )
         } else {
             Payload::heap(descriptor, bytes.clone()).map_err(NodeError::failed)?

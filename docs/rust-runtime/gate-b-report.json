@@ -1,6 +1,6 @@
 {
   "gate": "B",
-  "status": "NOT ACHIEVED",
+  "status": "NOT ACHIEVED AS A SINGLE DEMONSTRATION",
   "date": "2026-11-26",
   "branch": "research/rust-runtime",
   "thresholdsCommit": "15d832c",
@@ -10,13 +10,15 @@
     "ci": ["ubuntu-latest", "windows-latest", "macos-latest"]
   },
   "gates": [
-    {"id": "P0.1", "name": "Pure Rust graph execution", "status": "FAIL",
-     "reason": "checkpoint/restore and stall/drop backpressure not ported; typed graph, control/data edges, cycles, bounded admission and no-CLR are met"},
+    {"id": "P0.1", "name": "Pure Rust graph execution", "status": "PASS",
+     "scope": "DAG graphs; control primitives, joins and the pipelined executor are #25",
+     "reason": "re-evaluated after #24: stall/drop backpressure, epoch checkpoint/restore with durable resume, worker state recovery and restart policy ported (stage 11)",
+     "firstEvaluation": "FAIL: checkpoint/restore and stall/drop backpressure not ported; typed graph, control/data edges, cycles, bounded admission and no-CLR were met"},
     {"id": "P0.2", "name": "Daemonless OCI execution", "status": "PASS", "scope": "Linux",
      "blocked": [{"item": "Windows OCI", "reason": "needs WSL2 or HCS; not implemented"}, {"item": "GPU device grant to OCI", "reason": "no GPU in the Linux VM; CDI not implemented"}]},
     {"id": "P0.3", "name": "CPU and GPU zero-copy data plane", "status": "PASS", "scope": "CPU on all CI hosts; GPU on Apple M4/Metal, same device, in-process",
      "notSupported": ["cross-process GPU buffers", "cross-device zero copy"]},
-    {"id": "P0.4", "name": "Live node replacement", "status": "PASS", "scope": "in-process, Python worker and OCI candidates; stateless (stateful in-process)"},
+    {"id": "P0.4", "name": "Live node replacement", "status": "PASS", "scope": "in-process, Python worker and OCI candidates; stateless; stateful in-process and worker (worker since #24)"},
     {"id": "integrated", "name": "All four P0 capabilities on one host", "status": "BLOCKED",
      "reason": "no available host has both Linux OCI execution and a GPU"}
   ],
@@ -39,6 +41,7 @@
     {"frame": "1920x1080", "cpuFps": 411.0, "gpuFps": 782.6},
     {"frame": "3840x2160", "cpuFps": 101.7, "gpuFps": 217.4}
   ],
-  "notImplemented": ["shadow evaluation", "GPU overlap admission", "cross-process GPU buffers", "CDI injection", "Windows OCI", "WASM backend", "checkpoint/restore", "stall/drop backpressure", "graph primitives", "pipelined executor"],
-  "decision": "Keep the .NET engine as shipping implementation and reference; continue Rust runtime research; no main merge, release or retirement."
+  "notImplemented": ["shadow evaluation", "GPU overlap admission", "cross-process GPU buffers", "CDI injection", "Windows OCI", "WASM backend", "graph primitives", "pipelined executor"],
+  "decision": "Keep the .NET engine as shipping implementation and reference; continue Rust runtime research; no main merge, release or retirement.",
+  "reevaluated": {"date": "2026-11-26", "issue": 24, "gate": "P0.1", "tests": "160 passed, 0 failed (macOS arm64, MVF_REQUIRE_GPU=1)"}
 }

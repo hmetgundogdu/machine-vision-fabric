@@ -161,6 +161,9 @@ pub enum NodeErrorKind {
     InvalidOutput,
     /// A resource (arena slot, device memory) was unavailable.
     Resource,
+    /// The shared-memory arena was full (bounded admission); handled by the node's backpressure
+    /// policy (`stall` ends the run, `drop` skips the cycle).
+    Backpressure,
     /// The node could not be started (spawn failure, readiness failure).
     StartFailed,
 }
@@ -195,6 +198,15 @@ impl NodeError {
     /// A managed failure.
     pub fn failed(message: impl Into<String>) -> Self {
         Self::new(NodeErrorKind::Failed, message)
+    }
+
+    /// Maps an arena error: a full arena is backpressure, anything else a resource failure.
+    pub fn from_arena(e: &mvf_memory::ArenaError) -> Self {
+        let kind = match e {
+            mvf_memory::ArenaError::Full(_) => NodeErrorKind::Backpressure,
+            _ => NodeErrorKind::Resource,
+        };
+        Self::new(kind, e.to_string())
     }
 }
 

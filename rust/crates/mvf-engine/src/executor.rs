@@ -23,6 +23,7 @@ use serde::Serialize;
 use crate::backend::{BackendRegistry, InstantiateRequest};
 use crate::builtins::HostServices;
 use crate::node::*;
+use crate::recovery::{CheckpointState, Recovery, RecoveryEvent};
 use crate::replace::{ControlCommand, Pending, ReplacementEvent, Standby};
 use crate::value::Value;
 
@@ -36,6 +37,10 @@ pub enum SkipReason {
     ControlAbsent(String),
     /// A connected control input was `false`.
     ControlFalse(String),
+    /// The node failed and its policy is `skip` (or a restart budget ran out into `skip`).
+    Failure(String),
+    /// The arena was full and the node's backpressure policy is `drop`.
+    Dropped(String),
 }
 
 /// What happened to one node in one cycle.
@@ -121,6 +126,12 @@ pub struct NodeStats {
     pub total_us: u64,
     /// Slowest execution, microseconds.
     pub max_us: u64,
+    /// Restarts performed by the `restart` failure policy.
+    pub restarts: u64,
+    /// Cycles skipped by the `skip` failure policy.
+    pub failures_skipped: u64,
+    /// Cycles dropped by the `drop` backpressure policy.
+    pub dropped: u64,
 }
 
 /// Outcome of a run.
@@ -145,6 +156,11 @@ pub struct RunReport {
     pub data_plane: DataPlaneReport,
     /// Live replacement events, in order.
     pub replacements: Vec<ReplacementEvent>,
+    /// Failure-policy and backpressure events (restarts, skips, drops, checkpoints), in order.
+    pub recoveries: Vec<RecoveryEvent>,
+    /// Cycle restored from a durable checkpoint at start, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resumed_from_cycle: Option<u64>,
 }
 
 /// Data-plane accounting for a run. A *delivery* is one payload handed to one consuming node; it
@@ -172,12 +188,21 @@ pub struct RunOptions {
     pub max_cycles: Option<u64>,
     /// Cooperative cancellation, checked at cycle boundaries and observable by nodes.
     pub cancel: CancellationToken,
+    /// Overrides `run.checkpoint.everyCycles`.
+    pub checkpoint_every: Option<u64>,
+    /// Overrides `run.checkpoint.directory` (absolute or relative to the working directory).
+    pub checkpoint_dir: Option<std::path::PathBuf>,
 }
 
 /// A node slot: the active handle plus its routing generation.
 pub(crate) struct NodeSlot {
     pub(crate) id: String,
     pub(crate) contract: NodeContract,
+    /// Origin and config of the active generation (a restart rebuilds exactly this).
+    pub(crate) origin: mvf_graph::ContractOrigin,
+    pub(crate) config: serde_json::Map<String, serde_json::Value>,
+    pub(crate) on_error: mvf_graph::FailurePolicy,
+    pub(crate) backpressure: mvf_graph::Backpressure,
     pub(crate) handle: Box<dyn NodeHandle>,
     pub(crate) generation: u64,
     pub(crate) stats: NodeStats,
@@ -206,6 +231,8 @@ pub struct Engine {
     pub(crate) control_tx: Sender<ControlCommand>,
     pub(crate) control_rx: Receiver<ControlCommand>,
     pub(crate) replacement_log: Vec<ReplacementEvent>,
+    pub(crate) recovery_log: Vec<RecoveryEvent>,
+    pub(crate) checkpoint: CheckpointState,
     /// (startup ms, cycle loop ms) of the last run.
     timings: (f64, f64),
 }
@@ -255,6 +282,10 @@ impl Engine {
             slots.push(NodeSlot {
                 id: node.id.clone(),
                 contract: node.contract.clone(),
+                origin: node.origin.clone(),
+                config: node.config.clone(),
+                on_error: node.on_error.clone(),
+                backpressure: node.backpressure,
                 handle,
                 generation: 1,
                 stats: NodeStats {
@@ -297,6 +328,8 @@ impl Engine {
             control_tx,
             control_rx,
             replacement_log: Vec::new(),
+            recovery_log: Vec::new(),
+            checkpoint: CheckpointState::default(),
             timings: (0.0, 0.0),
         })
     }
@@ -359,11 +392,13 @@ impl Engine {
     /// Starts, runs cycles until an end condition, and shuts down.
     pub fn run(&mut self, options: &RunOptions, observer: &mut dyn Observer) -> RunReport {
         let started_at = Instant::now();
+        self.configure_checkpoints(options);
         let started = self.start(&options.cancel);
         self.timings.0 = started_at.elapsed().as_secs_f64() * 1e3;
         let end = match started {
             Err((node, error)) => EndReason::StartFailed { node, error },
             Ok(()) => {
+                self.resume_from_checkpoint();
                 let cancel = options.cancel.clone();
                 let t0 = Instant::now();
                 let end = self.run_cycles(options, observer, &mut |e: &mut Engine| {
@@ -373,6 +408,10 @@ impl Engine {
                 end
             }
         };
+        if matches!(end, EndReason::SourceExhausted { .. }) {
+            // A cleanly, fully consumed run has nothing to resume.
+            self.clear_checkpoints();
+        }
         self.shutdown(&options.cancel);
         self.report(end, started_at)
     }
@@ -388,6 +427,8 @@ impl Engine {
             nodes: self.stats(),
             data_plane: self.data_plane(),
             replacements: self.replacement_log.clone(),
+            recoveries: self.recovery_log.clone(),
+            resumed_from_cycle: self.checkpoint.resumed_from,
         }
     }
 
@@ -415,6 +456,7 @@ impl Engine {
                 return end;
             }
             self.next_cycle += 1;
+            self.maybe_checkpoint(cycle);
             observer.cycle_completed(cycle);
         }
     }
@@ -427,7 +469,7 @@ impl Engine {
         observer: &mut dyn Observer,
     ) -> Option<EndReason> {
         let mut values: HashMap<(usize, String), Value> = HashMap::new();
-        for oi in 0..self.exec_order.len() {
+        'nodes: for oi in 0..self.exec_order.len() {
             let i = self.exec_order[oi];
             let node = &self.graph.nodes[i];
             let mut inputs = Inputs::new();
@@ -475,6 +517,7 @@ impl Engine {
             }
 
             let is_source = self.graph.nodes[i].is_source();
+            let mut attempts = 0u32;
             // Executes on the active generation. A candidate that fails during probation is rolled
             // back and the same inputs are re-executed on the restored generation (lossless).
             let (outputs, elapsed) = loop {
@@ -525,13 +568,20 @@ impl Engine {
                         );
                         self.rollback(i, "replace.candidate-failed", message);
                     }
-                    Err(error) => {
-                        return Some(EndReason::NodeFailed {
-                            node: slot.id.clone(),
-                            cycle,
-                            error,
-                        });
-                    }
+                    Err(error) => match self.recover(i, cycle, error, &mut attempts, cancel) {
+                        Recovery::Retry => {}
+                        Recovery::Skip(reason) => {
+                            let slot = &self.slots[i];
+                            observer.node(
+                                cycle,
+                                &slot.id,
+                                slot.generation,
+                                &NodeOutcome::Skipped(reason),
+                            );
+                            continue 'nodes;
+                        }
+                        Recovery::End(end) => return Some(end),
+                    },
                 }
             };
 

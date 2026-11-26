@@ -42,6 +42,18 @@ pub enum ChildMessage {
         /// Message.
         message: String,
     },
+    /// Reply to `checkpoint`: the state was written to the slot, or `empty` (stateless).
+    State {
+        /// Request id.
+        id: u64,
+        /// The module has no state to capture.
+        empty: bool,
+    },
+    /// Reply to `restore`.
+    Restored {
+        /// Request id.
+        id: u64,
+    },
     /// Diagnostics.
     Log {
         /// Level.
@@ -105,6 +117,19 @@ pub fn parse_line(line: &str) -> Result<ChildMessage, String> {
             id: v.get("id").and_then(Value::as_u64),
             message: s("message"),
         },
+        "state" => ChildMessage::State {
+            id: v
+                .get("id")
+                .and_then(Value::as_u64)
+                .ok_or(line.to_string())?,
+            empty: v.get("empty").and_then(Value::as_bool).unwrap_or(false),
+        },
+        "restored" => ChildMessage::Restored {
+            id: v
+                .get("id")
+                .and_then(Value::as_u64)
+                .ok_or(line.to_string())?,
+        },
         "log" => ChildMessage::Log {
             level: s("level"),
             message: s("message"),
@@ -136,6 +161,17 @@ pub fn execute(
         msg["out"] = json!({ "offset": offset, "capacity": capacity });
     }
     msg.to_string()
+}
+
+/// `checkpoint` request: the child writes its state into the reserved slot.
+pub fn checkpoint(id: u64, offset: u64, capacity: usize) -> String {
+    json!({ "type": "checkpoint", "id": id, "out": { "offset": offset, "capacity": capacity } })
+        .to_string()
+}
+
+/// `restore` request: the child rehydrates from the slot at `offset`.
+pub fn restore(id: u64, offset: u64) -> String {
+    json!({ "type": "restore", "id": id, "shm": { "offset": offset } }).to_string()
 }
 
 /// `shutdown` request.

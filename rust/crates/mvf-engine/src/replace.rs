@@ -214,6 +214,8 @@ pub(crate) struct Standby {
     handle: Box<dyn NodeHandle>,
     generation: u64,
     contract: NodeContract,
+    origin: ContractOrigin,
+    config: serde_json::Map<String, serde_json::Value>,
     backend: String,
 }
 
@@ -615,10 +617,14 @@ impl Engine {
         let previous = std::mem::replace(&mut slot.handle, candidate);
         let previous_contract = std::mem::replace(&mut slot.contract, request.contract.clone());
         let previous_generation = slot.generation;
+        let previous_origin = std::mem::replace(&mut slot.origin, request.origin.clone());
+        let previous_config = std::mem::replace(&mut slot.config, request.config.clone());
         slot.standby = Some(Standby {
             handle: previous,
             generation: previous_generation,
             contract: previous_contract.clone(),
+            origin: previous_origin,
+            config: previous_config,
             backend: std::mem::replace(&mut slot.stats.backend, backend),
         });
         slot.generation = pending.generation;
@@ -650,6 +656,8 @@ impl Engine {
         let mut failed = std::mem::replace(&mut slot.handle, standby.handle);
         let failed_contract = std::mem::replace(&mut slot.contract, standby.contract);
         let failed_generation = std::mem::replace(&mut slot.generation, standby.generation);
+        slot.origin = standby.origin;
+        slot.config = standby.config;
         slot.stats.generation = standby.generation;
         slot.stats.backend = standby.backend;
         slot.probation = 0;
