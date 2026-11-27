@@ -891,7 +891,7 @@ pub struct SurfaceReader {
     path: PathBuf,
     map: MmapMut,
     geometry: Geometry,
-    _lock: File,
+    lock: File,
     head: u64,
     last_seq: u64,
     status: HostStatus,
@@ -918,7 +918,7 @@ impl SurfaceReader {
             path: path.to_path_buf(),
             map,
             geometry,
-            _lock: lock,
+            lock,
             head: stored_head.max(tail),
             last_seq: 0,
             status: HostStatus {
@@ -1065,5 +1065,9 @@ impl Drop for SurfaceReader {
         // Detach: the node sees the host gone at once instead of waiting for a stale heartbeat.
         self.update_status(|s| s.flags &= !(FLAG_ATTACHED | FLAG_FOCUSED | FLAG_VISIBLE));
         atomic(&self.map, R_PID).store(0, Ordering::Release);
+        // Release ownership now rather than when the descriptor closes: a process another thread
+        // is spawning holds a copy of every descriptor until its exec closes it, which would keep
+        // the next host out for that moment.
+        let _ = self.lock.unlock();
     }
 }
