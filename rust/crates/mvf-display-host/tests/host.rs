@@ -428,7 +428,18 @@ fn a_real_window_presents_a_node_surface() {
         Some(2),
         "{st}"
     );
-    assert!(st["presents"].as_u64().unwrap_or(0) > 10, "{st}");
+    // Every window showed the node's frames. Not a frame rate: a loaded runner presents a few
+    // frames in the test's 2.5 s (7 at p95 436 ms on macOS CI), and the rate is not what this
+    // test is about.
+    let surfaces = st["surfaces"].as_array().cloned().unwrap_or_default();
+    assert_eq!(surfaces.len(), 2, "{st}");
+    assert!(
+        surfaces
+            .iter()
+            .all(|s| s["frames"].as_u64().unwrap_or(0) >= 1
+                && s["lastSeq"].as_u64().unwrap_or(0) >= 1),
+        "{st}"
+    );
     assert!(
         st["errors"].as_array().is_some_and(|e| e.is_empty()),
         "{st}"
