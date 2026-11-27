@@ -89,6 +89,12 @@ impl Offer {
             ("MVF_GENERATION".into(), self.generation.to_string()),
         ]
     }
+
+    /// The environment of a launch that offers only v1. It says so explicitly: a child inherits the
+    /// host's environment, and a stray `MVF_PROTOCOL=2` there must not read as an offer.
+    pub fn none() -> Vec<(String, String)> {
+        vec![("MVF_PROTOCOL".into(), "1".into())]
+    }
 }
 
 /// How a child ended.

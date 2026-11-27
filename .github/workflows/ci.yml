@@ -71,17 +71,32 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # Real C++ SDK worker for the data-plane interop test (no mock: the test fails if it is missing).
-      - name: Build C++ SDK example
+      # Real C++ and .NET SDK workers for the interop and protocol tests (no mock: the tests fail if
+      # they are missing). .NET is a test fixture here, not a runtime dependency of the engine.
+      - name: Build C++ SDK examples
         run: |
           cmake -S ../src/sdk/cpp -B target/cpp-sdk -DCMAKE_BUILD_TYPE=Release
           cmake --build target/cpp-sdk --config Release
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Build .NET worker SDK examples
+        run: |
+          dotnet publish ../src/sdk/dotnet/examples/InvertTransformer -c Release -o target/dotnet-sdk/InvertTransformer --nologo
+          dotnet publish ../src/sdk/dotnet/examples/MeanAnalyzer -c Release -o target/dotnet-sdk/MeanAnalyzer --nologo
       - run: cargo test --workspace --locked
         env:
           MVF_REQUIRE_CPP: "1"
+          MVF_REQUIRE_DOTNET: "1"
           # Display Fabric (#30): open real windows where the runner has a desktop session; a
           # runner without one reports BLOCKED from the session probe instead of failing.
           MVF_DISPLAY_SMOKE: "1"
+      # Worker protocol v1 vs v2 through the engine with every SDK (#32). Informational: it prints a
+      # table, and fails only if a node does not run or does not speak the protocol it was offered.
+      - name: Worker protocol benchmark (v1 vs v2)
+        run: cargo test --release --locked -p mvf-ipc --test engine_bench -- --nocapture
+        env:
+          MVF_IPC_BENCH: "1"
 
   cpp-sdk:
     name: C++ SDK (${{ matrix.os }})

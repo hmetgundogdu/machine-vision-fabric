@@ -5,7 +5,8 @@
 //! a Unix socket pair at fd 3) and engine-side receive path (a reader thread handing messages over a
 //! channel, as the v1 host does, or a direct read on the calling thread), with a Rust child and a
 //! Python child. Reports RTT p50/p95/p99/max, throughput, jitter, engine and child CPU, context
-//! switches and the child's peak RSS.
+//! switches and the child's peak RSS. The same comparison through the real engine, with every SDK,
+//! is `tests/engine_bench.rs`.
 
 #![cfg(unix)]
 
@@ -421,94 +422,5 @@ fn control_round_trips_v1_vs_v2() {
             run.child_csw as f64 / (N + WARMUP) as f64,
             run.child_rss_mib
         );
-    }
-}
-
-/// The same comparison through the real engine and worker supervisor: a Rust analyzer and the
-/// Python invert transformer (the SDK's own v1 and v2 paths) on small frames, where control cost
-/// dominates.
-#[test]
-fn engine_round_trips_v1_vs_v2() {
-    use mvf_engine::*;
-    if std::env::var_os("MVF_IPC_BENCH").is_none_or(|v| v != "1") {
-        return;
-    }
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let dir = std::env::temp_dir().join(format!("mvf-ipc-engine-bench-{}", std::process::id()));
-    let module = dir.join("modules/t.echo");
-    std::fs::create_dir_all(&module).expect("module");
-    let exe = format!("mvf-ipc-echo{}", std::env::consts::EXE_SUFFIX);
-    std::fs::copy(env!("CARGO_BIN_EXE_mvf-ipc-echo"), module.join(&exe)).expect("copy");
-    std::fs::write(
-        module.join("node.yaml"),
-        format!("apiVersion: mvf.dev/v1alpha1\nkind: NodeContract\nmetadata: {{ id: t.echo, version: 1.0.0 }}\nspec:\n  ports:\n    inputs: [ {{ name: frame, channel: data, type: frame }} ]\n    outputs: [ {{ name: value, channel: data, type: json }} ]\n  artifacts: [ {{ backend: worker, runtime: executable, entry: {exe}, protocol: 1 }} ]\n"),
-    )
-    .expect("yaml");
-    let frames = 5000;
-    let cases = [
-        ("rust analyzer", "t.echo", "value", "json"),
-        (
-            "python transformer",
-            "py.invert-transformer",
-            "frame",
-            "frame",
-        ),
-    ];
-    eprintln!(
-        "{:<20} {:>3} {:>14} {:>14} {:>12} {:>10}",
-        "node (5000 frames)", "v", "node us/frame", "max us", "run frames/s", "ready ms"
-    );
-    for (name, module_id, out, sink_port) in cases {
-        // A warm-up run first, so neither protocol pays the cold process start.
-        for (round, protocol) in [(0, 1u64), (1, 1), (1, 2)] {
-            let text = format!(
-                "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: bench }}\nspec:\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ width: 8, height: 8, channels: 1, frames: {frames}, arena: true }} }}\n    - {{ id: n, module: {module_id} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: n.frame }}\n      - {{ from: n.{out}, to: sink.{sink_port} }}\n"
-            );
-            let resolver = HostResolver::new(&dir)
-                .with_module_root(dir.join("modules"))
-                .with_module_root(repo.join("modules"));
-            let graph = mvf_graph::build_graph(&text, &resolver).expect("graph");
-            let services = HostServices::default();
-            let worker = mvf_worker::WorkerBackend::from_env().with_protocol(protocol);
-            let mut engine =
-                Engine::build(graph, &default_backends().with(worker), &services).expect("build");
-            let report = engine.run(&RunOptions::default(), &mut NullObserver);
-            assert_eq!(
-                report.end,
-                EndReason::SourceExhausted { node: "cam".into() },
-                "{:?}",
-                services.logs.events()
-            );
-            let node = report.nodes.iter().find(|x| x.id == "n").expect("n");
-            let ready_ms = services
-                .logs
-                .events()
-                .iter()
-                .find_map(|l| {
-                    l.message
-                        .strip_prefix("ready pid=")
-                        .and_then(|r| r.split(" in ").nth(1))
-                        .and_then(|r| r.trim_end_matches(" ms").parse::<u64>().ok())
-                })
-                .unwrap_or(0);
-            let spoke = services
-                .logs
-                .events()
-                .iter()
-                .any(|l| l.message.contains(&format!("protocol={protocol}")));
-            assert!(spoke, "the child spoke protocol {protocol}");
-            if round == 0 {
-                continue;
-            }
-            eprintln!(
-                "{:<20} {:>3} {:>14.1} {:>14} {:>12.0} {:>10}",
-                name,
-                protocol,
-                node.total_us as f64 / node.executed.max(1) as f64,
-                node.max_us,
-                frames as f64 / (report.cycles_ms / 1000.0),
-                ready_ms
-            );
-        }
     }
 }

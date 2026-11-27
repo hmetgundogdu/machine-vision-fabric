@@ -2,12 +2,23 @@
 
 The C++ SDK for authoring **MachineVisionFabric** modules. It mirrors the
 reference Python SDK (`src/sdk/python/mvf_sdk`) and speaks the exact same wire
-protocol, so a C++ module is interchangeable with a Python or .NET one.
+protocol, so a C++ module is interchangeable with a Python or .NET
+(`src/sdk/dotnet/Mvf.Worker`) one.
 
-- **Control plane**: newline-delimited JSON over the module's stdio (`protocol/README.md`).
+- **Control plane**: the module's stdio. Protocol v2, binary frames
+  (`protocol/worker-v2.md`), when the engine offers it with `MVF_PROTOCOL=2`; otherwise
+  protocol v1, newline-delimited JSON (`protocol/README.md`). One build works with every
+  host.
 - **Data plane**: a shared-memory arena addressed by `MVF_ARENA_PATH`; payloads are
   typed and byte-based (`[192-byte descriptor | bytes]`), read and written **in place,
   zero copy**. No base64; bytes never travel inline.
+
+Under v2 the SDK protects the channel: it keeps private duplicates of fd 0 and fd 1 for
+the protocol (binary mode and non-inheritable on Windows, close-on-exec elsewhere), then
+points fd 1 at stderr and fd 0 at the null device. A `printf` from the module or from a
+native library then becomes a log line, not channel corruption. `mvf::log()` writes a
+JSON line to stderr. A request costs one `read` and one `write`, and a processor's
+result carries no JSON.
 
 A module is a small executable that links this SDK. The engine launches it as an
 out-of-process node — **no engine changes are required** to add a C++ module.
@@ -56,7 +67,8 @@ Outputs the shared library:
 | macOS | `libmvf_sdk.dylib` |
 | Windows | `mvf_sdk.dll` (+ import lib `mvf_sdk.lib`) |
 
-plus the `mvf_invert_transformer` example. The only third-party dependency is the
+plus the `mvf_invert_transformer` and `mvf_mean_analyzer` examples (the analyzer
+checkpoints a frame count and deliberately writes to stdout once). The only third-party dependency is the
 single-header [`nlohmann/json`](https://github.com/nlohmann/json), fetched at
 configure time (or pass `-DMVF_SDK_SYSTEM_JSON=ON` to use an installed copy).
 

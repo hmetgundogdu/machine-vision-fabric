@@ -51,6 +51,8 @@ option(MVF_SDK_BUILD_EXAMPLES "Build C++ SDK example modules" ON)
 if(MVF_SDK_BUILD_EXAMPLES)
   add_executable(mvf_invert_transformer examples/invert_transformer.cpp)
   target_link_libraries(mvf_invert_transformer PRIVATE mvf_sdk)
+  add_executable(mvf_mean_analyzer examples/mean_analyzer.cpp)
+  target_link_libraries(mvf_mean_analyzer PRIVATE mvf_sdk)
 endif()
 
 include(GNUInstallDirs)

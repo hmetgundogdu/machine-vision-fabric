@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The .NET SDK for out-of-process worker modules (#32): a module is a small executable that the
+    engine launches and drives over its stdio (protocol v1 JSON lines, or v2 binary frames when the
+    engine offers them), with payloads in the shared-memory arena. It has no dependency beyond the
+    base class library. Not to be confused with Mvf.Sdk, which builds in-process modules for the
+    .NET engine.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>Mvf.Worker</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>MachineVisionFabric.Worker</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>MachineVisionFabric contributors</Authors>
+    <Description>SDK for MachineVisionFabric worker modules: out-of-process nodes driven over stdio, with zero-copy payloads in shared memory.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/hmetgundogdu/machine-vision-fabric</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>

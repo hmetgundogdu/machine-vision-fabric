@@ -4,8 +4,8 @@ v2 replaces v1's JSON lines with length-prefixed binary frames on the same chann
 inherited stdio pipes. Payload bytes still never travel here, only arena offsets. v1
 ([`README.md`](README.md)) stays supported: a child that does not speak v2 is served v1, and a
 host can keep every child on v1 (`MVF_PROTOCOL=1`). Reference implementations: `rust/crates/mvf-ipc`
-(framing, bodies, the fixture child), `rust/crates/mvf-worker` (host) and
-`src/sdk/python/mvf_sdk` (Python SDK).
+(framing, bodies, the fixture child) and `rust/crates/mvf-worker` (host). SDKs:
+`src/sdk/python/mvf_sdk` (Python), `src/sdk/cpp` (C++) and `src/sdk/dotnet/Mvf.Worker` (.NET).
 
 ## Negotiation
 
@@ -16,6 +16,10 @@ host can keep every child on v1 (`MVF_PROTOCOL=1`). Reference implementations: `
 
    For an OCI node the offer goes into the bundle's environment; the channel is the container's
    stdio, inherited from runc.
+
+   A launch that offers only v1 says `MVF_PROTOCOL=1`, because a child inherits the host's
+   environment. An SDK takes the offer only when `MVF_SESSION` is set too. So a stray
+   `MVF_PROTOCOL=2` in a user's environment never switches a module that talks to a v1-only host.
 2. **A v2 child answers with a binary `hello` frame** that carries the token. A v1 child ignores
    the offer and writes its JSON `hello` line. The host tells them apart by the first byte (`M`
    or `{`).
@@ -29,6 +33,16 @@ host can keep every child on v1 (`MVF_PROTOCOL=1`). Reference implementations: `
   writing to stdout then lands in the logs instead of corrupting the protocol.
 - **Logs go to stderr** as one JSON object per line: `{"level": "info", "message": "..."}`.
   Plain stderr lines are logged as `stderr`. Logs never use the control channel.
+- **Per platform:**
+  - On Windows, set the protocol descriptors to binary mode (no CRLF translation), make them
+    non-inheritable, and also repoint the Win32 standard handles (`SetStdHandle`). Code that
+    writes through the handles rather than the C runtime then lands in the logs too.
+  - On Unix, make the duplicates close-on-exec, so processes the module starts do not hold the
+    channel open.
+  - A managed runtime must also redirect its own console writer. In .NET that is
+    `Console.SetOut` onto stderr: the runtime's `Console.Out` opens its own copy of stdout.
+- **Read whole frames.** Buffer the input and parse frames from the buffer. A request then
+  costs one `read`.
 
 ## Frames
 
@@ -127,8 +141,13 @@ A processor's result is 24 bytes and contains no JSON.
 
 - **v2 is offered by default.** `MVF_PROTOCOL=1` on the host keeps every child on v1, as a
   rollback switch.
-- **Who speaks v2 today:** the Python SDK and the Rust fixture. The C++ and .NET SDKs speak v1
-  and are served v1.
-- **Gate for retiring v1:** every shipped SDK speaks v2, every e2e suite has passed on v2 on
-  Linux, Windows and macOS for one release, and no v1-only module is in use. Until then the host
-  keeps both.
+- **Who speaks v2:** the Python, C++ and .NET worker SDKs and the Rust fixture. Each one still
+  speaks v1 when v2 is not offered.
+- **Who speaks only v1:** the shipping .NET engine's worker host
+  (`src/hosting/Mvf.Hosting.Worker`). It never offers v2, so the SDKs answer it in v1.
+- **Gate for retiring v1:**
+  - every shipped SDK speaks v2 (met);
+  - every e2e suite has passed on v2 on Linux, Windows and macOS for one release;
+  - no v1-only host or module is in use. The .NET engine's host is one.
+
+  Until then the host and the SDKs keep both.

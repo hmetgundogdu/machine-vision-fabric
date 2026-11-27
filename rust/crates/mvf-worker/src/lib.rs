@@ -969,7 +969,9 @@ fn spare_spawner(
             None => services.arena().map_err(resource)?,
         };
         let offer = (protocol >= 2).then(|| process::Offer::new(0));
-        let env = offer.as_ref().map(process::Offer::env).unwrap_or_default();
+        let env = offer
+            .as_ref()
+            .map_or_else(process::Offer::none, process::Offer::env);
         let launch = ProcessLauncher { spec: spec.clone() }.prepare(arena.path(), &env)?;
         let mut process = WorkerProcess::spawn(&launch, &node, 0, &services.logs, offer)
             .map_err(|e| NodeError::new(NodeErrorKind::StartFailed, e.to_string()))?;
@@ -1030,7 +1032,9 @@ impl NodeHandle for WorkerNode {
                 };
                 let arena = self.arena()?;
                 let offer = (self.protocol >= 2).then(|| process::Offer::new(self.generation));
-                let env = offer.as_ref().map(process::Offer::env).unwrap_or_default();
+                let env = offer
+                    .as_ref()
+                    .map_or_else(process::Offer::none, process::Offer::env);
                 let spec = self.launcher.prepare(arena.path(), &env)?;
                 let process = WorkerProcess::spawn(
                     &spec,

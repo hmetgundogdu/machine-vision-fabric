@@ -4,8 +4,10 @@
 - **Date:** 2026-11-27
 - **Issues:** #32, part of #10. Related: #28 (runtime hardening), #23, #21 (the Event Fabric is
   explicitly out of scope).
-- **Evidence:** [stage 21](stages/21.md), `crates/mvf-ipc/tests/bench.rs`,
-  `crates/mvf-ipc/tests/faults.rs`. Spec: [`protocol/worker-v2.md`](../../protocol/worker-v2.md).
+- **Evidence:** [stage 21](stages/21.md) (part 1), [stage 22](stages/22.md) (part 2: the C++ and
+  .NET SDKs), `crates/mvf-ipc/tests/bench.rs`, `crates/mvf-ipc/tests/engine_bench.rs`,
+  `crates/mvf-ipc/tests/faults.rs`, `crates/mvf-worker/tests/sdks.rs`. Spec:
+  [`protocol/worker-v2.md`](../../protocol/worker-v2.md).
 
 ## Context
 
@@ -36,6 +38,17 @@ Through the real engine (8×8 frames, cycle time only):
 |---|---|---|
 | Rust analyzer | 12.7 → 9.8 µs/frame | 39.3 → 27.9 µs/frame |
 | Python transformer | 24.2 → 19.3 µs/frame | 47.9 → 14.3 µs/frame |
+
+Part 2 ([stage 22](stages/22.md)): the same comparison through the engine with each SDK's own
+transformer, 50,000 8×8 frames, in µs per frame and the child's CPU per frame:
+
+| SDK | macOS v1 → v2 | Linux VM v1 → v2 | Linux VM, pinned to 1 CPU, v1 → v2 |
+|---|---|---|---|
+| C++ | 14.7 → 5.2 (CPU 9.2 → 2.1) | 39.0 → 21.6 (CPU 11.0 → 5.6) | 10.3 → 3.7 (CPU 5.9 → 1.4) |
+| .NET | 15.0 → 5.4 (CPU 10.2 → 2.9) | 36.2 → 3.4 (CPU 14.9 → 1.8) | 14.5 → 3.4 (CPU 9.0 → 1.6) |
+
+On the multi-CPU VM the cost of waking the other side on another vCPU dominates and varies with
+where the scheduler places the child. Pinned to one CPU, the SDKs' own costs show.
 
 ## Decision
 
@@ -81,7 +94,12 @@ Through the real engine (8×8 frames, cycle time only):
 7. **Compatibility.**
    - v2 is offered by default; a v1 child is detected by its first byte and served v1;
      `MVF_PROTOCOL=1` keeps everything on v1.
-   - Python and the Rust fixture speak v2 now. C++ and .NET keep v1 until ported (part 2).
+   - **An offer is `MVF_PROTOCOL=2` together with its launch token.** A v1 launch says
+     `MVF_PROTOCOL=1` explicitly, and an SDK takes v2 only when `MVF_SESSION` is set too. A
+     stray `MVF_PROTOCOL=2` in the environment cannot switch a module under a v1-only host.
+   - The Python, C++ and .NET worker SDKs and the Rust fixture speak v2, and v1 when it is not
+     offered.
+   - The shipping .NET engine's worker host stays v1-only.
    - v1 is retired only behind the gate in the spec.
 
 ## Consequences
@@ -94,13 +112,14 @@ Through the real engine (8×8 frames, cycle time only):
   For frames that take milliseconds to process it stays negligible either way. The main gains are
   reliability and diagnosability.
 - **Not done here:**
-  - C++ and .NET v2;
   - descriptor passing;
   - several requests in flight per child;
   - a liveness probe scheduled by the engine (`ping` exists);
   - Windows direct reads;
   - measurements on constrained edge hardware. Here only an M-series machine and a VM were
-    measured.
+    measured; the VM pinned to one CPU is an approximation, not evidence;
+  - live `configure` and the `source` capability in the C++ and .NET SDKs (Python only, as
+    before).
 
 ## Threat model
 

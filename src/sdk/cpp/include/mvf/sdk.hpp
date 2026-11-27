@@ -11,7 +11,8 @@
 // A processor is a function `std::optional<Output> transform(const Payload&, const json& meta)`
 // returning a new frame, or std::nullopt to drop it. An analyzer may emit a derived frame,
 // a classification, and structured inference metadata from one input. The SDK owns the stdio
-// loop and the descriptor decoding. See ../../../../protocol/README.md. Local only — no network.
+// loop (protocol v2 binary frames when the engine offers them, v1 JSON lines otherwise) and the
+// descriptor decoding. See ../../../../protocol/README.md and worker-v2.md. Local only — no network.
 //
 // This SDK mirrors the reference Python SDK (src/sdk/python/mvf_sdk/__init__.py) and speaks
 // the exact same wire protocol, so a C++ module is interchangeable with a Python or .NET one.
@@ -124,11 +125,11 @@ struct ModuleHooks {
     std::function<void(const Payload&)> on_restore;
 };
 
-// Emit a diagnostic log line to the engine (protocol {"type":"log"}). Appears in the CLI dashboard
-// (the node's log panel) and, headless, on the engine's stderr — the way a module reports what it is
-// doing without polluting the typed data plane. Safe to call from classify/transform/on_start: the
-// stdio loop is single-threaded, so the line is ordered and never collides with a result.
-// level is "debug"/"info"/"warn"/"error".
+// Emit a diagnostic log line to the engine: under protocol v2 a JSON line on stderr, under v1 a
+// {"type":"log"} message. Appears in the CLI dashboard (the node's log panel) and, headless, on the
+// engine's stderr — the way a module reports what it is doing without polluting the typed data
+// plane. Safe to call from classify/transform/on_start: the loop is single-threaded, so the line is
+// ordered and never collides with a result. level is "debug"/"info"/"warn"/"error".
 void log(const std::string& message, const std::string& level = "info");
 
 // Run the stdio loop for a classifier module. Blocks until the engine shuts the module down.

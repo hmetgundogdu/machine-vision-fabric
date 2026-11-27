@@ -423,7 +423,10 @@ def _serve(module_id, capability, writable, on_execute, on_checkpoint, on_restor
         raise RuntimeError("MVF_ARENA_PATH is not set — the shared-memory data plane is required.")
     arena_view = memoryview(arena)
     global _wire
-    if os.environ.get("MVF_PROTOCOL") == "2" and not isinstance(_wire, _V2):
+    # An offer is MVF_PROTOCOL=2 together with its launch token: a stray MVF_PROTOCOL=2 in the
+    # environment of a host that never offers v2 (the .NET engine) must not switch the module.
+    offered = os.environ.get("MVF_PROTOCOL") == "2" and os.environ.get("MVF_SESSION")
+    if offered and not isinstance(_wire, _V2):
         _wire = _V2()
     features = ["configure"] if on_configure is not None else []
     try:

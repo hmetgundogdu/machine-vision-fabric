@@ -24,7 +24,9 @@ Base classes to implement the node contract without wiring the plumbing yourself
 
 The same module protocol (stdio control plane + shared-memory data plane) has
 Python (`mvf-sdk`) and C++ SDKs, so modules can be written in any of the three
-languages. See the repository `protocol/README.md`.
+languages. See the repository `protocol/README.md`. For an out-of-process .NET
+module, a separate executable driven over that protocol, use
+`MachineVisionFabric.Worker` (`src/sdk/dotnet/Mvf.Worker`).
 
 ## License
 
