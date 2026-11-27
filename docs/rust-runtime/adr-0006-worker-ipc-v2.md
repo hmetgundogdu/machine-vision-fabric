@@ -5,7 +5,7 @@
 - **Issues:** #32, part of #10. Related: #28 (runtime hardening), #23, #21 (the Event Fabric is
   explicitly out of scope).
 - **Evidence:** [stage 21](stages/21.md) (part 1), [stage 22](stages/22.md) (part 2: the C++ and
-  .NET SDKs), `crates/mvf-ipc/tests/bench.rs`, `crates/mvf-ipc/tests/engine_bench.rs`,
+  .NET SDKs), [stage 23](stages/23.md) (the Windows direct receive path), `crates/mvf-ipc/tests/bench.rs`, `crates/mvf-ipc/tests/engine_bench.rs`,
   `crates/mvf-ipc/tests/faults.rs`, `crates/mvf-worker/tests/sdks.rs`. Spec:
   [`protocol/worker-v2.md`](../../protocol/worker-v2.md).
 
@@ -59,14 +59,15 @@ where the scheduler places the child. Pinned to one CPU, the SDKs' own costs sho
 | Rust fixture | 73.1 → 70.3 | −4 % |
 
 The anonymous-pipe round trip with its reader-thread hop costs about 60–70 µs there, whatever the
-framing. A direct Windows receive path, overlapped I/O on a named pipe, is the next lever. It is
-not built.
+framing. [Stage 23](stages/23.md) adds the direct Windows receive path that this pointed to.
 
 ## Decision
 
 1. **Transport: keep the inherited stdio pipes.**
    - There is no endpoint, so there is no peer to authenticate beyond the launched process.
-   - They work through `runc` unchanged and on Windows, with no named pipe and no socket file.
+   - They work through `runc` unchanged. On Windows the child's stdout is a named pipe (decision
+     4), but still an inherited handle: the host takes the only instance before the child starts,
+     so it is not an endpoint anyone connects to.
    - A Unix socket pair measured no faster (slightly slower in every run), and would need a
      different mechanism on Windows.
    - The benefit sockets would bring is descriptor passing (`SCM_RIGHTS`, e.g. memfd arenas).
@@ -85,12 +86,16 @@ not built.
    The hot-path messages are a handful of fixed integers, which `struct` (Python),
    `BinaryPrimitives` (C#) and `memcpy` (C++) decode at once. Versioning is the frame version plus
    the `features` list (unchanged from v1). Revisit if control messages grow complex.
-4. **Receive path: direct read on Unix.**
-   - A non-blocking pipe, `poll` and an incremental frame buffer, on the calling thread.
+4. **Receive path: direct read on the calling thread.**
+   - **Unix:** a non-blocking pipe, `poll` and an incremental frame buffer.
+   - **Windows** ([stage 23](stages/23.md)): anonymous pipes can be neither polled nor read with a
+     timeout. The child's stdout is therefore the client end of a per-launch named pipe (one
+     instance, local clients only, connected by the host before the child exists). The host reads
+     the server end with overlapped I/O and a bounded wait on its event. For the child it is an
+     ordinary pipe handle; SDKs need no change.
    - One context switch per reply instead of two. A half-written frame is bounded by the
      request's deadline.
-   - Windows keeps a reader thread: anonymous pipes cannot be polled, and overlapped named pipes
-     would be a second transport. This is measured in CI.
+   - `MVF_WORKER_RECEIVE=thread` keeps the reader thread on every OS, as a rollback switch.
 5. **Logs off the control path.** Logs go to stderr as JSON lines, through a bounded queue to a
    delivery thread that drops and counts lines when the consumer lags. The SDK moves stdout onto
    stderr, so the channel cannot be polluted.
@@ -127,7 +132,6 @@ not built.
   - descriptor passing;
   - several requests in flight per child;
   - a liveness probe scheduled by the engine (`ping` exists);
-  - Windows direct reads;
   - measurements on constrained edge hardware. Here only an M-series machine and a VM were
     measured; the VM pinned to one CPU is an approximation, not evidence;
   - live `configure` and the `source` capability in the C++ and .NET SDKs (Python only, as
@@ -138,6 +142,9 @@ not built.
 - **Protects against:**
   - a module or library corrupting the channel by writing to stdout;
   - a confused or substituted process answering for a launch it does not belong to (token);
+  - on Windows, another local process taking the stdout pipe instance. There is one instance with
+    a unique name, and the host connects it before the child exists. A process that raced it would
+    make the spawn fail, not receive the channel;
   - stale replies across generations;
   - oversized or malformed frames exhausting memory or desynchronising the host;
   - a log flood stalling execution.

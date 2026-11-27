@@ -2,12 +2,15 @@
 //! its stdio): bounded waits, enforceable termination, exit classification and guaranteed reaping
 //! (no orphan in supported cases).
 //!
-//! Receive paths, chosen by measurement (#32, `crates/mvf-ipc/tests/bench.rs`):
-//! - **v2 on Unix**: the calling thread reads frames itself from a non-blocking pipe with `poll`,
-//!   so a reply costs one context switch, and a frame left half-written is bounded by the request's
-//!   deadline.
-//! - **v1, and v2 on Windows** (anonymous pipes cannot be polled): a reader thread hands messages
-//!   over a channel.
+//! Receive paths, chosen by measurement (#32, `crates/mvf-ipc/tests/bench.rs` and
+//! `engine_bench.rs`):
+//! - **v2, direct (default)**: the calling thread reads frames itself with a bounded wait, so a
+//!   reply costs one context switch and a frame left half-written is bounded by the request's
+//!   deadline. On Unix that is the stdout pipe with `poll`. On Windows, where anonymous pipes can be
+//!   neither polled nor read with a timeout, the child's stdout is a named pipe read with
+//!   overlapped I/O.
+//! - **v1, and v2 with `MVF_WORKER_RECEIVE=thread`** (or [`set_receive_path`]): a reader thread
+//!   hands messages over a channel. The thread path stays as a rollback switch and for comparison.
 //!
 //! Logs never share the control path: they go through a bounded queue to a delivery thread, so a
 //! slow log consumer drops (and counts) lines instead of stalling execution.
@@ -17,7 +20,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -31,6 +34,47 @@ pub const MAX_LINE: usize = 1024 * 1024;
 const POLL: Duration = Duration::from_millis(5);
 /// Log lines queued for delivery before new ones are dropped (and counted).
 pub const LOG_QUEUE: usize = 4096;
+
+/// How the host receives a v2 child's frames (#32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceivePath {
+    /// The calling thread reads frames with a bounded wait (default).
+    Direct,
+    /// A reader thread hands frames over a channel.
+    Thread,
+}
+
+/// 0 = not set yet (read `MVF_WORKER_RECEIVE`), 1 = direct, 2 = thread.
+static RECEIVE: AtomicU8 = AtomicU8::new(0);
+
+/// The receive path for v2 children launched from now on: `MVF_WORKER_RECEIVE=thread` or
+/// `direct` (default), unless [`set_receive_path`] chose one.
+pub fn receive_path() -> ReceivePath {
+    match RECEIVE.load(Ordering::Relaxed) {
+        1 => ReceivePath::Direct,
+        2 => ReceivePath::Thread,
+        _ => {
+            let path = match std::env::var("MVF_WORKER_RECEIVE").ok().as_deref() {
+                Some("thread") => ReceivePath::Thread,
+                _ => ReceivePath::Direct,
+            };
+            set_receive_path(path);
+            path
+        }
+    }
+}
+
+/// Chooses the receive path for v2 children launched from now on, host-wide. Children already
+/// running keep theirs.
+pub fn set_receive_path(path: ReceivePath) {
+    RECEIVE.store(
+        match path {
+            ReceivePath::Direct => 1,
+            ReceivePath::Thread => 2,
+        },
+        Ordering::Relaxed,
+    );
+}
 
 /// What to launch.
 #[derive(Debug, Clone)]
@@ -168,13 +212,13 @@ enum Event {
 }
 
 enum Rx {
-    /// stdout not classified yet (v2 offered on Unix: the first byte decides).
-    #[cfg(unix)]
-    Pending(Option<ChildStdout>),
+    /// stdout not classified yet (v2 offered, direct path: the first byte decides).
+    #[cfg(any(unix, windows))]
+    Pending(Option<direct::Source>),
     /// A reader thread delivers messages.
     Thread(Receiver<Event>),
     /// The calling thread reads v2 frames itself.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Direct(direct::Reader),
 }
 
@@ -251,8 +295,8 @@ pub struct WorkerProcess {
     generation: Arc<AtomicU64>,
     logs: Logs,
     sink: LogSink,
-    /// Read by the Unix direct path (on Windows the detecting reader thread owns a copy).
-    #[cfg_attr(not(unix), allow(dead_code))]
+    /// Read by the direct path (a detecting reader thread owns a copy).
+    #[cfg_attr(not(any(unix, windows)), allow(dead_code))]
     offer: Option<Offer>,
     /// 0 until known, then 1 or 2.
     protocol: u64,
@@ -376,8 +420,7 @@ fn v1_reader(
     })
 }
 
-/// Reads v2 frames on a thread (Windows, or wherever the direct path is unavailable).
-#[cfg(not(unix))]
+/// Reads v2 frames on a thread (`ReceivePath::Thread`).
 fn v2_reader(
     mut reader: impl Read + Send + 'static,
     tx: mpsc::Sender<Event>,
@@ -433,8 +476,8 @@ fn classify(h: &mvf_ipc::Header, body: &[u8], offer: Option<&Offer>, generation:
     }
 }
 
-/// Detects the child's protocol from its first stdout byte on a thread (Windows), then reads on.
-#[cfg(not(unix))]
+/// Detects the child's protocol from its first stdout byte on a thread, then reads on
+/// (`ReceivePath::Thread`).
 fn detecting_reader(
     mut stdout: ChildStdout,
     tx: mpsc::Sender<Event>,
@@ -485,11 +528,38 @@ impl WorkerProcess {
         for (k, v) in &spec.env {
             command.env(k, v);
         }
+        let receive = if cfg!(any(unix, windows)) && offer.is_some() {
+            receive_path()
+        } else {
+            ReceivePath::Thread
+        };
+        // Windows direct path: the child's stdout is the client end of a named pipe.
+        #[cfg(windows)]
+        let mut pipe = match receive {
+            ReceivePath::Direct => {
+                let (source, client) = direct::pipe()?;
+                command.stdout(Stdio::from(client));
+                Some(source)
+            }
+            ReceivePath::Thread => None,
+        };
         let mut child = crate::spawner::spawn(command)?;
         let shared_generation = Arc::new(AtomicU64::new(generation));
         let mut readers = Vec::new();
 
-        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let stdout = child.stdout.take();
+        #[cfg(windows)]
+        let direct_source = pipe.take();
+        #[cfg(unix)]
+        let (stdout, direct_source) = match receive {
+            ReceivePath::Direct => (None, stdout),
+            ReceivePath::Thread => (stdout, None),
+        };
+        #[cfg(any(unix, windows))]
+        let piped = stdout.is_some() || direct_source.is_some();
+        #[cfg(not(any(unix, windows)))]
+        let piped = stdout.is_some();
+        let (true, Some(stderr)) = (piped, child.stderr.take()) else {
             let _ = child.kill();
             let _ = child.wait();
             return Err(std::io::Error::other("child stdio was not piped"));
@@ -497,33 +567,32 @@ impl WorkerProcess {
         let (sink, delivery) = LogSink::new(logs);
         readers.push(delivery);
 
-        let rx = match &offer {
-            None => {
+        let rx = match stdout {
+            Some(stdout) => {
                 let (tx, rx) = mpsc::channel();
-                readers.push(v1_reader(
-                    stdout,
-                    tx,
-                    sink.clone(),
-                    node.to_string(),
-                    Arc::clone(&shared_generation),
-                ));
+                readers.push(match &offer {
+                    None => v1_reader(
+                        stdout,
+                        tx,
+                        sink.clone(),
+                        node.to_string(),
+                        Arc::clone(&shared_generation),
+                    ),
+                    Some(o) => detecting_reader(
+                        stdout,
+                        tx,
+                        sink.clone(),
+                        node.to_string(),
+                        Some(o.clone()),
+                        Arc::clone(&shared_generation),
+                    ),
+                });
                 Rx::Thread(rx)
             }
-            #[cfg(unix)]
-            Some(_) => Rx::Pending(Some(stdout)),
-            #[cfg(not(unix))]
-            Some(o) => {
-                let (tx, rx) = mpsc::channel();
-                readers.push(detecting_reader(
-                    stdout,
-                    tx,
-                    sink.clone(),
-                    node.to_string(),
-                    Some(o.clone()),
-                    Arc::clone(&shared_generation),
-                ));
-                Rx::Thread(rx)
-            }
+            #[cfg(any(unix, windows))]
+            None => Rx::Pending(direct_source),
+            #[cfg(not(any(unix, windows)))]
+            None => unreachable!("checked above"),
         };
 
         let err_sink = sink.clone();
@@ -647,8 +716,8 @@ impl WorkerProcess {
                 wait = wait.min(d - now);
             }
             let event = match &mut self.rx {
-                #[cfg(unix)]
-                Rx::Pending(stdout) => match direct::detect(stdout, wait) {
+                #[cfg(any(unix, windows))]
+                Rx::Pending(source) => match direct::detect(source, wait) {
                     direct::Detected::NotYet => continue,
                     direct::Detected::Eof => Event::Eof,
                     direct::Detected::V2(reader) => {
@@ -669,7 +738,7 @@ impl WorkerProcess {
                         continue;
                     }
                 },
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 Rx::Direct(reader) => match reader.next(wait) {
                     Ok(Some((h, body))) => classify(
                         &h,
@@ -795,15 +864,24 @@ impl Drop for WorkerProcess {
     }
 }
 
-/// The Unix direct path: a non-blocking pipe, `poll`, and an incremental frame buffer.
-#[cfg(unix)]
+/// The direct receive path: the calling thread reads v2 frames itself, waiting at most the slice
+/// it is given, so a reply costs one context switch and a half-written frame is bounded by the
+/// request's deadline.
+///
+/// - **Unix**: the child's stdout pipe, non-blocking, with `poll`.
+/// - **Windows**: anonymous pipes can be neither polled nor read with a timeout, so the child's
+///   stdout is the client end of a named pipe and the host reads the server end with overlapped
+///   I/O and a bounded wait on its event.
+#[cfg(any(unix, windows))]
 mod direct {
     use std::io::Read;
-    use std::os::fd::AsRawFd;
-    use std::process::ChildStdout;
     use std::time::Duration;
 
     use mvf_ipc::frame::{HEADER, Header};
+
+    pub(super) use sys::Source;
+    #[cfg(windows)]
+    pub(super) use sys::pipe;
 
     pub(super) enum Detected {
         NotYet,
@@ -818,73 +896,29 @@ mod direct {
     }
 
     pub(super) struct Reader {
-        stdout: ChildStdout,
+        source: Source,
         buf: Vec<u8>,
     }
 
-    fn set_nonblocking(fd: i32, on: bool) {
-        // SAFETY: plain fcntl on a descriptor we own.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            let flags = if on {
-                flags | libc::O_NONBLOCK
-            } else {
-                flags & !libc::O_NONBLOCK
-            };
-            libc::fcntl(fd, libc::F_SETFL, flags);
-        }
-    }
-
-    /// Waits up to `wait` for the fd to become readable.
-    fn readable(fd: i32, wait: Duration) -> bool {
-        let mut p = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ms = wait.as_millis().clamp(0, i32::MAX as u128) as i32;
-        // SAFETY: one valid pollfd.
-        let r = unsafe { libc::poll(&mut p, 1, ms) };
-        r > 0
-    }
-
-    /// Reads what is available. `Ok(0)` = EOF.
-    fn fill(stdout: &mut ChildStdout, buf: &mut Vec<u8>) -> std::io::Result<usize> {
-        let mut chunk = [0u8; 64 * 1024];
-        match stdout.read(&mut chunk) {
-            Ok(n) => {
-                buf.extend_from_slice(&chunk[..n]);
-                Ok(n)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(e),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Err(e),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub(super) fn detect(slot: &mut Option<ChildStdout>, wait: Duration) -> Detected {
-        let Some(stdout) = slot.as_mut() else {
+    pub(super) fn detect(slot: &mut Option<Source>, wait: Duration) -> Detected {
+        let Some(source) = slot.as_mut() else {
             return Detected::Eof;
         };
-        let fd = stdout.as_raw_fd();
-        set_nonblocking(fd, true);
-        if !readable(fd, wait) {
-            return Detected::NotYet;
-        }
+        sys::prepare(source);
         let mut buf = Vec::new();
-        match fill(stdout, &mut buf) {
-            Ok(0) => return Detected::Eof,
-            Ok(_) => {}
-            Err(_) => return Detected::NotYet,
+        match sys::fill(source, &mut buf, wait) {
+            Ok(Some(0)) => return Detected::Eof,
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return Detected::NotYet,
         }
-        let Some(stdout) = slot.take() else {
+        let Some(mut source) = slot.take() else {
             return Detected::Eof;
         };
         if buf[0] == mvf_ipc::MAGIC[0] {
-            Detected::V2(Reader { stdout, buf })
+            Detected::V2(Reader { source, buf })
         } else {
-            set_nonblocking(fd, false);
-            Detected::V1(Box::new(std::io::Cursor::new(buf).chain(stdout)))
+            sys::blocking(&mut source);
+            Detected::V1(Box::new(std::io::Cursor::new(buf).chain(source)))
         }
     }
 
@@ -898,17 +932,14 @@ mod direct {
                 if let Some(frame) = self.take()? {
                     return Ok(Some(frame));
                 }
-                if !readable(self.stdout.as_raw_fd(), wait) {
-                    return Ok(None);
-                }
-                match fill(&mut self.stdout, &mut self.buf) {
-                    Ok(0) => {
+                match sys::fill(&mut self.source, &mut self.buf, wait) {
+                    Ok(Some(0)) => {
                         return Err(ReadError::Eof {
                             inside_frame: !self.buf.is_empty(),
                         });
                     }
-                    Ok(_) => {}
-                    Err(_) => return Ok(None),
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => return Ok(None),
                 }
             }
         }
@@ -928,6 +959,309 @@ mod direct {
             let body = self.buf[HEADER..total].to_vec();
             self.buf.drain(..total);
             Ok(Some((header, body)))
+        }
+    }
+
+    #[cfg(unix)]
+    mod sys {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        use std::process::ChildStdout;
+        use std::time::Duration;
+
+        /// The child's stdout pipe.
+        pub(crate) type Source = ChildStdout;
+
+        fn set_nonblocking(fd: i32, on: bool) {
+            // SAFETY: plain fcntl on a descriptor we own.
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                let flags = if on {
+                    flags | libc::O_NONBLOCK
+                } else {
+                    flags & !libc::O_NONBLOCK
+                };
+                libc::fcntl(fd, libc::F_SETFL, flags);
+            }
+        }
+
+        /// Makes reads non-blocking (the bounded wait is `poll`).
+        pub(super) fn prepare(source: &mut Source) {
+            set_nonblocking(source.as_raw_fd(), true);
+        }
+
+        /// Back to blocking reads, for a v1 reader thread.
+        pub(super) fn blocking(source: &mut Source) {
+            set_nonblocking(source.as_raw_fd(), false);
+        }
+
+        /// Waits up to `wait` for data and appends what is available. `Ok(None)`: nothing within
+        /// `wait`; `Ok(Some(0))`: end of stream.
+        pub(super) fn fill(
+            source: &mut Source,
+            buf: &mut Vec<u8>,
+            wait: Duration,
+        ) -> std::io::Result<Option<usize>> {
+            let mut p = libc::pollfd {
+                fd: source.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ms = wait.as_millis().clamp(0, i32::MAX as u128) as i32;
+            // SAFETY: one valid pollfd.
+            if unsafe { libc::poll(&mut p, 1, ms) } <= 0 {
+                return Ok(None);
+            }
+            let mut chunk = [0u8; 64 * 1024];
+            match source.read(&mut chunk) {
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    Ok(Some(n))
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    mod sys {
+        use std::io::Read;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::Duration;
+
+        use windows_sys::Win32::Foundation::{
+            ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_WRITE, HANDLE,
+            INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE,
+            FILE_FLAG_OVERLAPPED, OPEN_EXISTING, PIPE_ACCESS_INBOUND, ReadFile,
+        };
+        use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+        use windows_sys::Win32::System::Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+            PIPE_TYPE_BYTE, PIPE_WAIT,
+        };
+        use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+
+        const CHUNK: usize = 64 * 1024;
+
+        /// The server end of the child's stdout named pipe, read with overlapped I/O. At most one
+        /// read is outstanding; its buffer and `OVERLAPPED` are heap-allocated so they never move
+        /// while the kernel may write to them, and dropping the source cancels the read and waits
+        /// for it before freeing them.
+        pub(crate) struct Source {
+            pipe: OwnedHandle,
+            _event: OwnedHandle,
+            overlapped: Box<OVERLAPPED>,
+            chunk: Box<[u8]>,
+            pending: bool,
+            /// Bytes read but not yet taken (the blocking `Read` used for v1).
+            spill: Vec<u8>,
+        }
+
+        // SAFETY: the source owns its handles and buffers exclusively; the raw pointers inside
+        // `OVERLAPPED` refer only to them.
+        unsafe impl Send for Source {}
+
+        fn wide(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+
+        /// A named pipe for a child's stdout: the overlapped server end for the host and the
+        /// synchronous client end for the child.
+        ///
+        /// The name is unique per launch and the pipe takes one instance only
+        /// (`FILE_FLAG_FIRST_PIPE_INSTANCE`, no remote clients). The host connects the client
+        /// itself before the child exists, so another process cannot take the instance unseen:
+        /// it would make this call fail instead. The default security descriptor grants write
+        /// access, which a client of an inbound pipe needs, only to the creator, LocalSystem and
+        /// administrators.
+        pub(crate) fn pipe() -> std::io::Result<(Source, OwnedHandle)> {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let name = wide(&format!(
+                r"\\.\pipe\mvf-worker-{}-{}-{nanos:x}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            // SAFETY: a NUL-terminated name; null security attributes select the default.
+            let server = unsafe {
+                CreateNamedPipeW(
+                    name.as_ptr(),
+                    PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                    1,
+                    0,
+                    CHUNK as u32,
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            if server == INVALID_HANDLE_VALUE {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: a valid handle we own from here on.
+            let server = unsafe { OwnedHandle::from_raw_handle(server) };
+            // SAFETY: as above; synchronous, not inheritable (std duplicates it for the child).
+            let client = unsafe {
+                CreateFileW(
+                    name.as_ptr(),
+                    GENERIC_WRITE,
+                    0,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    std::ptr::null_mut(),
+                )
+            };
+            if client == INVALID_HANDLE_VALUE {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: a valid handle we own from here on.
+            let client = unsafe { OwnedHandle::from_raw_handle(client) };
+            // SAFETY: an unnamed manual-reset event, initially unsignalled.
+            let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+            if event.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: a valid handle we own from here on.
+            let event = unsafe { OwnedHandle::from_raw_handle(event) };
+            let mut overlapped = Box::new(OVERLAPPED::default());
+            overlapped.hEvent = event.as_raw_handle() as HANDLE;
+            // The client is connected already, which ConnectNamedPipe confirms. Anything else
+            // means the instance is not the one we opened.
+            // SAFETY: the pipe handle and the boxed OVERLAPPED are valid.
+            let connected = unsafe { ConnectNamedPipe(server.as_raw_handle(), &mut *overlapped) };
+            let error = std::io::Error::last_os_error();
+            if connected != 0 || error.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
+                return Err(std::io::Error::other(format!(
+                    "the worker's stdout pipe did not connect as expected: {error}"
+                )));
+            }
+            Ok((
+                Source {
+                    pipe: server,
+                    _event: event,
+                    overlapped,
+                    chunk: vec![0u8; CHUNK].into_boxed_slice(),
+                    pending: false,
+                    spill: Vec::new(),
+                },
+                client,
+            ))
+        }
+
+        pub(super) fn prepare(_: &mut Source) {}
+
+        pub(super) fn blocking(_: &mut Source) {}
+
+        /// Waits up to `wait` for data and appends what is available. `Ok(None)`: nothing within
+        /// `wait` (the read stays outstanding for the next call); `Ok(Some(0))`: end of stream.
+        pub(super) fn fill(
+            source: &mut Source,
+            buf: &mut Vec<u8>,
+            wait: Duration,
+        ) -> std::io::Result<Option<usize>> {
+            let handle = source.pipe.as_raw_handle();
+            if !source.pending {
+                // SAFETY: the buffer and OVERLAPPED are heap-pinned and outlive the operation
+                // (Drop cancels and waits for an outstanding read).
+                let ok = unsafe {
+                    ReadFile(
+                        handle,
+                        source.chunk.as_mut_ptr(),
+                        source.chunk.len() as u32,
+                        std::ptr::null_mut(),
+                        &mut *source.overlapped,
+                    )
+                };
+                if ok == 0 {
+                    let e = std::io::Error::last_os_error();
+                    match e.raw_os_error() {
+                        Some(c) if c == ERROR_IO_PENDING as i32 => {}
+                        Some(c) if c == ERROR_BROKEN_PIPE as i32 => return Ok(Some(0)),
+                        _ => return Err(e),
+                    }
+                }
+                source.pending = true;
+            }
+            let ms = if wait == Duration::MAX {
+                INFINITE
+            } else {
+                wait.as_millis().min(u128::from(INFINITE - 1)) as u32
+            };
+            // SAFETY: a valid event handle.
+            match unsafe { WaitForSingleObject(source.overlapped.hEvent, ms) } {
+                WAIT_OBJECT_0 => {}
+                WAIT_TIMEOUT => return Ok(None),
+                _ => return Err(std::io::Error::last_os_error()),
+            }
+            let mut n = 0u32;
+            // SAFETY: the operation has completed (its event is signalled).
+            let ok = unsafe { GetOverlappedResult(handle, &*source.overlapped, &mut n, 0) };
+            source.pending = false;
+            if ok == 0 {
+                let e = std::io::Error::last_os_error();
+                return match e.raw_os_error() {
+                    Some(c) if c == ERROR_BROKEN_PIPE as i32 => Ok(Some(0)),
+                    _ => Err(e),
+                };
+            }
+            if n == 0 {
+                // A zero-length write by the child: not the end of the stream.
+                return Ok(None);
+            }
+            buf.extend_from_slice(&source.chunk[..n as usize]);
+            Ok(Some(n as usize))
+        }
+
+        /// Blocking reads, for a v1 reader thread.
+        impl Read for Source {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                if out.is_empty() {
+                    return Ok(0);
+                }
+                while self.spill.is_empty() {
+                    let mut spill = std::mem::take(&mut self.spill);
+                    let r = fill(self, &mut spill, Duration::MAX);
+                    self.spill = spill;
+                    if let Some(0) = r? {
+                        return Ok(0);
+                    }
+                }
+                let n = out.len().min(self.spill.len());
+                out[..n].copy_from_slice(&self.spill[..n]);
+                self.spill.drain(..n);
+                Ok(n)
+            }
+        }
+
+        impl Drop for Source {
+            fn drop(&mut self) {
+                if self.pending {
+                    let handle = self.pipe.as_raw_handle();
+                    let mut n = 0u32;
+                    // SAFETY: cancel our own outstanding read, then wait until the kernel is done
+                    // with the buffer before it is freed.
+                    unsafe {
+                        CancelIoEx(handle, &*self.overlapped);
+                        GetOverlappedResult(handle, &*self.overlapped, &mut n, 1);
+                    }
+                }
+            }
         }
     }
 }

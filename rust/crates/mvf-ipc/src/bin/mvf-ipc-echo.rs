@@ -8,7 +8,7 @@
 //! `--transport fd3` (Unix) speaks on an inherited socket at fd 3 instead of stdio. Faults (v2):
 //! `malformed`, `oversized`, `partial`, `crash-mid-frame`, `stale-generation`, `hang`,
 //! `bad-magic`, `log-flood`, `print` (writes to stdout like a stray `print()`), all on the 3rd
-//! request.
+//! request; `v1-only` ignores a v2 offer and speaks v1 throughout.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::time::{Duration, Instant};
@@ -25,8 +25,10 @@ struct Args {
 
 fn args() -> Args {
     let mut a = Args {
-        // Like the SDKs: v2 only when the engine offers it.
-        protocol: if std::env::var("MVF_PROTOCOL").as_deref() == Ok("2") {
+        // Like the SDKs: v2 only when the engine offers it, with its launch token.
+        protocol: if std::env::var("MVF_PROTOCOL").as_deref() == Ok("2")
+            && std::env::var_os("MVF_SESSION").is_some_and(|s| !s.is_empty())
+        {
             2
         } else {
             1
@@ -53,6 +55,9 @@ fn args() -> Args {
         && let Ok(f) = std::fs::read_to_string(exe.with_extension("fault"))
     {
         a.fault = Some(f.trim().to_string());
+    }
+    if a.fault.as_deref() == Some("v1-only") {
+        a.protocol = 1;
     }
     a
 }

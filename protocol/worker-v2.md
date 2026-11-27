@@ -1,7 +1,8 @@
 # MVF worker protocol v2 (control plane, #32)
 
 v2 replaces v1's JSON lines with length-prefixed binary frames on the same channel: the child's
-inherited stdio pipes. Payload bytes still never travel here, only arena offsets. v1
+inherited stdio pipes. (On Windows the host may make the child's stdout a named pipe, so it can
+read it with overlapped I/O. For the child it is an ordinary pipe handle.) Payload bytes still never travel here, only arena offsets. v1
 ([`README.md`](README.md)) stays supported: a child that does not speak v2 is served v1, and a
 host can keep every child on v1 (`MVF_PROTOCOL=1`). Reference implementations: `rust/crates/mvf-ipc`
 (framing, bodies, the fixture child) and `rust/crates/mvf-worker` (host). SDKs:

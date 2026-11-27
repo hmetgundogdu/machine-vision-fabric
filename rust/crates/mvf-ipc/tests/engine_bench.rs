@@ -2,7 +2,8 @@
 //!
 //! The v1 → v2 comparison through the real engine and worker supervisor (#32): a Rust analyzer and
 //! the Python, C++ and .NET invert transformers, each on its SDK's own v1 and v2 paths, on 8×8
-//! frames where control cost dominates. Portable, so CI measures Windows (reader-thread receive)
+//! frames where control cost dominates. v2 runs on both host receive paths: `2t` on the reader
+//! thread and `2` on the direct path (Windows: overlapped named pipe). Portable, so CI measures Windows (reader-thread receive)
 //! next to Linux and macOS. The C++ and .NET modules are used when built (see
 //! crates/mvf-worker/tests/sdks.rs); otherwise their rows say NOT RUN.
 //!
@@ -14,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use mvf_engine::*;
+use mvf_worker::process::{ReceivePath, set_receive_path};
 
 const FRAMES: u64 = 50_000;
 
@@ -187,8 +189,15 @@ fn engine_round_trips_v1_vs_v2() {
         "ready ms",
         "child cpu us/fr"
     );
+    // v1 (always a reader thread), then v2 on the reader thread (`2t`) and on the direct path (`2`).
+    let rounds = [
+        (1, ReceivePath::Thread, "1"),
+        (2, ReceivePath::Thread, "2t"),
+        (2, ReceivePath::Direct, "2"),
+    ];
     for case in &cases {
-        for protocol in [1, 2] {
+        for (protocol, path, label) in rounds {
+            set_receive_path(path);
             // A 1-frame run first: it warms caches and gives the start-up CPU to subtract.
             let start = run(case, &modules, protocol, 1);
             let m = run(case, &modules, protocol, FRAMES);
@@ -199,9 +208,10 @@ fn engine_round_trips_v1_vs_v2() {
                 .unwrap_or_else(|| "-".into());
             eprintln!(
                 "{:<20} {:>3} {:>14.1} {:>10} {:>12.0} {:>9} {:>16}",
-                case.name, protocol, m.us_per_frame, m.max_us, m.frames_per_s, m.ready_ms, cpu
+                case.name, label, m.us_per_frame, m.max_us, m.frames_per_s, m.ready_ms, cpu
             );
         }
     }
+    set_receive_path(ReceivePath::Direct);
     let _ = std::fs::remove_dir_all(&dir);
 }
