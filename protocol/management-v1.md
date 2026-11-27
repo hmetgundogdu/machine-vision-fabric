@@ -70,12 +70,15 @@ Errors are `{"op":"error","code":…,"message":…}`. The codes:
   "topology": {
     "pipeline": "inspection",
     "nodes": [{"id": "cam", "contract": "mvf.synthetic-source@1.0.0", "backend": "in-process", "parallelism": 1,
-               "inputs": [], "outputs": [{"name": "frame", "type": "frame", "channel": "data"}], "liveFields": []}],
+               "inputs": [], "outputs": [{"name": "frame", "type": "frame", "channel": "data"}], "liveFields": ["intervalMs"],
+               "live": [{"field": "intervalMs", "command": "configure", "type": "int", "shape": "one",
+                         "schema": {"minimum": 0}, "binding": "cam.interval"}]}],
     "edges": {"data": [{"from": "cam.frame", "to": "sink.frame", "type": "frame"}], "control": []}
   },
-  "nodes": {"cam": {"generation": 1, "executed": 1200, "skipped": 0, "lastSkip": null,
+  "nodes": {"cam": {"generation": 1, "executed": 1200, "skipped": 0, "failures": 0, "restarts": 0, "dropped": 0, "lastSkip": null,
                     "latencyUs": {"p50": 3.2, "p95": 5.1, "p99": 9.0, "max": 41, "mean": 3.6},
                     "window": {"executed": 98, "meanUs": 3.4, "maxUs": 12, "perSecond": 980.0}}},
+  "activity": {"cam": 1},
   "recentLogs": [], "recentEvents": [], "deferredPublications": 0
 }
 ```
@@ -86,6 +89,21 @@ Errors are `{"op":"error","code":…,"message":…}`. The codes:
   - `latencyUs` covers the whole run.
   - `window` covers the period since the previous delta (100 ms by default).
 - **`recentLogs` and `recentEvents`:** the last 50 of each.
+- **`live` (#35):** how each editable field is edited:
+  - `command` is `configure` (a module binding) or `set-value` (a `value` node);
+  - `type` is `string`, `int`, `number`, `bool` or `json`, and `shape` is `one` or `list`;
+  - `schema` (bounds, `enum` choices) and `binding` (the binding-store key that persists an
+    edit) appear when declared.
+  - The current value is never included.
+- **Per-node counters:**
+  - `failures`: failed executions the recovery policy handled (restarted, skipped, or out of
+    restarts);
+  - `restarts`;
+  - `dropped`: cycles dropped by backpressure.
+  - After a replacement or rollback, `contract` and `backend` name the now-active generation.
+- **`activity` (#35):** executions in progress per node. The engine counts them with relaxed
+  atomics, and the feed samples them every 100 ms on its own thread, so this is what was running
+  at that instant (it is never inferred from counters). After the run every node is 0.
 
 ## Stream
 
@@ -103,6 +121,8 @@ Errors are `{"op":"error","code":…,"message":…}`. The codes:
 - **One sequence for everything,** strictly increasing by 1.
 - **Entry kinds:**
   - `delta`: the nodes that changed, as absolute values, so applying a delta twice is harmless;
+  - `activity`: `{"running": {"slow": 1, "cam": 0}}`, the nodes whose count of executions in
+    progress changed, as absolute values;
   - `event`: `replacement`, `recovery` or `live`, with the engine's own record;
   - `log`;
   - `dropped`: log lines refused by the telemetry budget;
@@ -188,8 +208,16 @@ Opt-in, capped, audited and never retained.
   - at most 160 × 120 pixels, downscaled nearest-neighbour;
   - at most 256 KiB/s per viewer. A preview that does not fit the viewer's budget is skipped,
     never queued.
-- **Format:** 8-bit grey, RGB or RGBA becomes PNG, uncompressed deflate, base64-encoded. Any
-  other payload gets `"format":"none"` with a `reason`.
+- **Format:** 8-bit grey, RGB or RGBA becomes PNG, uncompressed deflate, base64-encoded.
+- **Encoded blobs (#35):** a byte blob is previewed only when its content is an image this
+  runtime decodes:
+  - **BMP** (uncompressed 8-bit palette, 24-bit, or 32-bit with standard masks), with every
+    offset bounds-checked and only the downscaled pixels sampled. It becomes a PNG preview with
+    `"encoding":"bmp"`.
+  - **PNG- and JPEG-encoded blobs** get `"format":"none"` and a reason that names them.
+  - **Any other blob** gets `"format":"none"` with "a blob without a known image signature". It is
+    never shown as raw pixels.
+- **Anything else** gets `"format":"none"` with a `reason`.
 - **Sampling:** the engine hands over a shared lease through a single-slot queue and never
   waits. The preview thread drops the lease as soon as it has downscaled.
 - **Retention and audit:** only the latest preview per node is kept in memory. Previews are not

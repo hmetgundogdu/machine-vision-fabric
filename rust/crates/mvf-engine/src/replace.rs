@@ -251,6 +251,9 @@ pub struct ReplacementEvent {
     /// Contract `id@version` of the candidate / restored generation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to_version: Option<String>,
+    /// The backend that runs the now-active generation (`promoted`, `rolled-back`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
     /// Stable code for rejections and rollbacks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<&'static str>,
@@ -355,6 +358,7 @@ impl Engine {
             to_generation,
             from_version: label(&slot.contract),
             to_version,
+            backend: None,
             code,
             message,
             preparation_ms: None,
@@ -373,6 +377,7 @@ impl Engine {
             to_generation: None,
             from_version: String::new(),
             to_version: None,
+            backend: None,
             code: Some("replace.unknown-node"),
             message: Some(message),
             preparation_ms: None,
@@ -416,7 +421,11 @@ impl Engine {
         }
     }
 
-    pub(crate) fn on_boundary(&mut self, cancel: &CancellationToken) {
+    pub(crate) fn on_boundary(
+        &mut self,
+        cancel: &CancellationToken,
+        observer: &mut dyn crate::executor::Observer,
+    ) {
         for command in std::mem::take(&mut self.stashed) {
             self.handle_command(command, cancel);
         }
@@ -424,7 +433,7 @@ impl Engine {
             self.handle_command(command, cancel);
         }
         self.poll_candidates(cancel);
-        self.wait_while_paused(cancel);
+        self.wait_while_paused(cancel, observer);
         self.poll_candidates(cancel);
     }
 
@@ -792,6 +801,7 @@ impl Engine {
             to_generation: Some(pending.generation),
             from_version: label(&previous_contract),
             to_version: Some(label(&request.contract)),
+            backend: Some(slot.stats.backend.clone()),
             code: None,
             message: None,
             preparation_ms: Some(preparation.as_secs_f64() * 1e3),
@@ -836,6 +846,7 @@ impl Engine {
             to_generation: Some(generation),
             from_version: label(&failed_contract),
             to_version: Some(restored),
+            backend: Some(slot.stats.backend.clone()),
             code: Some(code),
             message: Some(match handover {
                 Some(e) => format!("{message}; endpoint handover back failed: {e}"),

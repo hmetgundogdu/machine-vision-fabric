@@ -20,6 +20,29 @@ pub struct PortView {
     pub channel: String,
 }
 
+/// A field an operator may edit live, and how (#35). The type, schema and binding key are
+/// declared in the pipeline; the current value is not included (config values never leave the
+/// runtime through management).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveField {
+    /// Config field (`frameIntervalMs`), or `value` for a `value` node.
+    pub field: String,
+    /// The command that edits it: `configure` (module binding) or `set-value` (`value` node).
+    pub command: String,
+    /// Element type: `string`, `int`, `number`, `bool` or `json`.
+    #[serde(rename = "type")]
+    pub elem: String,
+    /// `one` or `list` (`value` nodes).
+    pub shape: String,
+    /// JSON Schema (bounds, `enum` choices), when declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<Value>,
+    /// Binding-store key: an edit is persisted there (otherwise it lasts for this run only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
+}
+
 /// A node in the topology. Config values are deliberately absent: they may hold credentials, and
 /// management is not a configuration dump.
 #[derive(Debug, Clone, Serialize)]
@@ -43,6 +66,42 @@ pub struct NodeTopology {
     /// Config fields that can be edited live (names only).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub live_fields: Vec<String>,
+    /// How each live-editable field is edited (type, schema, binding).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub live: Vec<LiveField>,
+}
+
+fn token(v: impl Serialize) -> String {
+    serde_json::to_value(v)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn live_fields(n: &mvf_graph::GraphNode) -> Vec<LiveField> {
+    let mut out: Vec<LiveField> = n
+        .bindings
+        .iter()
+        .map(|(field, b)| LiveField {
+            field: field.clone(),
+            command: "configure".into(),
+            elem: token(b.elem),
+            shape: "one".into(),
+            schema: b.schema.clone(),
+            binding: Some(b.binding.clone()),
+        })
+        .collect();
+    if let Some(mvf_graph::PrimitiveSpec::Value(v)) = &n.primitive {
+        out.push(LiveField {
+            field: "value".into(),
+            command: "set-value".into(),
+            elem: token(v.elem),
+            shape: token(v.shape),
+            schema: v.schema.clone(),
+            binding: v.binding.clone(),
+        });
+    }
+    out
 }
 
 /// The graph as a client sees it.
@@ -91,6 +150,7 @@ impl Topology {
                 inputs: n.contract.spec.ports.inputs.iter().map(port).collect(),
                 outputs: n.contract.spec.ports.outputs.iter().map(port).collect(),
                 live_fields: n.bindings.keys().cloned().collect(),
+                live: live_fields(n),
             })
             .collect();
         let edge = |e: &mvf_graph::Edge| {

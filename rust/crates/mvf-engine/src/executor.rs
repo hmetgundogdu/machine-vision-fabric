@@ -64,6 +64,23 @@ pub enum NodeOutcome {
 
 /// Receives execution events. All methods default to no-ops.
 pub trait Observer {
+    /// `node` starts working in `cycle`: its inputs are ready and it is about to activate (if it is
+    /// on-demand) and execute. With [`Observer::node`] it brackets the work, so an observer can
+    /// show which nodes run right now (a TUI, #35) without guessing from counters. The serial
+    /// executor always reports it; the pipelined one only when [`Observer::wants_activity`] says so.
+    fn node_started(&mut self, cycle: u64, node: &str) {
+        let _ = (cycle, node);
+    }
+    /// Whether the pipelined executor should report [`Observer::node_started`] for nodes on stage
+    /// threads (one more event per execution through the driver). Asked once per run segment.
+    fn wants_activity(&self) -> bool {
+        false
+    }
+    /// `node` started in `cycle` but ended without an outcome: a source ran dry, or the run is
+    /// ending. Balances [`Observer::node_started`], so "running now" never leaks.
+    fn node_stopped(&mut self, cycle: u64, node: &str) {
+        let _ = (cycle, node);
+    }
     /// A node finished (or was skipped) in `cycle`.
     fn node(&mut self, cycle: u64, node: &str, generation: u64, outcome: &NodeOutcome) {
         let _ = (cycle, node, generation, outcome);
@@ -314,6 +331,8 @@ pub struct Engine {
     pub(crate) iteration: IterationReport,
     /// Whole-graph pause (only with a `loop`), with an optional automatic resume.
     pub(crate) paused: Option<Option<Instant>>,
+    /// The node the serial executor started last (for [`Observer::node_stopped`]).
+    pub(crate) in_flight: Option<usize>,
     /// (startup ms, cycle loop ms) of the last run.
     timings: (f64, f64),
     /// How many replacement, recovery and live events observers have been given.
@@ -441,6 +460,7 @@ impl Engine {
             stashed: Vec::new(),
             iteration,
             paused: None,
+            in_flight: None,
             timings: (0.0, 0.0),
             observed: [0; 3],
         })
@@ -537,9 +557,11 @@ impl Engine {
                 let end = if options.pipelined {
                     self.run_cycles_pipelined(options, observer)
                 } else {
-                    self.run_cycles(options, observer, &mut |e: &mut Engine| {
-                        e.on_boundary(&cancel)
-                    })
+                    self.run_cycles(
+                        options,
+                        observer,
+                        &mut |e: &mut Engine, o: &mut dyn Observer| e.on_boundary(&cancel, o),
+                    )
                 };
                 self.timings.1 = t0.elapsed().as_secs_f64() * 1e3;
                 end
@@ -602,13 +624,13 @@ impl Engine {
         &mut self,
         options: &RunOptions,
         observer: &mut dyn Observer,
-        boundary: &mut dyn FnMut(&mut Engine),
+        boundary: &mut dyn FnMut(&mut Engine, &mut dyn Observer),
     ) -> EndReason {
         let limit = options.max_cycles.or(self.graph.max_cycles);
         let loop_spec = self.graph.loop_spec;
         let mut produced_since_rewind = false;
         loop {
-            boundary(self);
+            boundary(self, observer);
             self.flush_events(observer);
             if options.cancel.is_cancelled() {
                 return EndReason::Cancelled;
@@ -649,6 +671,22 @@ impl Engine {
 
     /// Executes one cycle. Returns `Some(end)` when the run must end.
     pub(crate) fn run_cycle(
+        &mut self,
+        cycle: u64,
+        cancel: &CancellationToken,
+        observer: &mut dyn Observer,
+    ) -> Option<EndReason> {
+        let end = self.run_cycle_nodes(cycle, cancel, observer);
+        // Every early end happens while a node is being processed: that node stopped.
+        if let Some(i) = self.in_flight.take()
+            && end.is_some()
+        {
+            observer.node_stopped(cycle, &self.slots[i].id);
+        }
+        end
+    }
+
+    fn run_cycle_nodes(
         &mut self,
         cycle: u64,
         cancel: &CancellationToken,
@@ -702,6 +740,8 @@ impl Engine {
                 continue;
             }
 
+            observer.node_started(cycle, &self.slots[i].id);
+            self.in_flight = Some(i);
             let is_source = self.graph.nodes[i].is_source();
             let mut attempts = 0u32;
             // On-demand: started the first time it has what it needs to run.

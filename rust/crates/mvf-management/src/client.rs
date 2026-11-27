@@ -13,6 +13,7 @@ pub struct Client {
     reader: BufReader<Box<dyn Conn>>,
     writer: Box<dyn Conn>,
     runtime: Value,
+    hello: Value,
 }
 
 impl std::fmt::Debug for Client {
@@ -41,18 +42,25 @@ impl Client {
             reader: BufReader::new(conn),
             writer,
             runtime: Value::Null,
+            hello: Value::Null,
         };
         let reply = client.request(&json!({"op": "hello", "api": [API], "client": name}))?;
         if reply["op"] != "hello" {
             return Err(refused(&reply));
         }
         client.runtime = reply["runtime"].clone();
+        client.hello = reply;
         Ok(client)
     }
 
     /// The runtime's identity from `hello`.
     pub fn runtime(&self) -> &Value {
         &self.runtime
+    }
+
+    /// The whole `hello` reply: runtime, principal, role and features.
+    pub fn hello(&self) -> &Value {
+        &self.hello
     }
 
     fn read(&mut self) -> std::io::Result<Value> {

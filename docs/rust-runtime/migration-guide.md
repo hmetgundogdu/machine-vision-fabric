@@ -73,7 +73,7 @@ What the importer does, and refuses:
 | `execute-graph --package P --max-cycles N` | `mvf run P/pipeline.yaml --max-cycles N` |
 | `--integrations-root modules` | `--modules modules` (default: the nearest `modules/` above the package) |
 | `validate-pipeline --path P/pipeline.json` | `mvf validate P/pipeline.yaml` |
-| live TUI dashboard | `mvf run … --manage`, then `mvf manage watch` / `status` / `preview` |
+| live TUI dashboard | `mvf run … --tui`, or `mvf run … --manage` and `mvf manage tui` ([TUI guide](tui.md)) |
 | `modules`, `packages` | `mvf host` (builtins and backends) |
 | stage-parallel run | `mvf run … --mode pipelined` |
 
@@ -109,10 +109,11 @@ soak period before switching.
 
 ## Known differences
 
-- **No interactive TUI or prompts in `mvf`.** Observation and commands go through
-  `--manage` (local, authenticated) and optionally `mvf-remote` (mutual TLS).
-- **Live edits** come from an update plan (`--updates`) or `mvf manage command`, not from
-  keystrokes.
+- **The TUI is a management client** ([tui.md](tui.md)). It is the legacy dashboard's picture,
+  but it never shows config values, and worker CPU/memory is not in it yet. `mvf` never
+  prompts: missing bindings come from the store or the environment.
+- **Live edits** come from the TUI's editable fields, an update plan (`--updates`), or
+  `mvf manage command`.
 - **Realtime egress is not ported.** `--egress tcp|ws|udp` on the .NET CLI (live state and frame
   data to external viewers) has no Rust equivalent. The management feed and previews cover
   observation, not frame-data publishing. A line that depends on egress stays on the legacy

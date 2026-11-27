@@ -963,3 +963,260 @@ fn import_converts_a_legacy_package_and_names_what_it_cannot_carry_over() {
         assert!(!dir.join("pipeline.yaml").exists());
     }
 }
+
+const TUI_PIPELINE: &str = "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: { name: tui-smoke }\nspec:\n  nodes:\n    - { id: cycle, primitive: loop, config: { mode: forever } }\n    - { id: cam, builtin: synthetic-source, config: { width: 8, height: 8, frames: 50, intervalMs: 5 } }\n    - { id: sink, builtin: record }\n  edges:\n    data:\n      - { from: cam.frame, to: sink.frame }\n    loop:\n      - { from: sink, to: cycle }\n";
+
+/// `mvf manage tui` and `mvf run --tui` without a terminal (#35): refused, never a broken screen.
+#[test]
+fn the_tui_refuses_a_terminal_that_is_not_interactive() {
+    let dir = std::env::temp_dir().join(format!("mvf-cli-tui-nontty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(dir.join("p.yaml"), TUI_PIPELINE).expect("pipeline");
+    for args in [vec!["manage", "tui"], vec!["run", "--tui", "p.yaml"]] {
+        let out = mvf()
+            .args(&args)
+            .current_dir(&dir)
+            .env("MVF_RUNTIME_DIR", dir.join("run"))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("mvf");
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("interactive terminal") && err.contains("manage watch"),
+            "{err}"
+        );
+    }
+}
+
+/// Runs `command` in a pseudo-terminal (120x36) through `script`, typing `keys` (after a delay
+/// in ms each), and returns the exit status and everything the terminal received.
+#[cfg(unix)]
+fn in_terminal(
+    command: &str,
+    keys: &[(u64, &str)],
+    runtime: &std::path::Path,
+    out: &std::path::Path,
+) -> Option<(std::process::ExitStatus, Vec<u8>)> {
+    use std::io::Write;
+    let shell = format!("stty cols 120 rows 36; exec {command}");
+    let mut c = Command::new("script");
+    if cfg!(target_os = "macos") {
+        c.arg("-q").arg(out).args(["sh", "-c", &shell]);
+    } else {
+        c.args(["-q", "-e", "-c", &shell]).arg(out);
+    }
+    let mut child = c
+        .env("MVF_RUNTIME_DIR", runtime)
+        .env("TERM", "xterm-256color")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take()?;
+    for (ms, k) in keys {
+        std::thread::sleep(std::time::Duration::from_millis(*ms));
+        stdin.write_all(k.as_bytes()).ok()?;
+        stdin.flush().ok()?;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(s) = child.try_wait().ok()? {
+            break s;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("`{command}` did not exit in the terminal");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    drop(stdin);
+    Some((status, std::fs::read(out).ok()?))
+}
+
+/// The TUI in a real (pseudo-)terminal (#35): it draws the graph, help and node details, leaves
+/// the terminal as it found it, and detaching never touches the runtime. `run --tui`: `q` stops the
+/// run, and the report follows the restored screen.
+#[cfg(unix)]
+#[test]
+fn the_tui_draws_in_a_real_terminal_and_detaches_without_touching_the_runtime() {
+    if Command::new("script").arg("-V").output().is_err()
+        && Command::new("which")
+            .arg("script")
+            .output()
+            .map_or(true, |o| !o.status.success())
+    {
+        eprintln!("skipped: no `script` to make a pseudo-terminal");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("mvf-cli-tui-pty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(dir.join("p.yaml"), TUI_PIPELINE).expect("pipeline");
+    let runtime = dir.join("run");
+    let mvf_path = env!("CARGO_BIN_EXE_mvf");
+    let mut run = mvf()
+        .args(["run", "--manage", "p.yaml"])
+        .current_dir(&dir)
+        .env("MVF_RUNTIME_DIR", &runtime)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("run");
+    let status = |runtime: &std::path::Path| -> Option<serde_json::Value> {
+        let out = mvf()
+            .args(["manage", "status", "--json"])
+            .env("MVF_RUNTIME_DIR", runtime)
+            .output()
+            .ok()?;
+        serde_json::from_slice(&out.stdout).ok()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while status(&runtime).is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the runtime never came up"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // help, close it, next node, details, back, quit
+    let keys = [
+        (1500, "?"),
+        (400, "x"),
+        (300, "\x1b[C"),
+        (300, "\r"),
+        (600, "\x1b"),
+        (400, "q"),
+    ];
+    let (exit, screen) = in_terminal(
+        &format!("'{mvf_path}' manage tui"),
+        &keys,
+        &runtime,
+        &dir.join("tui.out"),
+    )
+    .expect("script");
+    assert!(exit.success(), "{exit:?}");
+    let text = String::from_utf8_lossy(&screen);
+    for want in [
+        "tui-smoke",
+        "RUNNING",
+        "cam",
+        "sink",
+        "keys",
+        "# NODE",
+        "\x1b[?1049h",
+        "\x1b[?1049l",
+    ] {
+        assert!(
+            text.contains(want),
+            "missing {want:?} in the terminal output"
+        );
+    }
+    assert!(
+        text.rfind("\x1b[?1049l") > text.find("\x1b[?1049h"),
+        "the alternate screen is left at the end"
+    );
+    // The runtime did not notice: still running, still counting.
+    let a = status(&runtime).expect("status")["cycle"]
+        .as_u64()
+        .unwrap_or(0);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let b = status(&runtime).expect("status");
+    assert_eq!(b["status"], "running");
+    assert!(b["cycle"].as_u64().unwrap_or(0) > a);
+    assert!(
+        mvf()
+            .args(["manage", "command", "stop", "--id", "tui-smoke-stop"])
+            .env("MVF_RUNTIME_DIR", &runtime)
+            .status()
+            .expect("stop")
+            .success()
+    );
+    assert!(run.wait().expect("wait").success());
+
+    // `run --tui`: q stops the run; the report comes after the restored screen.
+    let (exit, screen) = in_terminal(
+        &format!("'{mvf_path}' run --tui '{}'", dir.join("p.yaml").display()),
+        &[(2000, "q")],
+        &dir.join("run2"),
+        &dir.join("run.out"),
+    )
+    .expect("script");
+    assert!(exit.success(), "{exit:?}");
+    let text = String::from_utf8_lossy(&screen);
+    let left = text
+        .rfind("\x1b[?1049l")
+        .expect("left the alternate screen");
+    assert!(
+        text[left..].contains("cancelled"),
+        "the report follows the dashboard"
+    );
+}
+
+/// `mvf manage tui --print` (#35): one frame of the dashboard as text, through the same feed,
+/// model, layout and drawing as the TUI. Runs on every platform, Windows included (named pipe, no
+/// terminal needed).
+#[test]
+fn manage_tui_print_renders_a_running_pipeline_without_a_terminal() {
+    let dir = std::env::temp_dir().join(format!("mvf-cli-tui-print-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(dir.join("p.yaml"), TUI_PIPELINE).expect("pipeline");
+    let runtime = dir.join("run");
+    let mut run = mvf()
+        .args(["run", "--manage", "p.yaml"])
+        .current_dir(&dir)
+        .env("MVF_RUNTIME_DIR", &runtime)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("run");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let screen = loop {
+        let out = mvf()
+            .args(["manage", "tui", "--print", "120x30"])
+            .env("MVF_RUNTIME_DIR", &runtime)
+            .output()
+            .expect("print");
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        if out.status.success() && text.contains("RUNNING") {
+            break text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    for want in [
+        "MVF",
+        "tui-smoke",
+        "cam",
+        "sink",
+        "cycle",
+        "-frame",
+        "enter details",
+    ] {
+        assert!(screen.contains(want), "missing {want:?}:\n{screen}");
+    }
+    assert!(screen.is_ascii(), "{screen}");
+    assert!(screen.lines().all(|l| l.len() <= 120));
+    let bad = mvf()
+        .args(["manage", "tui", "--print", "wide"])
+        .env("MVF_RUNTIME_DIR", &runtime)
+        .output()
+        .expect("print");
+    assert!(!bad.status.success());
+    assert!(
+        mvf()
+            .args(["manage", "command", "stop", "--id", "print-stop"])
+            .env("MVF_RUNTIME_DIR", &runtime)
+            .status()
+            .expect("stop")
+            .success()
+    );
+    assert!(run.wait().expect("wait").success());
+}

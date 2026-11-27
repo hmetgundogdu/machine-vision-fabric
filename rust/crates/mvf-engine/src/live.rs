@@ -383,8 +383,17 @@ impl Engine {
 
     /// Idles at the boundary while paused: no node runs and no cycle is counted, the process stays
     /// alive and nodes stay warm. Commands keep being served (resume, edits). Pause is not cancel.
-    pub(crate) fn wait_while_paused(&mut self, cancel: &CancellationToken) {
+    /// Events are handed to `observer` as they happen (the pause itself, edits while paused), so a
+    /// management client sees the graph paused while it is.
+    pub(crate) fn wait_while_paused(
+        &mut self,
+        cancel: &CancellationToken,
+        observer: &mut dyn crate::executor::Observer,
+    ) {
         let started = Instant::now();
+        if self.paused.is_some() {
+            self.flush_events(observer);
+        }
         while let Some(until) = self.paused {
             if cancel.is_cancelled() {
                 break;
@@ -394,7 +403,10 @@ impl Engine {
                 break;
             }
             match self.control_rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(command) => self.handle_command(command, cancel),
+                Ok(command) => {
+                    self.handle_command(command, cancel);
+                    self.flush_events(observer);
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }

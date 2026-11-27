@@ -87,6 +87,11 @@ fn abort(abort_at: &AtomicU64, end: &EndReason) {
 
 /// Events stages send to the driver (unbounded: a stage never blocks on reporting).
 enum StageEvent {
+    /// A stage node starts working (only when the observer wants activity).
+    Started {
+        cycle: u64,
+        node: usize,
+    },
     Node {
         cycle: u64,
         node: usize,
@@ -146,7 +151,7 @@ impl Engine {
         }
         let mut produced_since_rewind = false;
         loop {
-            self.on_boundary(&options.cancel);
+            self.on_boundary(&options.cancel, observer);
             self.flush_events(observer);
             if options.cancel.is_cancelled() {
                 return EndReason::Cancelled;
@@ -297,6 +302,7 @@ impl Engine {
         let taps: Vec<AtomicBool> = (0..graph.nodes.len())
             .map(|_| AtomicBool::new(false))
             .collect();
+        let activity = observer.wants_activity();
         let every = self.checkpoint.every;
         let loop_spec = graph.loop_spec;
         let ctx = RecoveryCtx {
@@ -353,10 +359,12 @@ impl Engine {
                     if slot.replicas.is_empty() {
                         run_stage(
                             i, node, slot, inbound, out, ctx, cancel, &events, abort_at, tap,
+                            activity,
                         )
                     } else {
                         run_parallel_stage(
                             i, node, slot, inbound, out, ctx, cancel, &events, abort_at, tap,
+                            activity,
                         )
                     }
                 }));
@@ -368,6 +376,9 @@ impl Engine {
                            done: &mut BTreeMap<u64, u64>,
                            fatal: &mut Option<EndReason>,
                            observer: &mut dyn Observer| match ev {
+                StageEvent::Started { cycle, node } => {
+                    observer.node_started(cycle, &nodes[node].id)
+                }
                 StageEvent::Node {
                     cycle,
                     node,
@@ -594,6 +605,7 @@ fn drive(
     live: &mut Vec<crate::live::LiveEvent>,
 ) -> Driven {
     let inputs = Inputs::new();
+    observer.node_started(cycle, &slot.id);
     match execute_slot(slot, node, cycle, &inputs, ctx, cancel, log, Some(live)) {
         Executed::Outputs(outputs, duration) => {
             if observer.wants_outputs(&slot.id) {
@@ -619,8 +631,14 @@ fn drive(
             );
             Driven::Skipped
         }
-        Executed::Exhausted => Driven::Exhausted,
-        Executed::End(end) => Driven::End(end),
+        Executed::Exhausted => {
+            observer.node_stopped(cycle, &slot.id);
+            Driven::Exhausted
+        }
+        Executed::End(end) => {
+            observer.node_stopped(cycle, &slot.id);
+            Driven::End(end)
+        }
     }
 }
 
@@ -855,6 +873,7 @@ fn run_stage(
     events: &Sender<StageEvent>,
     abort_at: &AtomicU64,
     tap: &AtomicBool,
+    activity: bool,
 ) -> StageReport {
     let mut report = StageReport::default();
     let empty = BTreeMap::new();
@@ -883,6 +902,9 @@ fn run_stage(
                 NodeOutcome::Skipped(reason)
             }
             Ok(inputs) => {
+                if activity {
+                    let _ = events.send(StageEvent::Started { cycle, node: index });
+                }
                 match execute_slot(
                     slot,
                     node,
@@ -943,6 +965,7 @@ fn run_parallel_stage(
     events: &Sender<StageEvent>,
     abort_at: &AtomicU64,
     tap: &AtomicBool,
+    activity: bool,
 ) -> StageReport {
     type Work = (u64, Inputs);
     type Done = (
@@ -974,6 +997,9 @@ fn run_parallel_stage(
                     let Some((cycle, inputs)) = next else {
                         break;
                     };
+                    if activity {
+                        let _ = events.send(StageEvent::Started { cycle, node: index });
+                    }
                     let mut log = Vec::new();
                     let (result, restarts) =
                         meta.execute(&mut handle, node, cycle, &inputs, ctx, cancel, &mut log);

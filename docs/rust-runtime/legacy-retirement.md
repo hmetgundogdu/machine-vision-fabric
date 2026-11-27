@@ -52,7 +52,8 @@ PARITY PASS
   v1.1.0 legacy CLI until it is.
 - **.NET in-process integrations** (Cognex camera, dark-frame filter, black-screen check,
   synthetic camera) need a `Mvf.Worker` port. `mvf import` names them.
-- **No TUI or interactive prompts.** Observation goes through `mvf run --manage` and `mvf manage`.
+- **No interactive prompts.** The TUI is back as a management client (`mvf run --tui`,
+  `mvf manage tui`, #35). It shows no config values and no worker CPU/memory yet.
 - **Blocked on hardware:** #26 (Linux + GPU host) and #27 (Windows OCI).
 - **Rotary validation** on edge hardware (parity, performance, shadow, soak, recovery, rollback)
   is the maintainer's real-pipeline migration, in progress. The v1.1.0 legacy CLI is its

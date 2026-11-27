@@ -81,6 +81,17 @@ struct State {
     nodes: BTreeMap<String, Value>,
     recent_logs: VecDeque<Value>,
     recent_events: VecDeque<Value>,
+    /// Executions in progress per node, as last sampled (only nodes that ever ran).
+    activity: BTreeMap<String, u32>,
+}
+
+/// Executions in progress per node (#35). The engine thread counts with relaxed atomics; the
+/// feed's sampler reads them every `publish_every`, off the hot path, so "this node is running"
+/// is what was running at that instant, whatever the engine was doing then.
+#[derive(Debug)]
+pub struct Activity {
+    ids: Vec<String>,
+    running: Vec<std::sync::atomic::AtomicU32>,
 }
 
 #[derive(Debug)]
@@ -155,6 +166,75 @@ impl Feed {
     fn lock(&self) -> MutexGuard<'_, Shared> {
         // A panicking reader must not take observation down with it.
         self.shared.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Starts sampling `activity` (the [`Tap`] does this). The sampler stops by itself once the
+    /// feed or the activity is gone.
+    fn watch(self: &Arc<Self>, activity: &Arc<Activity>) {
+        let (feed, act) = (Arc::downgrade(self), Arc::downgrade(activity));
+        let every = self.config.publish_every;
+        let _ = std::thread::Builder::new()
+            .name("mvf-activity".into())
+            .spawn(move || {
+                let mut last: Vec<u32> = Vec::new();
+                loop {
+                    std::thread::sleep(every);
+                    let (Some(feed), Some(act)) = (feed.upgrade(), act.upgrade()) else {
+                        return;
+                    };
+                    let now: Vec<u32> = act
+                        .running
+                        .iter()
+                        .map(|a| a.load(Ordering::Relaxed))
+                        .collect();
+                    if last.len() != now.len() {
+                        last = vec![0; now.len()];
+                    }
+                    let changes: Vec<(String, u32)> = act
+                        .ids
+                        .iter()
+                        .zip(now.iter().zip(&last))
+                        .filter(|(_, (n, l))| n != l)
+                        .map(|(id, (n, _))| (id.clone(), *n))
+                        .collect();
+                    if !changes.is_empty() {
+                        feed.publish_activity(&changes);
+                    }
+                    last = now;
+                }
+            });
+    }
+
+    /// Marks every node idle (the run is over), publishing only what changes.
+    fn clear_activity(&self) {
+        let busy: Vec<(String, u32)> = self
+            .lock()
+            .state
+            .activity
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(id, _)| (id.clone(), 0))
+            .collect();
+        if !busy.is_empty() {
+            self.publish_activity(&busy);
+        }
+    }
+
+    /// Publishes changed activity counts (a feed thread, never the engine's).
+    fn publish_activity(&self, changes: &[(String, u32)]) {
+        let mut s = self.lock();
+        let mut map = serde_json::Map::new();
+        for (id, n) in changes {
+            s.state.activity.insert(id.clone(), *n);
+            map.insert(id.clone(), json!(n));
+        }
+        let at = self.at_ms();
+        self.push(
+            &mut s,
+            json!({"kind": "activity", "atMs": at, "running": map}),
+        );
+        drop(s);
+        self.changed.notify_all();
     }
 
     /// Sets the topology (before the run starts).
@@ -322,6 +402,7 @@ impl Feed {
             "nodes": s.state.nodes,
             "recentLogs": s.state.recent_logs,
             "recentEvents": s.state.recent_events,
+            "activity": s.state.activity,
             "deferredPublications": self.deferred(),
         });
         (s.last, snapshot)
@@ -388,6 +469,14 @@ struct NodeAcc {
     generation: u64,
     executed: u64,
     skipped: u64,
+    /// Failed executions the recovery policy handled (restarted, skipped, or out of restarts).
+    failures: u64,
+    restarts: u64,
+    /// Cycles dropped by backpressure.
+    dropped: u64,
+    /// The active contract and backend once a replacement or rollback changed them.
+    contract: Option<String>,
+    backend: Option<String>,
     last_skip: Option<Value>,
     latency: Histogram,
     total_us: u64,
@@ -411,6 +500,7 @@ pub struct Tap {
     cycle: u64,
     last_publish: Instant,
     window_started: Instant,
+    activity: Arc<Activity>,
 }
 
 impl Tap {
@@ -420,7 +510,16 @@ impl Tap {
             .into_iter()
             .map(|id| (id, NodeAcc::default()))
             .collect();
+        let activity = Arc::new(Activity {
+            ids: nodes.iter().map(|(id, _)| id.clone()).collect(),
+            running: nodes
+                .iter()
+                .map(|_| std::sync::atomic::AtomicU32::new(0))
+                .collect(),
+        });
+        feed.watch(&activity);
         Self {
+            activity,
             index: nodes
                 .iter()
                 .enumerate()
@@ -439,10 +538,13 @@ impl Tap {
     }
 
     fn view(acc: &NodeAcc, window_s: f64) -> Value {
-        json!({
+        let mut v = json!({
             "generation": acc.generation,
             "executed": acc.executed,
             "skipped": acc.skipped,
+            "failures": acc.failures,
+            "restarts": acc.restarts,
+            "dropped": acc.dropped,
             "lastSkip": acc.last_skip,
             "latencyUs": {
                 "p50": acc.latency.quantile(0.5),
@@ -457,7 +559,14 @@ impl Tap {
                 "maxUs": acc.window_max_us,
                 "perSecond": if window_s > 0.0 { acc.window_executed as f64 / window_s } else { 0.0 },
             },
-        })
+        });
+        if let Some(c) = &acc.contract {
+            v["contract"] = json!(c);
+        }
+        if let Some(b) = &acc.backend {
+            v["backend"] = json!(b);
+        }
+        v
     }
 
     fn publish(&mut self, force: bool) {
@@ -496,6 +605,11 @@ impl Tap {
     /// the lock: the run has ended, nothing is on the hot path any more.
     pub fn finish(&mut self, report: &RunReport) {
         let window_s = self.window_started.elapsed().as_secs_f64();
+        // Nothing runs any more; say so before the final status, whatever was sampled last.
+        for a in &self.activity.running {
+            a.store(0, Ordering::Relaxed);
+        }
+        self.feed.clear_activity();
         for stats in &report.nodes {
             if let Some(&i) = self.index.get(&stats.id) {
                 let a = &mut self.nodes[i].1;
@@ -538,11 +652,36 @@ impl Tap {
 }
 
 impl Observer for Tap {
+    fn wants_activity(&self) -> bool {
+        true
+    }
+
+    fn node_started(&mut self, cycle: u64, node: &str) {
+        let _ = cycle;
+        if let Some(&i) = self.index.get(node) {
+            self.activity.running[i].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn node_stopped(&mut self, cycle: u64, node: &str) {
+        let _ = cycle;
+        if let Some(&i) = self.index.get(node) {
+            let _ =
+                self.activity.running[i].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(1))
+                });
+        }
+    }
+
     fn node(&mut self, cycle: u64, node: &str, generation: u64, outcome: &NodeOutcome) {
         let _ = cycle;
         let Some(&i) = self.index.get(node) else {
             return;
         };
+        // A node skipped before it started was never counted: never below zero.
+        let _ = self.activity.running[i].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(1))
+        });
         let a = &mut self.nodes[i].1;
         a.generation = generation;
         a.dirty = true;
@@ -569,6 +708,35 @@ impl Observer for Tap {
     }
 
     fn events(&mut self, events: &EngineEvents<'_>) {
+        use mvf_engine::{RecoveryKind as R, ReplacementEventKind as K};
+        for e in events.replacements {
+            if matches!(e.kind, K::Promoted | K::RolledBack)
+                && let Some(&i) = self.index.get(&e.node)
+            {
+                let a = &mut self.nodes[i].1;
+                a.contract = e.to_version.clone();
+                a.backend = e.backend.clone();
+                if let Some(g) = e.to_generation {
+                    a.generation = g;
+                }
+                a.dirty = true;
+            }
+        }
+        for e in events.recoveries {
+            if let Some(&i) = e.node.as_deref().and_then(|n| self.index.get(n)) {
+                let a = &mut self.nodes[i].1;
+                match e.kind {
+                    R::Restarted => {
+                        a.failures += 1;
+                        a.restarts += 1;
+                    }
+                    R::Skipped | R::RestartFailed | R::RestartsExhausted => a.failures += 1,
+                    R::Dropped => a.dropped += 1,
+                    _ => {}
+                }
+                a.dirty = true;
+            }
+        }
         for e in events.replacements {
             self.pending
                 .push(json!({"kind": "event", "event": "replacement", "detail": e}));
@@ -631,6 +799,20 @@ impl<'a, A: Observer + ?Sized, B: Observer + ?Sized> Tee<'a, A, B> {
 }
 
 impl<A: Observer + ?Sized, B: Observer + ?Sized> Observer for Tee<'_, A, B> {
+    fn wants_activity(&self) -> bool {
+        self.a.wants_activity() || self.b.wants_activity()
+    }
+
+    fn node_started(&mut self, cycle: u64, node: &str) {
+        self.a.node_started(cycle, node);
+        self.b.node_started(cycle, node);
+    }
+
+    fn node_stopped(&mut self, cycle: u64, node: &str) {
+        self.a.node_stopped(cycle, node);
+        self.b.node_stopped(cycle, node);
+    }
+
     fn node(&mut self, cycle: u64, node: &str, generation: u64, outcome: &NodeOutcome) {
         self.a.node(cycle, node, generation, outcome);
         self.b.node(cycle, node, generation, outcome);

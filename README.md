@@ -97,12 +97,16 @@ mvf run rust/examples/loop-demo/pipeline.yaml --max-cycles 50
 mvf run rust/examples/inspection-demo/pipeline.yaml --max-cycles 100 --mode pipelined
 ```
 
-Observe a running pipeline:
+Watch it in the terminal dashboard ([TUI guide](docs/rust-runtime/tui.md)):
+- the live graph and the node that is running;
+- node details, logs and events;
+- live edits, pause and previews.
 
 ```bash
-mvf run rust/examples/inspection-demo/pipeline.yaml --manage --preview cam
-mvf manage watch            # live node stats and events, from another terminal
-mvf manage preview --node cam --count 3 --out shots
+mvf run rust/examples/inspection-demo/pipeline.yaml --tui                  # q stops the run
+mvf run rust/examples/inspection-demo/pipeline.yaml --manage --preview cam # or headless,
+mvf manage tui                                                             # and attach (q detaches)
+mvf manage watch                                                           # plain text / JSON for scripts
 ```
 
 ### Example pipelines (hardware-free)
@@ -250,7 +254,7 @@ The steps, the command mapping and the rollback are in the
 
 ## Documentation
 
-- [Runtime overview and decision records](docs/rust-runtime/README.md)
+- [Runtime overview and decision records](docs/rust-runtime/README.md) · [TUI](docs/rust-runtime/tui.md)
 - [Node contract](docs/rust-runtime/node-contract.md) · [Graph primitives](docs/rust-runtime/graph-primitives.md)
 - [Worker protocol v2](protocol/worker-v2.md) · [Management protocol](protocol/management-v1.md)
 - [Migration from the legacy runtime](docs/rust-runtime/migration-guide.md) · [Retirement inventory](docs/rust-runtime/legacy-retirement.md)

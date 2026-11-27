@@ -13,6 +13,21 @@ use serde_json::Value;
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum ManageCommand {
+    /// The interactive dashboard (#35):
+    /// - the live graph of a `mvf run --manage` runtime;
+    /// - node details, logs and events;
+    /// - live edits and previews.
+    ///
+    /// Leaving it never affects the runtime.
+    Tui {
+        /// Endpoint; default: the only registered runtime, looked up again on every reconnect.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Print one frame as plain text at this size (`120x36`) and exit: no terminal needed
+        /// (screenshots, smoke tests).
+        #[arg(long, value_name = "COLSxROWS")]
+        print: Option<String>,
+    },
     /// Runtimes registered for this user.
     List {
         /// JSON output.
@@ -129,30 +144,79 @@ fn fail(message: impl std::fmt::Display) -> ExitCode {
 }
 
 fn endpoint(given: Option<String>) -> Result<String, ExitCode> {
+    find(given.as_deref()).map_err(fail)
+}
+
+/// The endpoint to use, without printing anything (the TUI calls it on every reconnect).
+pub fn find(given: Option<&str>) -> Result<String, String> {
     if let Some(e) = given {
-        return Ok(e);
+        return Ok(e.to_string());
     }
-    let dir = runtime_dir().map_err(fail)?;
+    let dir = runtime_dir().map_err(|e| e.to_string())?;
     let found = list(&dir);
     match found.as_slice() {
         [one] => Ok(one.endpoint.clone()),
-        [] => Err(fail(format!(
+        [] => Err(format!(
             "no runtime registered in {} (start one with `mvf run --manage`)",
             dir.display()
-        ))),
-        many => Err(fail(format!(
+        )),
+        many => Err(format!(
             "{} runtimes registered; pass --endpoint ({})",
             many.len(),
             many.iter()
                 .map(|i| format!("{} pid {}", i.pipeline, i.pid))
                 .collect::<Vec<_>>()
                 .join(", ")
-        ))),
+        )),
     }
 }
 
 pub fn run(command: ManageCommand) -> ExitCode {
     match command {
+        ManageCommand::Tui {
+            endpoint: given,
+            print: Some(size),
+        } => {
+            let Some((c, r)) = size
+                .split_once('x')
+                .and_then(|(c, r)| Some((c.parse::<u16>().ok()?, r.parse::<u16>().ok()?)))
+            else {
+                return fail(format!("--print {size}: expected COLSxROWS, like 120x36"));
+            };
+            let discover: crate::tui::Discover =
+                std::sync::Arc::new(move || find(given.as_deref()));
+            match crate::tui::print(
+                discover,
+                c.max(40),
+                r.max(12),
+                std::time::Duration::from_millis(1500),
+            ) {
+                Ok(text) => {
+                    print!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        ManageCommand::Tui {
+            endpoint: given,
+            print: None,
+        } => {
+            if let Err(e) = crate::tui::interactive() {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+            // Fail fast when there is nothing to attach to; later losses are retried in the TUI.
+            if let Err(e) = find(given.as_deref()) {
+                return fail(e);
+            }
+            let discover: crate::tui::Discover =
+                std::sync::Arc::new(move || find(given.as_deref()));
+            match crate::tui::run(discover, None) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(e),
+            }
+        }
         ManageCommand::List { json } => {
             let dir = match runtime_dir() {
                 Ok(d) => d,

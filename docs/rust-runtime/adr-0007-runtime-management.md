@@ -10,6 +10,7 @@
 - **Evidence:** [stage 24](stages/24.md) (part 1), [stage 25](stages/25.md) (part 2),
   [stage 26](stages/26.md) (part 3), [stage 27](stages/27.md) (package signatures),
   [stage 28](stages/28.md) (previews in the pipelined executor),
+  [stage 31](stages/31.md) (the TUI client, activity sampling, #35),
   `crates/mvf-management/tests/{manage,commands}.rs`, `crates/mvf-remote/tests/remote.rs`,
   `crates/mvf-cli/tests/cli.rs`. Spec: [`protocol/management-v1.md`](../../protocol/management-v1.md).
 

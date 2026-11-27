@@ -9,6 +9,7 @@
 mod image;
 mod import;
 mod manage;
+mod tui;
 mod volume;
 
 use std::path::{Path, PathBuf};
@@ -129,6 +130,10 @@ enum Command {
         /// (#33); see `mvf manage`.
         #[arg(long)]
         manage: bool,
+        /// Show the interactive dashboard while the pipeline runs (#35); implies --manage. `q` or
+        /// ctrl+c stops the run. To watch a runtime without owning it, use `mvf manage tui`.
+        #[arg(long)]
+        tui: bool,
         /// With --manage: the audit log of commands (default `<pipeline dir>/.mvf/audit.jsonl`).
         #[arg(long)]
         audit: Option<PathBuf>,
@@ -197,6 +202,7 @@ fn main() -> ExitCode {
             mode,
             queue,
             manage,
+            tui,
             audit,
             preview,
             allow_uploads,
@@ -236,11 +242,12 @@ fn main() -> ExitCode {
                     rollbacks: expect_rollbacks,
                     max_cutover_us,
                 }),
-                manage.then_some(ManageOptions {
+                (manage || tui).then_some(ManageOptions {
                     audit,
                     preview,
                     uploads: allow_uploads,
                     trusted: trust_signer,
+                    tui,
                 }),
             )
         }
@@ -792,6 +799,8 @@ struct ManageOptions {
     preview: Vec<String>,
     uploads: bool,
     trusted: Vec<String>,
+    /// Show the TUI over the run (`run --tui`).
+    tui: bool,
 }
 
 fn run(
@@ -802,6 +811,10 @@ fn run(
     expect: Option<Expectations>,
     manage: Option<ManageOptions>,
 ) -> ExitCode {
+    let tui = manage.as_ref().is_some_and(|m| m.tui);
+    if tui && let Err(e) = tui::interactive() {
+        return fail(2, format!("--tui: {e}"));
+    }
     let feed = manage.is_some().then(|| {
         mvf_management::Feed::new(
             mvf_management::RuntimeInfo {
@@ -822,12 +835,19 @@ fn run(
         args,
         HostServices {
             logs: Logs::streaming(move |e| {
-                print_log(e, json);
+                // Under --tui the logs are on the dashboard; printing would tear the screen.
+                if !tui {
+                    print_log(e, json);
+                }
                 if let Some(f) = &log_feed {
                     f.log(e);
                 }
             }),
-            ..HostServices::with_recorder(Recorder::streaming(move |r| print_record(r, json)))
+            ..HostServices::with_recorder(Recorder::streaming(move |r| {
+                if !tui {
+                    print_record(r, json);
+                }
+            }))
         },
     );
     let queue = options.pipelined.then(|| {
@@ -869,6 +889,7 @@ fn run(
                 preview: Vec::new(),
                 uploads: false,
                 trusted: Vec::new(),
+                tui: false,
             });
             let mut trusted = Vec::new();
             for t in &m.trusted {
@@ -959,6 +980,25 @@ fn run(
         }
         None => None,
     };
+    // `run --tui`: the dashboard is a management client of this very runtime. Quitting it stops the
+    // run; a crash in it restores the terminal and leaves the run going.
+    let dashboard = match &managed {
+        Some((server, _)) if tui => {
+            let endpoint = server.endpoint().to_string();
+            let stop = cancel.clone();
+            let discover: tui::Discover = std::sync::Arc::new(move || Ok(endpoint.clone()));
+            std::thread::Builder::new()
+                .name("mvf-tui".into())
+                .spawn(move || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tui::run(discover, Some(Box::new(move || stop.cancel())))
+                    }))
+                    .unwrap_or_else(|_| Err("the TUI crashed; the run went on without it".into()))
+                })
+                .ok()
+        }
+        _ => None,
+    };
     let report = match &mut managed {
         Some((_, tap)) => {
             let report = engine.run(&options, &mut mvf_management::Tee::new(&mut driver, tap));
@@ -967,6 +1007,10 @@ fn run(
         }
         None => engine.run(&options, &mut driver),
     };
+    // The dashboard keeps showing the final state until the operator leaves it.
+    if let Some(Ok(Err(e))) = dashboard.map(|d| d.join()) {
+        eprintln!("mvf: {e}");
+    }
     drop(managed);
     print_report(&report, json);
     print_metrics(&report, &mut driver.cycle_ms, json);

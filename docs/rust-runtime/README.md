@@ -7,6 +7,8 @@
 > - To move a legacy `pipeline.json` package, see the [migration guide](migration-guide.md)
 >   (`mvf import`, [stage 29](stages/29.md)).
 > - Until v1.1.0 the binary was called `mvf-rs`, and older stage reports use that name.
+> - The terminal dashboard is back as a management client: [tui.md](tui.md)
+>   ([stage 31](stages/31.md), #35).
 
 Research branch `research/rust-runtime`. Implements the ordered backlog of
 [#10](https://github.com/hmetgundogdu/machine-vision-fabric/issues/10): Gate A (#11–#16) and Gate B

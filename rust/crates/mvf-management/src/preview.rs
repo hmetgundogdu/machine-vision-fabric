@@ -194,6 +194,7 @@ fn render(frame: &Value, max_pixels: u64) -> Json {
     let (h, w, c) = match d.shape.as_slice() {
         [h, w] => (*h, *w, 1),
         [h, w, c] => (*h, *w, *c),
+        _ if d.element == ElementType::U8 => return encoded(frame, max_pixels),
         _ => return json!({"format": "none", "reason": "not an image shape"}),
     };
     if d.element != ElementType::U8 || !matches!(c, 1 | 3 | 4) || h == 0 || w == 0 {
@@ -228,6 +229,134 @@ fn render(frame: &Value, max_pixels: u64) -> Json {
         "renderUs": t0.elapsed().as_micros() as u64,
         "data": base64(&png),
     })
+}
+
+/// A byte blob: previewed only when its content says it is an image this host decodes (BMP).
+/// Other blobs are never shown as raw pixels.
+fn encoded(frame: &mvf_engine::Frame, max_pixels: u64) -> Json {
+    let Ok(bytes) = frame.payload.try_bytes() else {
+        return json!({"format": "none", "reason": "the payload is not readable on the host"});
+    };
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return json!({"format": "none", "reason": "a PNG-encoded blob: compressed PNG is not decoded for previews (BMP is)"});
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return json!({"format": "none", "reason": "a JPEG-encoded blob: JPEG is not decoded for previews (BMP is)"});
+    }
+    if !bytes.starts_with(b"BM") {
+        return json!({"format": "none", "reason": "a blob without a known image signature (only BMP-encoded blobs are decoded)"});
+    }
+    let t0 = Instant::now();
+    match bmp(bytes, max_pixels) {
+        Ok((w, h, ow, oh, pixels)) => json!({
+            "format": "png",
+            "encoding": "bmp",
+            "width": ow,
+            "height": oh,
+            "sourceWidth": w,
+            "sourceHeight": h,
+            "renderUs": t0.elapsed().as_micros() as u64,
+            "data": base64(&png(ow as u32, oh as u32, 3, &pixels)),
+        }),
+        Err(why) => {
+            json!({"format": "none", "reason": format!("a BMP-encoded blob that cannot be decoded: {why}")})
+        }
+    }
+}
+
+/// The largest BMP edge decoded for a preview.
+const BMP_MAX_EDGE: u64 = 16_384;
+
+/// Decodes an uncompressed BMP (8-bit palette, 24-bit, or 32-bit), sampling only the pixels the
+/// downscaled preview needs. Every offset is checked against the buffer. Returns (source width,
+/// source height, preview width, preview height, RGB pixels).
+fn bmp(b: &[u8], max_pixels: u64) -> Result<(usize, usize, usize, usize, Vec<u8>), String> {
+    let u16_at = |o: usize| -> Result<u16, String> {
+        b.get(o..o + 2)
+            .map(|s| u16::from_le_bytes([s[0], s[1]]))
+            .ok_or_else(|| "truncated header".to_string())
+    };
+    let u32_at = |o: usize| -> Result<u32, String> {
+        b.get(o..o + 4)
+            .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+            .ok_or_else(|| "truncated header".to_string())
+    };
+    let data_offset = u32_at(10)? as usize;
+    let dib = u32_at(14)? as usize;
+    if dib < 40 {
+        return Err(format!(
+            "{dib}-byte DIB header (only BITMAPINFOHEADER and later)"
+        ));
+    }
+    let width = u32_at(18)? as i32;
+    let height = u32_at(22)? as i32;
+    let bpp = u16_at(28)?;
+    let compression = u32_at(30)?;
+    let top_down = height < 0;
+    let (w, h) = (width.unsigned_abs() as u64, height.unsigned_abs() as u64);
+    if w == 0 || h == 0 || w > BMP_MAX_EDGE || h > BMP_MAX_EDGE || width < 0 {
+        return Err(format!("{width}x{height} is outside 1..={BMP_MAX_EDGE}"));
+    }
+    match (bpp, compression) {
+        (8 | 24 | 32, 0) | (32, 3) => {}
+        _ => {
+            return Err(format!(
+                "{bpp}-bit, compression {compression} (uncompressed 8, 24 and 32-bit only)"
+            ));
+        }
+    }
+    // Bitfields: only the usual BGRX/BGRA masks (red 0x00FF0000, green 0x0000FF00, blue 0xFF).
+    if compression == 3
+        && (u32_at(54)?, u32_at(58)?, u32_at(62)?) != (0x00FF_0000, 0x0000_FF00, 0x0000_00FF)
+    {
+        return Err("32-bit bitfields with non-standard colour masks".into());
+    }
+    let stride = (u64::from(bpp) * w).div_ceil(32) * 4;
+    let end = (data_offset as u64)
+        .checked_add(stride * h)
+        .ok_or("pixel data size overflows")?;
+    if end > b.len() as u64 {
+        return Err(format!(
+            "pixel data needs {end} bytes, the blob has {}",
+            b.len()
+        ));
+    }
+    let palette: Vec<[u8; 3]> = if bpp == 8 {
+        let used = match u32_at(46)? {
+            0 => 256,
+            n => n.min(256),
+        } as usize;
+        let at = 14 + dib;
+        let table = b.get(at..at + used * 4).ok_or("truncated palette")?;
+        table.chunks_exact(4).map(|e| [e[2], e[1], e[0]]).collect()
+    } else {
+        Vec::new()
+    };
+    let scale = ((w * h) as f64 / max_pixels.max(1) as f64).sqrt().max(1.0);
+    let (oh, ow) = (
+        ((h as f64 / scale).floor() as usize).max(1),
+        ((w as f64 / scale).floor() as usize).max(1),
+    );
+    let (w, h) = (w as usize, h as usize);
+    let (stride, bytes_pp) = (stride as usize, usize::from(bpp / 8));
+    let mut pixels = Vec::with_capacity(ow * oh * 3);
+    for y in 0..oh {
+        let sy = y * h / oh;
+        let row = if top_down { sy } else { h - 1 - sy };
+        for x in 0..ow {
+            let sx = x * w / ow;
+            let at = data_offset + row * stride + sx * bytes_pp;
+            match bpp {
+                8 => {
+                    let index = usize::from(b[at]);
+                    pixels
+                        .extend_from_slice(palette.get(index).ok_or("palette index out of range")?);
+                }
+                _ => pixels.extend_from_slice(&[b[at + 2], b[at + 1], b[at]]),
+            }
+        }
+    }
+    Ok((w, h, ow, oh, pixels))
 }
 
 fn crc32(data: &[u8]) -> u32 {
@@ -412,6 +541,152 @@ mod tests {
         assert_eq!(&png[16..24], &[0, 0, 0, 2, 0, 0, 0, 1]);
         // CRC-32 of "IEND" is the well-known AE 42 60 82.
         assert_eq!(&png[png.len() - 4..], &[0xAE, 0x42, 0x60, 0x82]);
+    }
+
+    fn blob(bytes: Vec<u8>) -> Value {
+        let payload =
+            mvf_engine::Payload::heap(mvf_engine::Descriptor::blob(bytes.len() as u64), bytes)
+                .expect("payload");
+        Value::Frame(mvf_engine::Frame {
+            meta: mvf_engine::FrameMeta {
+                source: "t".into(),
+                sequence: 1,
+            },
+            payload,
+        })
+    }
+
+    /// A BMP: `bpp` 8 (grey palette), 24 or 32 (bitfields), `w` x `h`, pixel (x, y) = colour(x, y).
+    fn bmp_file(bpp: u16, w: i32, h: i32, colour: impl Fn(usize, usize) -> [u8; 3]) -> Vec<u8> {
+        let (aw, ah) = (w.unsigned_abs() as usize, h.unsigned_abs() as usize);
+        let stride = (usize::from(bpp) * aw).div_ceil(32) * 4;
+        let palette = if bpp == 8 { 256 * 4 } else { 0 };
+        let masks = if bpp == 32 { 12 } else { 0 };
+        let offset = 14 + 40 + masks + palette;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&((offset + stride * ah) as u32).to_le_bytes());
+        b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(&(offset as u32).to_le_bytes());
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&w.to_le_bytes());
+        b.extend_from_slice(&h.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&bpp.to_le_bytes());
+        b.extend_from_slice(&(if bpp == 32 { 3u32 } else { 0 }).to_le_bytes());
+        b.extend_from_slice(&[0; 12]);
+        b.extend_from_slice(&0u32.to_le_bytes()); // colours used: 0 = 256
+        b.extend_from_slice(&[0; 4]);
+        if bpp == 32 {
+            for m in [0x00FF_0000u32, 0x0000_FF00, 0x0000_00FF] {
+                b.extend_from_slice(&m.to_le_bytes());
+            }
+        }
+        if bpp == 8 {
+            for i in 0..=255u8 {
+                b.extend_from_slice(&[i, i, i, 0]);
+            }
+        }
+        for row in 0..ah {
+            let y = if h < 0 { row } else { ah - 1 - row };
+            let mut line = Vec::new();
+            for x in 0..aw {
+                let [r, g, bl] = colour(x, y);
+                match bpp {
+                    8 => line.push(r),
+                    24 => line.extend_from_slice(&[bl, g, r]),
+                    _ => line.extend_from_slice(&[bl, g, r, 255]),
+                }
+            }
+            line.resize(stride, 0);
+            b.extend_from_slice(&line);
+        }
+        b
+    }
+
+    fn decoded(v: &Json) -> (u64, u64, Vec<u8>) {
+        assert_eq!(v["format"], "png", "{v}");
+        let png = unbase64(v["data"].as_str().expect("data")).expect("base64");
+        // Stored deflate, filter 0, RGB: strip the zlib and row framing.
+        let idat = png.windows(4).position(|w| w == b"IDAT").expect("IDAT") + 4;
+        let len = u32::from_be_bytes(png[idat - 8..idat - 4].try_into().expect("len")) as usize;
+        let z = &png[idat..idat + len];
+        let (mut raw, mut i) = (Vec::new(), 2);
+        loop {
+            let n = u16::from_le_bytes([z[i + 1], z[i + 2]]) as usize;
+            raw.extend_from_slice(&z[i + 5..i + 5 + n]);
+            let last = z[i] & 1 == 1;
+            i += 5 + n;
+            if last {
+                break;
+            }
+        }
+        let (w, h) = (
+            v["width"].as_u64().expect("w"),
+            v["height"].as_u64().expect("h"),
+        );
+        let px = raw
+            .chunks(w as usize * 3 + 1)
+            .flat_map(|r| r[1..].to_vec())
+            .collect();
+        (w, h, px)
+    }
+
+    #[test]
+    fn bmp_blobs_are_decoded_bottom_up_top_down_palette_and_bitfields() {
+        let colour = |x: usize, y: usize| [(x * 40) as u8, (y * 60) as u8, 7];
+        for (bpp, h) in [(24, 3), (24, -3), (32, 3), (32, -3)] {
+            let v = render(&blob(bmp_file(bpp, 5, h, colour)), 10_000);
+            assert_eq!(v["encoding"], "bmp");
+            assert_eq!(
+                (v["sourceWidth"].as_u64(), v["sourceHeight"].as_u64()),
+                (Some(5), Some(3))
+            );
+            let (w, hh, px) = decoded(&v);
+            assert_eq!((w, hh), (5, 3));
+            for (x, y) in [(0, 0), (4, 0), (2, 1), (4, 2)] {
+                assert_eq!(
+                    &px[(y * 5 + x) * 3..(y * 5 + x) * 3 + 3],
+                    &colour(x, y),
+                    "{bpp}-bit h={h} ({x},{y})"
+                );
+            }
+        }
+        let grey = |x: usize, _: usize| [(x * 50) as u8; 3];
+        let (_, _, px) = decoded(&render(&blob(bmp_file(8, 4, 2, grey)), 10_000));
+        assert_eq!(&px[9..12], &[150, 150, 150], "palette lookup");
+        // Downscaled to the preview cap, sampled from the file.
+        let big = render(&blob(bmp_file(24, 640, 480, colour)), 160 * 120);
+        assert_eq!(
+            (big["width"].as_u64(), big["height"].as_u64()),
+            (Some(160), Some(120))
+        );
+    }
+
+    #[test]
+    fn other_blobs_say_what_they_are_and_bad_bmps_are_refused() {
+        let reason = |b: Vec<u8>| {
+            render(&blob(b), 100)["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(reason(b"\x89PNG\r\n\x1a\nxxxx".to_vec()).contains("PNG-encoded"));
+        assert!(reason(vec![0xFF, 0xD8, 0xFF, 0xE0, 0]).contains("JPEG-encoded"));
+        assert!(reason(b"plain bytes".to_vec()).contains("without a known image signature"));
+        let mut truncated = bmp_file(24, 8, 8, |_, _| [1, 2, 3]);
+        truncated.truncate(truncated.len() - 10);
+        assert!(reason(truncated).contains("pixel data needs"));
+        let mut huge = bmp_file(24, 2, 2, |_, _| [1, 2, 3]);
+        huge[18..22].copy_from_slice(&100_000i32.to_le_bytes());
+        assert!(reason(huge).contains("outside"));
+        let mut rle = bmp_file(24, 2, 2, |_, _| [1, 2, 3]);
+        rle[30..34].copy_from_slice(&1u32.to_le_bytes());
+        assert!(reason(rle).contains("compression 1"));
+        let mut masks = bmp_file(32, 2, 2, |_, _| [1, 2, 3]);
+        masks[54..58].copy_from_slice(&0xFFu32.to_le_bytes());
+        assert!(reason(masks).contains("non-standard colour masks"));
+        assert!(reason(b"BM".to_vec()).contains("truncated header"));
     }
 
     #[test]
