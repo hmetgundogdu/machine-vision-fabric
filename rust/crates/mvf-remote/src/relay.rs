@@ -57,6 +57,8 @@ pub struct RelayConfig {
     pub write_timeout: Duration,
     /// Longest request line (default 64 KiB).
     pub max_request: usize,
+    /// Longest request line for an operator (default 1 MiB: upload chunks).
+    pub max_operator_request: usize,
 }
 
 impl RelayConfig {
@@ -75,6 +77,7 @@ impl RelayConfig {
             idle_timeout: Duration::from_secs(300),
             write_timeout: Duration::from_secs(5),
             max_request: 64 * 1024,
+            max_operator_request: 1024 * 1024,
         }
     }
 }
@@ -354,8 +357,13 @@ fn serve(
         json!({"event": "connection-admitted", "peer": peer, "principal": principal, "role": role.as_str()}),
     );
 
+    let limit = if role == Role::Operator {
+        config.max_operator_request
+    } else {
+        config.max_request
+    };
     loop {
-        let line = match read_line(&mut client, config.max_request) {
+        let line = match read_line(&mut client, limit) {
             Ok(Some(l)) if l.is_empty() => continue,
             Ok(Some(l)) => l,
             Ok(None) => return Ok(()),
@@ -375,17 +383,27 @@ fn serve(
             return Ok(());
         };
         let op = msg["op"].as_str().unwrap_or_default();
-        if op == "command" && role < Role::Operator {
+        let needs = match op {
+            "command" | "upload" | "upload-status" => Role::Operator,
+            "preview" => Role::Previewer,
+            _ => Role::Observer,
+        };
+        if role < needs {
             record(
                 audit,
-                json!({"event": "forbidden", "peer": peer, "principal": principal, "role": role.as_str(), "command": msg["command"], "id": msg["id"]}),
+                json!({"event": "forbidden", "peer": peer, "principal": principal, "role": role.as_str(), "op": op, "command": msg["command"], "id": msg["id"]}),
             );
-            send(client.get_mut(), &json!({"op": "command", "id": msg["id"], "command": msg["command"], "status": "refused", "code": "forbidden", "message": format!("the {} role cannot run commands", role.as_str())}))
-                .map_err(|e| e.to_string())?;
+            let message = format!("the {} role cannot {op}", role.as_str());
+            let reply = if op == "command" {
+                json!({"op": "command", "id": msg["id"], "command": msg["command"], "status": "refused", "code": "forbidden", "message": message})
+            } else {
+                json!({"op": "error", "code": "forbidden", "message": message})
+            };
+            send(client.get_mut(), &reply).map_err(|e| e.to_string())?;
             continue;
         }
         send(&mut to_runtime, &msg).map_err(|e| e.to_string())?;
-        if op == "subscribe" {
+        if op == "subscribe" || op == "preview" {
             // From here on: runtime -> client only. Heartbeats from the runtime keep it moving
             // and expose a dead client through a failed write.
             loop {

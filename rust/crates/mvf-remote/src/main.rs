@@ -122,6 +122,30 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         reconnect_secs: u64,
     },
+    /// Save previews of an opted-in node as PNG files (previewer role).
+    Preview {
+        #[command(flatten)]
+        id: Identity,
+        /// The node.
+        #[arg(long)]
+        node: String,
+        /// How many to save (default 1).
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+        /// Directory for `<node>-<seq>.png`.
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+    },
+    /// Upload and stage a node package (operator role); resumes an interrupted upload.
+    Upload {
+        #[command(flatten)]
+        id: Identity,
+        /// Package name (immutable once staged).
+        #[arg(long)]
+        package: String,
+        /// The package directory.
+        dir: PathBuf,
+    },
     /// Run a command (operator role).
     #[command(name = "command")]
     Run {
@@ -287,6 +311,67 @@ fn main() -> ExitCode {
                     }
                 }
                 from = sub.last_seq().map(|s| s + 1).or(from);
+            }
+        }
+        Command::Preview {
+            id,
+            node,
+            count,
+            out,
+        } => {
+            let mut c = match connect(&id) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            let mut m = match c.request(&json!({"op": "preview", "node": node})) {
+                Ok(m) => m,
+                Err(e) => return fail(e),
+            };
+            let mut saved = 0;
+            loop {
+                match m["op"].as_str() {
+                    Some("preview") => {
+                        let Some(png) = m["data"]
+                            .as_str()
+                            .and_then(mvf_management::preview::unbase64)
+                        else {
+                            return fail(format!("not an image: {}", m["reason"]));
+                        };
+                        let path = out.join(format!("{node}-{}.png", m["seq"]));
+                        if let Err(e) = std::fs::write(&path, png) {
+                            return fail(e);
+                        }
+                        println!("{}", path.display());
+                        saved += 1;
+                        if saved >= count {
+                            return ExitCode::SUCCESS;
+                        }
+                    }
+                    Some("error") => return fail(format!("{}: {}", m["code"], m["message"])),
+                    _ => {}
+                }
+                m = match c.read_next() {
+                    Ok(m) => m,
+                    Err(e) => return fail(e),
+                };
+            }
+        }
+        Command::Upload { id, package, dir } => {
+            let mut c = match connect(&id) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            let mut request = |v: &Value| c.request(v);
+            match mvf_management::upload_dir(&mut request, &package, &dir, 512 * 1024) {
+                Ok(r) => {
+                    println!("{r}");
+                    if r["status"] == "applied" {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::from(1)
+                    }
+                }
+                Err(e) => fail(e),
             }
         }
         Command::Run {

@@ -115,6 +115,14 @@ enum Command {
         /// With --manage: the audit log of commands (default `<pipeline dir>/.mvf/audit.jsonl`).
         #[arg(long)]
         audit: Option<PathBuf>,
+        /// With --manage: allow capped image previews of this node's output (repeatable). Nothing
+        /// is previewed unless named here.
+        #[arg(long = "preview")]
+        preview: Vec<String>,
+        /// With --manage: let operators upload node packages and stage them in
+        /// `<pipeline dir>/.mvf/staged` (activated with the `replace` command).
+        #[arg(long)]
+        allow_uploads: bool,
     },
     /// List the builtins and backends this host provides.
     Host,
@@ -163,6 +171,8 @@ fn main() -> ExitCode {
             queue,
             manage,
             audit,
+            preview,
+            allow_uploads,
         } => {
             if require_gpu && gpu_context().is_none() {
                 return fail(
@@ -198,7 +208,11 @@ fn main() -> ExitCode {
                     rollbacks: expect_rollbacks,
                     max_cutover_us,
                 }),
-                manage.then_some(audit),
+                manage.then_some(ManageOptions {
+                    audit,
+                    preview,
+                    uploads: allow_uploads,
+                }),
             )
         }
         Command::Manage { command } => manage::run(command),
@@ -669,13 +683,21 @@ fn verify(report: &RunReport, services: &HostServices, expect: Expectations, jso
     pass
 }
 
+/// What `run --manage` serves.
+#[derive(Debug, Clone)]
+struct ManageOptions {
+    audit: Option<PathBuf>,
+    preview: Vec<String>,
+    uploads: bool,
+}
+
 fn run(
     args: &PipelineArgs,
     mut options: RunOptions,
     json: bool,
     updates: Option<&Path>,
     expect: Option<Expectations>,
-    manage: Option<Option<PathBuf>>,
+    manage: Option<ManageOptions>,
 ) -> ExitCode {
     let feed = manage.is_some().then(|| {
         mvf_management::Feed::new(
@@ -738,13 +760,35 @@ fn run(
                 .map(|s| (s.id, s.backend))
                 .collect();
             feed.set_topology(&mvf_management::Topology::of(engine.graph(), &backends));
-            let audit = manage.clone().flatten().unwrap_or_else(|| {
-                services
-                    .package_dir
-                    .as_deref()
-                    .unwrap_or(Path::new("."))
-                    .join(".mvf/audit.jsonl")
+            let m = manage.clone().unwrap_or(ManageOptions {
+                audit: None,
+                preview: Vec::new(),
+                uploads: false,
             });
+            let package = services
+                .package_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("."));
+            let audit = m
+                .audit
+                .clone()
+                .unwrap_or_else(|| package.join(".mvf/audit.jsonl"));
+            if let Some(unknown) = m
+                .preview
+                .iter()
+                .find(|n| !engine.graph().nodes.iter().any(|g| &g.id == *n))
+            {
+                return fail(
+                    2,
+                    format!("--preview: no node `{unknown}` in this pipeline"),
+                );
+            }
+            if !m.preview.is_empty() {
+                feed.enable_previews(mvf_management::PreviewConfig {
+                    nodes: m.preview.clone(),
+                    ..mvf_management::PreviewConfig::default()
+                });
+            }
             let control = mvf_management::Control {
                 handle: engine.control(),
                 cancel: cancel.clone(),
@@ -755,14 +799,26 @@ fn run(
                 mvf_management::ServerOptions {
                     control: Some(control),
                     audit: Some(audit.clone()),
+                    uploads: m.uploads.then(|| {
+                        mvf_management::UploadOptions::new(
+                            package.join(".mvf/staged"),
+                            ".mvf/staged",
+                        )
+                    }),
                     ..mvf_management::ServerOptions::default()
                 },
             ) {
                 Ok(server) => {
                     eprintln!(
-                        "  management endpoint: {} (audit: {})",
+                        "  management endpoint: {} (audit: {}; previews: {}; uploads: {})",
                         server.endpoint(),
-                        audit.display()
+                        audit.display(),
+                        if m.preview.is_empty() {
+                            "none".to_string()
+                        } else {
+                            m.preview.join(", ")
+                        },
+                        if m.uploads { "allowed" } else { "off" }
                     );
                     let tap = mvf_management::Tap::new(
                         feed.clone(),

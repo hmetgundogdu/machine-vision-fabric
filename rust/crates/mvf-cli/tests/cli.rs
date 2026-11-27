@@ -487,3 +487,125 @@ fn a_managed_run_stops_on_a_command_and_audits_it() {
     assert_eq!(records[0]["principal"], "local");
     assert_eq!(records[0]["status"], "applied");
 }
+
+/// `run --manage --preview cam --allow-uploads`: `manage preview` saves PNGs, `manage upload`
+/// stages a package, `manage command replace` activates it (#33 part 3).
+#[test]
+fn a_managed_run_serves_previews_and_activates_an_uploaded_package() {
+    let dir = std::env::temp_dir().join(format!("mvf-cli-part3-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("pkg")).expect("dir");
+    let pipeline = dir.join("pipeline.yaml");
+    std::fs::write(
+        &pipeline,
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: { name: part3 }\nspec:\n  nodes:\n    - { id: cam, builtin: synthetic-source, config: { width: 320, height: 240, channels: 3, frames: 1000000, intervalMs: 5 } }\n    - { id: pass, builtin: passthrough }\n    - { id: sink, builtin: record }\n  edges:\n    data:\n      - { from: cam.frame, to: pass.frame }\n      - { from: pass.frame, to: sink.frame }\n",
+    )
+    .expect("pipeline");
+    let contract = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mvf-engine/src/contracts/passthrough.yaml"),
+    )
+    .expect("contract")
+    .replace("version: 1.0.0", "version: 2.0.0");
+    std::fs::write(dir.join("pkg/node.yaml"), contract).expect("node.yaml");
+    std::fs::write(dir.join("pkg/weights.bin"), vec![7u8; 700_000]).expect("weights");
+    let runtime = dir.join("run");
+    let mut run = mvf()
+        .args(["run", "--manage", "--preview", "cam", "--allow-uploads"])
+        .arg(&pipeline)
+        .env("MVF_RUNTIME_DIR", &runtime)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("run");
+    let manage = |args: &[&str]| {
+        mvf()
+            .arg("manage")
+            .args(args)
+            .env("MVF_RUNTIME_DIR", &runtime)
+            .output()
+            .expect("manage")
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let shots = dir.join("shots");
+    std::fs::create_dir_all(&shots).expect("shots");
+    loop {
+        let out = manage(&[
+            "preview",
+            "--node",
+            "cam",
+            "--count",
+            "2",
+            "--out",
+            shots.to_str().expect("path"),
+        ]);
+        if out.status.success() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let pngs: Vec<_> = std::fs::read_dir(&shots)
+        .expect("shots")
+        .flatten()
+        .collect();
+    assert_eq!(pngs.len(), 2);
+    for p in &pngs {
+        assert_eq!(
+            &std::fs::read(p.path()).expect("png")[..8],
+            b"\x89PNG\r\n\x1a\n"
+        );
+    }
+    let not_enabled = manage(&["preview", "--node", "pass"]);
+    assert!(!not_enabled.status.success());
+    let up = manage(&[
+        "upload",
+        "--package",
+        "pass-v2",
+        dir.join("pkg").to_str().expect("path"),
+    ]);
+    assert!(
+        up.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&up.stdout),
+        String::from_utf8_lossy(&up.stderr)
+    );
+    let staged: serde_json::Value = serde_json::from_slice(&up.stdout).expect("staged");
+    let contract = staged["staged"]["contract"]
+        .as_str()
+        .expect("contract")
+        .to_string();
+    let replace = manage(&[
+        "command",
+        "replace",
+        "--node",
+        "pass",
+        "--contract",
+        &contract,
+        "--id",
+        "p3-replace",
+    ]);
+    assert!(
+        replace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replace.stdout)
+    );
+    let r: serde_json::Value = serde_json::from_slice(&replace.stdout).expect("reply");
+    assert_eq!(r["event"]["toVersion"], "mvf.passthrough@2.0.0");
+    assert!(
+        manage(&["command", "stop", "--id", "p3-stop"])
+            .status
+            .success()
+    );
+    assert!(run.wait().expect("wait").success());
+    assert_eq!(
+        std::fs::read(dir.join(".mvf/staged/pass-v2/weights.bin"))
+            .expect("staged")
+            .len(),
+        700_000
+    );
+}

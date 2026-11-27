@@ -640,3 +640,130 @@ fn bench_relay_overhead() {
         );
     });
 }
+
+/// Part 3 through the relay: a previewer sees previews, an observer may not, and an operator
+/// uploads, stages and activates a package over mutual TLS.
+#[test]
+fn previews_and_uploads_go_through_the_relay_by_role() {
+    let pki = pki_dir("part3");
+    let (from, to) = pki::validity(30);
+    pki::issue(&pki, "pia", Some(Role::Previewer), from, to).expect("pia");
+    let base = temp("part3-base");
+    let text = "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: { name: remote3 }\nspec:\n  nodes:\n    - { id: cam, builtin: synthetic-source, config: { width: 64, height: 48, channels: 3, frames: 1000000, intervalMs: 5 } }\n    - { id: pass, builtin: passthrough }\n    - { id: sink, builtin: record }\n  edges:\n    data:\n      - { from: cam.frame, to: pass.frame }\n      - { from: pass.frame, to: sink.frame }\n";
+    let feed = Feed::new(
+        RuntimeInfo {
+            pipeline: "remote3".into(),
+            version: "test".into(),
+            mode: "serial".into(),
+        },
+        FeedConfig::default(),
+    );
+    feed.enable_previews(mvf_management::PreviewConfig {
+        nodes: vec!["cam".into()],
+        ..Default::default()
+    });
+    let resolver = HostResolver::new(&base).with_module_root(repo().join("modules"));
+    let graph = build_graph(text, &resolver).expect("graph");
+    let engine =
+        Engine::build(graph, &default_backends(), &HostServices::default()).expect("build");
+    feed.set_topology(&Topology::of(engine.graph(), &[]));
+    let cancel = CancellationToken::new();
+    let server = Server::start(
+        feed.clone(),
+        ServerOptions {
+            dir: Some(base.join("run")),
+            control: Some(Control {
+                handle: engine.control(),
+                cancel: cancel.clone(),
+                resolver: Arc::new(resolver),
+            }),
+            audit: Some(base.join("audit.jsonl")),
+            uploads: Some(mvf_management::UploadOptions::new(
+                base.join(".mvf/staged"),
+                ".mvf/staged",
+            )),
+            ..ServerOptions::default()
+        },
+    )
+    .expect("server");
+    let stop = cancel.clone();
+    let mut rt = Runtime {
+        engine,
+        feed,
+        server,
+        cancel,
+        audit: base.join("audit.jsonl"),
+    };
+    let relay = relay_for(&pki, &rt);
+    let at = addr(&relay);
+    let src = temp("part3-pkg");
+    std::fs::write(
+        src.join("node.yaml"),
+        std::fs::read_to_string(
+            repo().join("rust/crates/mvf-engine/src/contracts/passthrough.yaml"),
+        )
+        .expect("contract")
+        .replace("version: 1.0.0", "version: 3.0.0"),
+    )
+    .expect("node.yaml");
+    run_while(&mut rt, || {
+        // Previews: the previewer gets one; the observer does not.
+        let mut pia = RemoteClient::connect(&at, tls_for(&pki, "pia"), "test").expect("pia");
+        assert_eq!(pia.hello()["role"], "previewer");
+        let first = pia
+            .request(&json!({"op": "preview", "node": "cam", "fps": 2}))
+            .expect("preview");
+        assert_eq!(
+            (first["op"].as_str(), first["format"].as_str()),
+            (Some("preview"), Some("png")),
+            "{first}"
+        );
+        let mut bob = RemoteClient::connect(&at, tls_for(&pki, "bob"), "test").expect("bob");
+        assert_eq!(
+            bob.request(&json!({"op": "preview", "node": "cam"}))
+                .expect("reply")["code"],
+            "forbidden"
+        );
+        assert_eq!(
+            bob.request(&json!({"op": "upload-status", "package": "p", "path": "x"}))
+                .expect("reply")["code"],
+            "forbidden"
+        );
+        // The operator uploads, stages and activates.
+        let mut alice = RemoteClient::connect(&at, tls_for(&pki, "alice"), "test").expect("alice");
+        let mut request = |v: &Value| alice.request(v);
+        let staged =
+            mvf_management::upload_dir(&mut request, "pass-v3", &src, 512 * 1024).expect("upload");
+        assert_eq!(staged["status"], "applied", "{staged}");
+        let contract = staged["staged"]["contract"]
+            .as_str()
+            .expect("contract")
+            .to_string();
+        let r = request(&json!({"op": "command", "id": "act3", "command": "replace", "args": {"node": "pass", "contract": contract}})).expect("replace");
+        assert_eq!(
+            (r["status"].as_str(), r["event"]["toVersion"].as_str()),
+            (Some("applied"), Some("mvf.passthrough@3.0.0")),
+            "{r}"
+        );
+        stop.cancel();
+    });
+    let records = lines(&rt.audit);
+    assert!(
+        records
+            .iter()
+            .any(|a| a["event"] == "preview-opened" && a["principal"] == "pia")
+    );
+    assert!(
+        records.iter().any(|a| a["event"] == "upload"
+            && a["principal"] == "alice"
+            && a["status"] == "complete")
+    );
+    assert!(records.iter().any(|a| a["command"] == "replace"
+        && a["principal"] == "alice"
+        && a["status"] == "applied"));
+    assert!(
+        lines(&pki.join("relay-audit.jsonl"))
+            .iter()
+            .any(|a| a["event"] == "forbidden" && a["principal"] == "bob" && a["op"] == "preview")
+    );
+}

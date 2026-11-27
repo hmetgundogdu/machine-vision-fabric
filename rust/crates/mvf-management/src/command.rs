@@ -32,7 +32,9 @@ use crate::feed::Feed;
 pub enum Role {
     /// Topology, state, events and logs.
     Observer,
-    /// Observer plus commands.
+    /// Observer plus previews of the nodes the operator opted in.
+    Previewer,
+    /// Previewer plus commands and uploads.
     Operator,
 }
 
@@ -41,6 +43,7 @@ impl Role {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "observer" => Some(Role::Observer),
+            "previewer" => Some(Role::Previewer),
             "operator" => Some(Role::Operator),
             _ => None,
         }
@@ -50,6 +53,7 @@ impl Role {
     pub fn as_str(self) -> &'static str {
         match self {
             Role::Observer => "observer",
+            Role::Previewer => "previewer",
             Role::Operator => "operator",
         }
     }
@@ -90,7 +94,7 @@ impl Session {
         let role = behalf["role"]
             .as_str()
             .and_then(Role::parse)
-            .ok_or("onBehalfOf.role must be observer or operator")?;
+            .ok_or("onBehalfOf.role must be observer, previewer or operator")?;
         Ok(Self {
             principal: principal.to_string(),
             role: role.min(Role::Operator),
@@ -189,6 +193,7 @@ struct Seen {
 pub struct Commands {
     control: Option<Control>,
     audit: Option<Arc<Audit>>,
+    uploads: Option<Arc<crate::upload::Uploads>>,
     seen: Mutex<Seen>,
 }
 
@@ -214,11 +219,16 @@ fn valid_id(id: &str) -> bool {
 }
 
 impl Commands {
-    /// Commands for a run (`control`), audited to `audit`.
-    pub fn new(control: Option<Control>, audit: Option<Arc<Audit>>) -> Self {
+    /// Commands for a run (`control`), audited to `audit`, staging into `uploads`.
+    pub fn new(
+        control: Option<Control>,
+        audit: Option<Arc<Audit>>,
+        uploads: Option<Arc<crate::upload::Uploads>>,
+    ) -> Self {
         Self {
             control,
             audit,
+            uploads,
             seen: Mutex::new(Seen::default()),
         }
     }
@@ -231,6 +241,11 @@ impl Commands {
     /// The audit log, if any.
     pub fn audit(&self) -> Option<&Arc<Audit>> {
         self.audit.as_ref()
+    }
+
+    /// Package uploads, if enabled.
+    pub fn uploads(&self) -> Option<&Arc<crate::upload::Uploads>> {
+        self.uploads.as_ref()
     }
 
     fn reply(id: &str, command: &str, status: &str) -> Value {
@@ -343,6 +358,24 @@ impl Commands {
         let node = args["node"].as_str().unwrap_or_default().to_string();
         let until = Instant::now() + deadline;
         let after = feed.last_seq();
+        if command == "stage" {
+            let mut r = match self.uploads.as_ref().map(|u| u.stage(args)) {
+                Some(Ok(staged)) => {
+                    let mut r = Self::reply(id, command, "applied");
+                    r["staged"] = staged;
+                    r
+                }
+                Some(Err((code, message))) => Self::refused(id, command, code, message),
+                None => Self::refused(
+                    id,
+                    command,
+                    "unavailable",
+                    "uploads are not enabled on this runtime",
+                ),
+            };
+            r["afterSeq"] = json!(after);
+            return r;
+        }
         if command == "stop" {
             control.cancel.cancel();
             let outcome = feed.wait_for(after, until, |e| {

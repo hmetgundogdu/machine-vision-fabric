@@ -69,6 +69,11 @@ impl RemoteClient {
         serde_json::from_str(&line).map_err(std::io::Error::other)
     }
 
+    /// Reads the next message (a stream after `preview`).
+    pub fn read_next(&mut self) -> std::io::Result<Value> {
+        self.read()
+    }
+
     /// Sends one request and reads one reply.
     pub fn request(&mut self, v: &Value) -> std::io::Result<Value> {
         let w = self.stream.get_mut();

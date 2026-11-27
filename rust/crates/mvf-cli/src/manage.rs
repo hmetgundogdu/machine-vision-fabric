@@ -47,7 +47,38 @@ pub enum ManageCommand {
         #[arg(long, default_value_t = 30)]
         reconnect_secs: u64,
     },
-    /// Run a command: stop, pause, resume, set-value, configure, replace, rollback, commit.
+    /// Save previews of an opted-in node (`run --manage --preview NODE`) as PNG files.
+    Preview {
+        /// Endpoint; default: the only registered runtime.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// The node.
+        #[arg(long)]
+        node: String,
+        /// How many previews to save (default 1).
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+        /// Previews per second to ask for (capped by the runtime).
+        #[arg(long)]
+        fps: Option<f64>,
+        /// Directory for `<node>-<seq>.png` (default: the current directory).
+        #[arg(long, default_value = ".")]
+        out: std::path::PathBuf,
+    },
+    /// Upload a prepared node package (a directory with `node.yaml`) and stage it; activate it
+    /// with `command replace --node … --contract <the printed contract>`. Resumes an
+    /// interrupted upload.
+    Upload {
+        /// Endpoint; default: the only registered runtime.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Package name (immutable once staged: use a new name per version).
+        #[arg(long)]
+        package: String,
+        /// The package directory.
+        dir: std::path::PathBuf,
+    },
+    /// Run a command: stop, pause, resume, set-value, configure, replace, rollback, commit, stage.
     Command {
         /// The command.
         name: String,
@@ -172,6 +203,92 @@ pub fn run(command: ManageCommand) -> ExitCode {
                 until_stopped,
                 Duration::from_secs(reconnect_secs),
             )
+        }
+        ManageCommand::Preview {
+            endpoint: e,
+            node,
+            count,
+            fps,
+            out,
+        } => {
+            let e = match endpoint(e) {
+                Ok(e) => e,
+                Err(code) => return code,
+            };
+            let mut c = match Client::connect(&e, "mvf-rs") {
+                Ok(c) => c,
+                Err(err) => return fail(format!("{e}: {err}")),
+            };
+            let mut req = serde_json::json!({"op": "preview", "node": node});
+            if let Some(f) = fps {
+                req["fps"] = serde_json::json!(f);
+            }
+            let mut m = match c.request(&req) {
+                Ok(m) => m,
+                Err(err) => return fail(err),
+            };
+            let mut saved = 0;
+            loop {
+                match m["op"].as_str() {
+                    Some("preview") => {
+                        let Some(png) = m["data"]
+                            .as_str()
+                            .and_then(mvf_management::preview::unbase64)
+                        else {
+                            return fail(format!("not an image: {}", m["reason"]));
+                        };
+                        let path = out.join(format!("{node}-{}.png", m["seq"]));
+                        if let Err(err) = std::fs::write(&path, png) {
+                            return fail(format!("{}: {err}", path.display()));
+                        }
+                        println!(
+                            "{} ({}x{} from {}x{}, cycle {})",
+                            path.display(),
+                            m["width"],
+                            m["height"],
+                            m["sourceWidth"],
+                            m["sourceHeight"],
+                            m["cycle"]
+                        );
+                        saved += 1;
+                        if saved >= count {
+                            return ExitCode::SUCCESS;
+                        }
+                    }
+                    Some("error") => return fail(format!("{}: {}", m["code"], m["message"])),
+                    _ => {}
+                }
+                m = match c.read_next() {
+                    Ok(m) => m,
+                    Err(err) => return fail(err),
+                };
+            }
+        }
+        ManageCommand::Upload {
+            endpoint: e,
+            package,
+            dir,
+        } => {
+            let e = match endpoint(e) {
+                Ok(e) => e,
+                Err(code) => return code,
+            };
+            let mut c = match Client::connect(&e, "mvf-rs") {
+                Ok(c) => c,
+                Err(err) => return fail(format!("{e}: {err}")),
+            };
+            let mut request = |v: &Value| c.request(v);
+            match mvf_management::upload_dir(&mut request, &package, &dir, 512 * 1024) {
+                Ok(r) if r["status"] == "applied" => {
+                    println!("{r}");
+                    ExitCode::SUCCESS
+                }
+                Ok(r) => {
+                    println!("{r}");
+                    ExitCode::from(1)
+                }
+                Err(err) => fail(err),
+            }
         }
         ManageCommand::Command {
             name,

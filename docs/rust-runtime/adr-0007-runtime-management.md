@@ -1,12 +1,14 @@
 # ADR-0007 — Runtime management: a read-only local feed first, remote access through a separate relay
 
-- **Status:** Accepted for the research branch (#33). Part 1 (local observation) and part 2
-  (commands, roles, audit, the TLS relay) are implemented. Part 3 is planned below. Not a
-  migration decision.
+- **Status:** Accepted for the research branch (#33). All three parts are implemented: part 1
+  (local observation), part 2 (commands, roles, audit, the TLS relay) and part 3 (previews and
+  package upload). Package signatures and measurements on edge hardware are not done (see Plan).
+  Not a migration decision.
 - **Date:** 2026-11-27
 - **Issues:** #33, part of #10. Related: #32 (worker IPC, which management never exposes), #23
   (node networking), #30, #31. Separate from #21 (Event Fabric).
 - **Evidence:** [stage 24](stages/24.md) (part 1), [stage 25](stages/25.md) (part 2),
+  [stage 26](stages/26.md) (part 3),
   `crates/mvf-management/tests/{manage,commands}.rs`, `crates/mvf-remote/tests/remote.rs`,
   `crates/mvf-cli/tests/cli.rs`. Spec: [`protocol/management-v1.md`](../../protocol/management-v1.md).
 
@@ -85,7 +87,37 @@ deploy prepared artifacts, replace and roll back nodes, and see previews. The co
    - The runtime keeps nothing for a client beyond the shared ring.
 6. **Privacy.** Config values never leave the runtime through management; the topology names
    editable fields only. Logs are forwarded as modules write them, so modules must not log
-   secrets. Previews are opt-in, capped and not retained (part 3).
+   secrets.
+7. **Previews (part 3, built).**
+   - **Opt-in:** a node is previewed only if it is named when the runtime starts
+     (`--preview NODE`), and only for a `previewer` or `operator`.
+   - **Sampling:** the engine thread samples at most `max_fps` per node, through a new
+     `Observer::wants_outputs`/`outputs` pair. It passes a shared lease through a single-slot
+     queue and never waits. A separate thread downscales nearest-neighbour to at most 160×120 and
+     drops the lease at once.
+   - **Encoding:** PNG with uncompressed deflate (no codec dependency), base64 in the JSON line.
+     That costs a third more bytes than binary, but keeps one protocol for the CLI, the relay and
+     the Python client. Each viewer has a byte budget (256 KiB/s by default), and a preview that
+     does not fit is skipped, never queued.
+   - **Retention:** only the latest preview per node, in memory. It is never in the ring,
+     snapshots, the audit log or on disk. Opening a preview is audited.
+   - **Rejected:**
+     - a binary side channel: a second framing through the relay for a stream capped at
+       kilobytes per second;
+     - JPEG: a codec dependency in the runtime.
+8. **Package upload (part 3, built).**
+   - **Transfer:** chunked, resumable from `upload-status` after a dropped connection or a
+     restart. Each file has a declared SHA-256, checked on arrival and again at staging.
+   - **Staging:** names are confined, sizes and counts capped, and staging is one atomic rename
+     into `<pipeline dir>/.mvf/staged/<package>`. A staged package is immutable: a new version is
+     a new name.
+   - **Activation:** an ordinary `replace` naming the staged contract, so it gets the same
+     validation, probation and `rollback` as any replacement. Upload never activates anything by
+     itself.
+   - **Not done: signatures.** Integrity rests on the digests the operator declares, and trust
+     on who may upload (operators only, audited). A signature policy, for example ed25519 over
+     the manifest checked against trusted keys in the runtime, is the next step if packages come
+     from a build system rather than from the operator.
 
 ## Measured (part 1; 200,000 cycles of 4 in-process nodes, median of 3 runs)
 
@@ -110,7 +142,15 @@ Part 2, the relay (median of 2000 pings; one remote watcher on a 10 ms publicati
 
 The runtime's own cost is unchanged by the relay: to the runtime it is one more local client.
 
-## Threat model (parts 1 and 2)
+Part 3 (release builds):
+
+| | macOS | Linux VM |
+|---|---|---|
+| 50k cycles of 64×48 RGB, previews off / on (2 fps) | 10.1–10.8 / 10.3 µs/cycle | 11.55–11.66 / 11.73–11.74 µs/cycle |
+| one preview of 1280×960 RGB → 160×120, on the preview thread | 0.70 ms, 77 KB on the wire | 0.58 ms, 77 KB |
+| 32 MiB upload over the local endpoint (base64 chunks, digest checks, staging) | 81 MiB/s | 78 MiB/s |
+
+## Threat model (parts 1–3)
 
 - **Protects against:**
   - another local user reading or connecting (filesystem permissions, then the peer-uid check;
@@ -129,7 +169,15 @@ The runtime's own cost is unchanged by the relay: to the runtime it is one more 
     - command replay (idempotency keys);
     - an operator naming files outside the package (resolver confinement);
     - unattributed actions (audit under the remote principal);
-    - a relay crash taking the run down (separate process; tested with SIGKILL).
+    - a relay crash taking the run down (separate process; tested with SIGKILL);
+  - **previews:** images of a node nobody opted in (refused), a viewer without the role (refused
+    twice), and images lingering anywhere (nothing retained);
+  - **uploads:**
+    - a corrupted or swapped file (digest check, twice);
+    - path traversal (confined names);
+    - an oversized package (caps);
+    - a package changed after staging (immutable);
+    - an upload by anyone but an operator.
 - **Does not protect against:**
   - a process of the same user: it is the operator, as with the worker protocol (ADR-0006);
   - an administrator or root;
@@ -144,7 +192,11 @@ The runtime's own cost is unchanged by the relay: to the runtime it is one more 
 
 - **Part 2** is done ([stage 25](stages/25.md)). `start` is not a command: a runtime that is not
   running has no endpoint, and starting one is the job of the host's service manager.
-- **Part 3:**
+- **Part 3** is done ([stage 26](stages/26.md)), except:
+  - package signatures;
+  - previews from the pipelined executor (serial only);
+  - edge-hardware measurements (BLOCKED).
+- **Part 3, as originally planned:**
   - opt-in previews with resolution, rate and bandwidth caps;
   - artifact upload with digest and signature policy, staged before activation and resumable
     after interruption;

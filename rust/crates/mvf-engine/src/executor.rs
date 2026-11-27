@@ -78,6 +78,23 @@ pub trait Observer {
     fn events(&mut self, events: &EngineEvents<'_>) {
         let _ = events;
     }
+    /// Whether this observer wants `node`'s output values this cycle (a sampled preview, #33).
+    /// Asked once per executed node; the default is no, so nothing is handed out.
+    fn wants_outputs(&mut self, node: &str) -> bool {
+        let _ = node;
+        false
+    }
+    /// The outputs of a node it wanted, before they go downstream. Values are shared, not copied:
+    /// a frame is a lease on its arena slot, and holding it keeps that slot in use. Serial
+    /// executor only.
+    fn outputs(
+        &mut self,
+        cycle: u64,
+        node: &str,
+        outputs: &std::collections::BTreeMap<String, Value>,
+    ) {
+        let _ = (cycle, node, outputs);
+    }
 }
 
 /// New engine events (see [`Observer::events`]).
@@ -782,6 +799,9 @@ impl Engine {
             };
 
             let count = outputs.len();
+            if observer.wants_outputs(&self.slots[i].id) {
+                observer.outputs(cycle, &self.slots[i].id, &outputs);
+            }
             for (port, value) in outputs {
                 values.insert((i, port), value);
             }

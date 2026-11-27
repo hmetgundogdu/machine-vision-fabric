@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use mvf_engine::{
@@ -19,6 +19,7 @@ use mvf_engine::{
 use serde_json::{Value, json};
 
 use crate::model::{API, Histogram, Topology};
+use crate::preview::{PreviewConfig, PreviewHub, Sampler};
 
 /// Feed sizing and budgets.
 #[derive(Debug, Clone)]
@@ -105,6 +106,8 @@ pub struct Feed {
     started_ms: u64,
     /// Publications the engine thread deferred because a reader held the lock.
     deferred: AtomicU64,
+    /// Previews, when the operator opted nodes in.
+    previews: OnceLock<Arc<PreviewHub>>,
 }
 
 impl Feed {
@@ -133,7 +136,20 @@ impl Feed {
             started: Instant::now(),
             started_ms,
             deferred: AtomicU64::new(0),
+            previews: OnceLock::new(),
         })
+    }
+
+    /// Enables previews of `config.nodes` (before the [`Tap`] is created). Off by default.
+    pub fn enable_previews(&self, config: PreviewConfig) -> Arc<PreviewHub> {
+        self.previews
+            .get_or_init(|| PreviewHub::start(config))
+            .clone()
+    }
+
+    /// The preview hub, if previews are enabled.
+    pub fn previews(&self) -> Option<&Arc<PreviewHub>> {
+        self.previews.get()
     }
 
     fn lock(&self) -> MutexGuard<'_, Shared> {
@@ -386,6 +402,8 @@ struct NodeAcc {
 #[derive(Debug)]
 pub struct Tap {
     feed: Arc<Feed>,
+    previews: Option<Arc<PreviewHub>>,
+    sampler: Sampler,
     index: BTreeMap<String, usize>,
     nodes: Vec<(String, NodeAcc)>,
     pending: Vec<Value>,
@@ -409,6 +427,8 @@ impl Tap {
                 .map(|(i, (id, _))| (id.clone(), i))
                 .collect(),
             nodes,
+            previews: feed.previews().cloned(),
+            sampler: Sampler::default(),
             feed,
             pending: Vec::new(),
             status: Some("running"),
@@ -569,6 +589,23 @@ impl Observer for Tap {
         // Events are rare and matter: publish them now rather than at the next interval.
         self.publish(true);
     }
+
+    fn wants_outputs(&mut self, node: &str) -> bool {
+        match &self.previews {
+            Some(hub) => self.sampler.wants(hub, node),
+            None => false,
+        }
+    }
+
+    fn outputs(&mut self, cycle: u64, node: &str, outputs: &BTreeMap<String, mvf_engine::Value>) {
+        if let Some(hub) = &self.previews
+            && let Some(frame) = outputs
+                .values()
+                .find(|v| matches!(v, mvf_engine::Value::Frame(_)))
+        {
+            hub.offer(node, cycle, frame);
+        }
+    }
 }
 
 /// Forwards every event to two observers (the CLI's own and a [`Tap`]).
@@ -576,12 +613,18 @@ impl Observer for Tap {
 pub struct Tee<'a, A: ?Sized, B: ?Sized> {
     a: &'a mut A,
     b: &'a mut B,
+    /// Which of the two asked for the outputs of the node being executed.
+    wanted: (bool, bool),
 }
 
 impl<'a, A: Observer + ?Sized, B: Observer + ?Sized> Tee<'a, A, B> {
     /// Both observers, `a` first.
     pub fn new(a: &'a mut A, b: &'a mut B) -> Self {
-        Self { a, b }
+        Self {
+            a,
+            b,
+            wanted: (false, false),
+        }
     }
 }
 
@@ -599,5 +642,19 @@ impl<A: Observer + ?Sized, B: Observer + ?Sized> Observer for Tee<'_, A, B> {
     fn events(&mut self, events: &EngineEvents<'_>) {
         self.a.events(events);
         self.b.events(events);
+    }
+
+    fn wants_outputs(&mut self, node: &str) -> bool {
+        self.wanted = (self.a.wants_outputs(node), self.b.wants_outputs(node));
+        self.wanted.0 || self.wanted.1
+    }
+
+    fn outputs(&mut self, cycle: u64, node: &str, outputs: &BTreeMap<String, mvf_engine::Value>) {
+        if self.wanted.0 {
+            self.a.outputs(cycle, node, outputs);
+        }
+        if self.wanted.1 {
+            self.b.outputs(cycle, node, outputs);
+        }
     }
 }

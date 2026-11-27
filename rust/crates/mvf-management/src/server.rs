@@ -27,12 +27,16 @@ pub struct ServerOptions {
     pub write_timeout: Duration,
     /// Longest request line (default 64 KiB).
     pub max_request: usize,
+    /// Longest request line once an operator has said hello (default 1 MiB: upload chunks).
+    pub max_operator_request: usize,
     /// An idle subscription gets a heartbeat this often (default 1 s).
     pub heartbeat: Duration,
     /// The run's controls; without them the endpoint is observation-only.
     pub control: Option<Control>,
     /// Append-only audit log of commands and refused connections.
     pub audit: Option<PathBuf>,
+    /// Package uploads and staging (operator only); off without it.
+    pub uploads: Option<crate::upload::UploadOptions>,
 }
 
 impl Default for ServerOptions {
@@ -42,9 +46,11 @@ impl Default for ServerOptions {
             max_clients: 8,
             write_timeout: Duration::from_secs(2),
             max_request: 64 * 1024,
+            max_operator_request: 1024 * 1024,
             heartbeat: Duration::from_secs(1),
             control: None,
             audit: None,
+            uploads: None,
         }
     }
 }
@@ -122,7 +128,13 @@ impl Server {
             .map(Audit::open)
             .transpose()?
             .map(Arc::new);
-        let commands = Arc::new(Commands::new(options.control.clone(), audit));
+        let uploads = options
+            .uploads
+            .clone()
+            .map(crate::upload::Uploads::new)
+            .transpose()?
+            .map(Arc::new);
+        let commands = Arc::new(Commands::new(options.control.clone(), audit, uploads));
         let stop = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(Counters::default());
         let listener = Arc::new(std::sync::Mutex::new(Some(listener)));
@@ -342,7 +354,11 @@ fn serve(
     let mut reader = BufReader::new(conn);
     let mut session: Option<Session> = None;
     loop {
-        let line = match read_request(&mut reader, options.max_request)? {
+        let limit = match &session {
+            Some(s) if s.role == Role::Operator => options.max_operator_request,
+            _ => options.max_request,
+        };
+        let line = match read_request(&mut reader, limit)? {
             None => return Ok(()),
             Some(Err(n)) => {
                 let _ = send(
@@ -423,6 +439,36 @@ fn serve(
                     &json!({"op": "snapshot", "seq": seq, "snapshot": snapshot}),
                 )?;
             }
+            "upload" | "upload-status" => {
+                let s = session.clone().unwrap_or_else(Session::local);
+                let reply = if s.role < Role::Operator {
+                    error(
+                        "forbidden",
+                        format!("the {} role cannot upload", s.role.as_str()),
+                    )
+                } else if let Some(u) = commands.uploads() {
+                    let r = if op == "upload" {
+                        u.upload(&msg)
+                    } else {
+                        u.status(&msg)
+                    };
+                    if op == "upload"
+                        && matches!(r["status"].as_str(), Some("complete") | Some("rejected"))
+                        && r["duplicate"] != true
+                        && let Some(a) = commands.audit()
+                    {
+                        a.record(json!({"event": "upload", "principal": s.principal, "role": s.role.as_str(), "via": s.via, "package": r["package"], "path": r["path"], "status": r["status"], "code": r["code"], "digest": r["digest"], "size": msg["size"]}));
+                    }
+                    r
+                } else {
+                    error("unavailable", "uploads are not enabled on this runtime")
+                };
+                send(&mut writer, &reply)?;
+            }
+            "preview" => {
+                let s = session.clone().unwrap_or_else(Session::local);
+                return preview(writer, feed, &s, &msg, options, stop, commands);
+            }
             "subscribe" => {
                 let from = msg["from"].as_u64();
                 let cursor = Arc::new(AtomicU64::new(0));
@@ -490,6 +536,70 @@ fn stream(
                     &json!({"op": "snapshot", "seq": seq, "snapshot": snapshot}),
                 )?;
                 cursor = seq;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Streams previews of one opted-in node, within the server's caps and the viewer's byte budget.
+fn preview(
+    mut w: Box<dyn Conn>,
+    feed: &Feed,
+    session: &Session,
+    msg: &Value,
+    options: &ServerOptions,
+    stop: &AtomicBool,
+    commands: &Commands,
+) -> std::io::Result<()> {
+    let node = msg["node"].as_str().unwrap_or_default().to_string();
+    if session.role < Role::Previewer {
+        return send(
+            &mut w,
+            &error(
+                "forbidden",
+                format!("the {} role cannot see previews", session.role.as_str()),
+            ),
+        );
+    }
+    let Some(hub) = feed.previews().filter(|h| h.enabled(&node)) else {
+        return send(
+            &mut w,
+            &error(
+                "not-enabled",
+                format!(
+                    "previews of {node:?} are not enabled on this runtime (`--preview {node}`)"
+                ),
+            ),
+        );
+    };
+    let max = hub.config().max_fps;
+    let fps = msg["fps"].as_f64().unwrap_or(max).clamp(0.01, max);
+    if let Some(a) = commands.audit() {
+        a.record(json!({"event": "preview-opened", "principal": session.principal, "role": session.role.as_str(), "via": session.via, "node": node, "fps": fps}));
+    }
+    let gap = Duration::from_secs_f64(1.0 / fps);
+    let mut budget = crate::preview::Budget::new(hub.config().bytes_per_second);
+    let mut last = 0;
+    let mut next = std::time::Instant::now();
+    let mut skipped = 0u64;
+    while !stop.load(Ordering::SeqCst) {
+        match hub.wait_newer(&node, last, options.heartbeat) {
+            None => send(
+                &mut w,
+                &json!({"op": "heartbeat", "previewsSkipped": skipped}),
+            )?,
+            Some(p) => {
+                last = p.seq;
+                let now = std::time::Instant::now();
+                if now < next || !budget.spend(p.bytes) {
+                    skipped += 1;
+                    continue;
+                }
+                next = now + gap;
+                w.write_all(p.line.as_bytes())?;
+                w.write_all(b"\n")?;
+                w.flush()?;
             }
         }
     }

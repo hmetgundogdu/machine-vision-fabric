@@ -1230,6 +1230,7 @@ dependencies = [
  "mvf-graph",
  "serde",
  "serde_json",
+ "sha2",
  "windows-sys 0.61.2",
 ]
 

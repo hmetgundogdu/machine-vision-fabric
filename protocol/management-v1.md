@@ -38,6 +38,8 @@ One JSON object per line, UTF-8, in both directions. A request line is at most 6
 |---|---|
 | `{"op":"hello","api":[1],"client":"name"}` (must come first) | `{"op":"hello","api":1,"runtime":{pid, version, pipeline, mode, startedAtMs, api},"principal":"local","role":"operator","features":["commands"]}` |
 | `{"op":"command","id":"k-1","command":"…","args":{…},"deadlineMs":5000}` | see [Commands](#commands) |
+| `{"op":"preview","node":"cam","fps":1}` | a stream of previews, see [Previews](#previews) |
+| `{"op":"upload",…}`, `{"op":"upload-status",…}` | see [Uploads](#uploads) |
 | `{"op":"snapshot"}` | `{"op":"snapshot","seq":N,"snapshot":{…}}` |
 | `{"op":"ping"}` | `{"op":"pong"}` |
 | `{"op":"subscribe","from":S}` | the stream below, starting at entry `S` |
@@ -117,7 +119,10 @@ Errors are `{"op":"error","code":…,"message":…}`. The codes:
 
 - **Roles:**
   - `observer`: snapshot, subscribe, ping;
-  - `operator`: also commands.
+  - `previewer`: also previews;
+  - `operator`: also commands and uploads.
+- **Line limit:** after an operator's `hello`, a request line may be up to 1 MiB (upload
+  chunks); for everyone else it stays 64 KiB.
 - The endpoint's owner is an `operator`, as principal `local`.
 - **`onBehalfOf`:** a client running as the owner (the relay) may speak for someone else:
   `{"op":"hello","api":[1],"onBehalfOf":{"principal":"alice","role":"observer","via":"…"}}`.
@@ -141,6 +146,7 @@ Errors are `{"op":"error","code":…,"message":…}`. The codes:
 | `configure` | `node`, `field`, `value` | live `reconfigured` or `reopened` |
 | `replace` | `node` and one of `builtin`, `module` or `contract` (inside the package); `config`, `probationCycles`, `storage` | replacement `promoted` |
 | `rollback` / `commit` | `node` | replacement `rolled-back` / `committed` |
+| `stage` | `package`, `files: {path: digest}` | the package is staged (no engine event); the reply carries `staged.contract` for `replace` |
 
 - **Validation:** every command except `stop` becomes one update-plan step and is validated
   exactly as in `mvf-rs run --updates`. The engine applies it at a cycle boundary. A contract path
@@ -164,6 +170,74 @@ Errors are `{"op":"error","code":…,"message":…}`. The codes:
 - **Shutdown:** replies to commands in flight are delivered before the endpoint closes. A `stop`
   therefore always gets its answer.
 
+## Previews
+
+Opt-in, capped, audited and never retained.
+
+- **Opt-in:** a node can be previewed only if the runtime was started with `--preview NODE`.
+  Otherwise the reply is `not-enabled`. A role below `previewer` gets `forbidden`.
+- **The stream:**
+
+  ```json
+  {"op":"preview","node":"cam","seq":12,"cycle":480,"format":"png","width":160,"height":120,"sourceWidth":1280,"sourceHeight":960,"renderUs":698,"data":"iVBORw0K…"}
+  ```
+
+  Interleaved with `{"op":"heartbeat","previewsSkipped":n}` while there is nothing new.
+- **Caps** (defaults):
+  - at most 2 samples per second per node, and fewer if the client asks for less (`fps`);
+  - at most 160 × 120 pixels, downscaled nearest-neighbour;
+  - at most 256 KiB/s per viewer. A preview that does not fit the viewer's budget is skipped,
+    never queued.
+- **Format:** 8-bit grey, RGB or RGBA becomes PNG, uncompressed deflate, base64-encoded. Any
+  other payload gets `"format":"none"` with a `reason`.
+- **Sampling:** the engine hands over a shared lease through a single-slot queue and never
+  waits. The preview thread drops the lease as soon as it has downscaled.
+- **Retention and audit:** only the latest preview per node is kept in memory. Previews are not
+  in the ring, snapshots, the audit log or on disk. Opening a preview is audited
+  (`preview-opened`: principal, node, fps).
+- **Executor:** previews come from the serial executor only.
+
+## Uploads
+
+A prepared node package (a directory with `node.yaml` and its files) goes to
+`<pipeline dir>/.mvf/staged`. Uploads are operator-only and enabled with `--allow-uploads`.
+
+- **A chunk:**
+
+  ```json
+  {"op":"upload","package":"inspect-v2","path":"model/weights.onnx","size":734003,"digest":"sha256:…","offset":524288,"data":"<base64>"}
+  ```
+
+  Replies, `status` by case:
+
+  | `status` | When |
+  |---|---|
+  | `partial` | with `received` |
+  | `complete` | the last byte arrived and the SHA-256 matched |
+  | `rejected` | `digest-mismatch`; the file is discarded |
+  | `refused` | `invalid` name, `offset-mismatch` (with `received`), `too-large` or `conflict` |
+
+  A chunk the runtime already has is acknowledged with `"duplicate": true` and not written
+  twice.
+- **Resume:** `{"op":"upload-status","package":…,"path":…}` gives `received` and `complete`, so a
+  client continues after a dropped connection or a runtime restart. A file of an already staged
+  package reports `complete`.
+- **Names:**
+  - a package is 1–64 characters `[A-Za-z0-9-_.]` and does not start with a dot;
+  - a path has up to 4 such segments: no `..`, no absolute paths, nothing hidden.
+- **Limits:** a file is at most 256 MiB, a package at most 1 GiB and 64 files.
+- **Staging:** the `stage` command checks every listed file's digest again, and that no file is
+  missing or extra. It writes `manifest.json` and renames the package into place atomically.
+  - Staging the same manifest again is a no-op (`alreadyStaged`).
+  - Other contents under the same name are refused (`exists`): a staged package is immutable,
+    so a new version gets a new name.
+- **Activation:** an ordinary `replace` with `"contract": ".mvf/staged/<package>/node.yaml"`, and
+  `rollback` to undo it.
+- **Audit:** completed and rejected files are audited (`upload`), and so are `stage`, `replace`
+  and `rollback`.
+- **Not verified:** there is no signature check on packages yet. Integrity rests on the digests
+  the operator declares, and trust on who may upload.
+
 ## Remote: the relay
 
 `mvf-remote serve` runs as the runtime's user, next to it, and listens only on the address it is
@@ -176,8 +250,10 @@ given.
      every connection.
   3. The listed name and role become `onBehalfOf` on the relay's own connection to the local
      endpoint.
-- **Commands:** an observer's command is refused at the relay (`forbidden`) and never reaches
-  the runtime; the runtime would refuse it too.
+- **Commands, uploads and previews:** the relay refuses an op the role does not allow
+  (`forbidden`) before it reaches the runtime, and the runtime would refuse it too. `preview`
+  needs a previewer and streams like `subscribe`. `upload` and `upload-status` need an operator,
+  whose request lines may be 1 MiB.
 - **Audit:** the runtime audits commands under the remote principal, `via` the relay and the
   peer address. The relay keeps its own log of admitted and refused connections and forbidden
   requests.

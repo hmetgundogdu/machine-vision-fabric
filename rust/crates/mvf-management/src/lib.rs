@@ -17,13 +17,17 @@ pub mod command;
 pub mod endpoint;
 pub mod feed;
 pub mod model;
+pub mod preview;
 pub mod server;
 pub mod sys;
+pub mod upload;
 
 pub use client::{Client, Subscription};
 pub use command::{Audit, Commands, Control, Role, Session};
 pub use endpoint::{Instance, list, runtime_dir};
 pub use feed::{Feed, FeedConfig, Read, RuntimeInfo, Tap, Tee};
 pub use model::{API, Histogram, Topology};
+pub use preview::{PreviewConfig, PreviewHub};
 pub use server::{Server, ServerOptions};
 pub use sys::{Conn, connect as connect_raw};
+pub use upload::{UploadOptions, Uploads, upload_dir};
