@@ -9,7 +9,7 @@ spec:
   nodes:
     - id: cam
       builtin: synthetic-source
-      config: { width: 8, height: 8, frames: 120, intervalMs: 5, arena: true }
+      config: { width: 8, height: 8, frames: 400, intervalMs: 10, arena: true }
     - id: proc
       builtin: invert                      # v1: trusted in-process Rust
     - id: classify

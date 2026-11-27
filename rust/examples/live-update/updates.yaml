@@ -1,10 +1,12 @@
 # Scripted live updates. Each step is submitted at the boundary before `atCycle`; the candidate is
-# prepared while the active generation keeps running, then promoted at a later boundary.
+# prepared while the active generation keeps running, then promoted at a later boundary. A step for a
+# node that is still replacing is rejected, so the gap between the steps (230 cycles of 10 ms) must
+# cover a cold Python worker start on a slow machine (1.4 s measured on a CI Windows runner).
 apiVersion: mvf.dev/v1alpha1
 kind: UpdatePlan
 spec:
   updates:
     # v1 (in-process Rust invert) -> v2 (Python worker invert): same contract, different backend.
     - { node: proc, atCycle: 20, module: py.invert-transformer, probationCycles: 10 }
-    # v2 -> v3, a candidate that fails on cycle 70: rolled back to v2, cycle 70 replayed on v2.
-    - { node: proc, atCycle: 50, builtin: fault, config: { failAtCycle: 70 }, probationCycles: 40 }
+    # v2 -> v3, a candidate that fails on cycle 280: rolled back to v2, cycle 280 replayed on v2.
+    - { node: proc, atCycle: 250, builtin: fault, config: { failAtCycle: 280 }, probationCycles: 100 }

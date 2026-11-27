@@ -171,14 +171,14 @@ fn gate_a_demo_verifies_ordered_output_replacement_and_rollback() {
         ]
     );
     let rolled = &report["replacements"][5];
-    assert_eq!(rolled["cycle"], 70);
+    assert_eq!(rolled["cycle"], 280);
     assert_eq!(
         rolled["toGeneration"], 2,
         "rolled back to the Python worker generation"
     );
     assert_eq!(report["dataPlane"]["arena"]["copiesIn"], 0);
     assert_eq!(report["dataPlane"]["arena"]["copiesOut"], 0);
-    assert_eq!(report["cyclesCompleted"], 120);
+    assert_eq!(report["cyclesCompleted"], 400);
 }
 
 #[test]
