@@ -52,13 +52,26 @@ fn codes(text: &str) -> Vec<&'static str> {
     }
 }
 
-const VOLUMES: &str = "    - { name: model-v1, type: artifact, file: models/v1.onnx, digest: \"sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    - { name: results, type: persistent }\n    - { name: camera, type: bind, hostPath: /srv/mvf-camera }\n";
+/// An operator-approved host directory, absolute on this platform (Windows paths need a drive).
+#[cfg(windows)]
+const CAMERA: &str = "'D:\\srv\\mvf-camera'";
+#[cfg(not(windows))]
+const CAMERA: &str = "/srv/mvf-camera";
+
+const VOLUMES: &str = concat!(
+    "    - { name: model-v1, type: artifact, file: models/v1.onnx, digest: \"sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n",
+    "    - { name: results, type: persistent }\n",
+);
+
+fn volumes() -> String {
+    format!("{VOLUMES}    - {{ name: camera, type: bind, hostPath: {CAMERA} }}\n")
+}
 const SHARED: &str = "    - { name: handoff, type: shared, writers: [w] }\n";
 
 #[test]
 fn mounts_resolve_to_volumes_with_the_access_the_node_asked_for() {
     let text = pipeline(
-        &format!("{VOLUMES}{SHARED}"),
+        &format!("{}{SHARED}", volumes()),
         "    - { id: insp, contract: inspector.yaml, storage: { model: model-v1, results: results } }\n    - { id: w, contract: writer.yaml, storage: { out: handoff } }\n    - { id: r, contract: reader.yaml, storage: { in: handoff } }\n",
     );
     let g = build_graph(&text, &Contracts).expect("valid");
@@ -94,7 +107,7 @@ fn mounts_resolve_to_volumes_with_the_access_the_node_asked_for() {
 
 #[test]
 fn no_node_gets_more_access_than_the_volume_allows() {
-    let c = |nodes: &str| codes(&pipeline(VOLUMES, nodes));
+    let c = |nodes: &str| codes(&pipeline(&volumes(), nodes));
     assert_eq!(
         c("    - { id: w, contract: writer.yaml, storage: { out: model-v1 } }\n"),
         ["graph.storage.read-only-volume"],
@@ -107,7 +120,7 @@ fn no_node_gets_more_access_than_the_volume_allows() {
     );
     assert_eq!(
         codes(&pipeline(
-            &format!("{VOLUMES}{SHARED}"),
+            &format!("{}{SHARED}", volumes()),
             "    - { id: w, contract: reader.yaml, storage: { in: handoff } }\n    - { id: x, contract: writer.yaml, storage: { out: handoff } }\n"
         )),
         ["graph.storage.not-a-writer"],
@@ -125,26 +138,26 @@ fn no_node_gets_more_access_than_the_volume_allows() {
 fn bindings_and_volumes_are_strict() {
     let c = |volumes: &str, nodes: &str| codes(&pipeline(volumes, nodes));
     assert_eq!(
-        c(VOLUMES, "    - { id: r, contract: reader.yaml }\n"),
+        c(&volumes(), "    - { id: r, contract: reader.yaml }\n"),
         ["graph.storage.unbound-mount"]
     );
     assert_eq!(
         c(
-            VOLUMES,
+            &volumes(),
             "    - { id: r, contract: reader.yaml, storage: { in: nope } }\n"
         ),
         ["graph.storage.unknown-volume"]
     );
     assert_eq!(
         c(
-            VOLUMES,
+            &volumes(),
             "    - { id: r, contract: reader.yaml, storage: { in: results, extra: results } }\n"
         ),
         ["graph.storage.unknown-mount"]
     );
     assert_eq!(
         c(
-            VOLUMES,
+            &volumes(),
             "    - { id: i, contract: inspector.yaml, storage: { model: model-v1, results: results, tmp: results } }\n"
         ),
         ["graph.storage.scratch-is-provisioned"]
