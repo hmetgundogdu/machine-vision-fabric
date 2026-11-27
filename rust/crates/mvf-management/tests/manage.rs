@@ -426,6 +426,12 @@ fn requests_are_bounded_and_errors_are_explicit() {
     );
     let raw = |lines: &[&str]| -> Vec<Value> {
         use std::io::{BufRead, BufReader, Write};
+        // One client at a time: wait until the previous probe's server thread has gone, or this
+        // one is told `busy` instead of what it is testing.
+        let idle = Instant::now() + Duration::from_secs(2);
+        while m.server.clients() > 0 && Instant::now() < idle {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let conn = mvf_management::connect_raw(m.server.endpoint()).expect("connect");
         let mut w = conn.duplicate().expect("dup");
         let mut r = BufReader::new(conn);
