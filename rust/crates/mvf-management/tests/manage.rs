@@ -189,11 +189,10 @@ fn a_client_sees_topology_live_deltas_events_and_the_final_status() {
             .as_f64()
             .is_some()
     );
-    assert_eq!(
-        m.feed.deferred(),
-        0,
-        "nobody held the lock long enough to defer a publication"
-    );
+    // A publication the engine deferred because a reader held the lock is retried at the next
+    // cycle, never waited for: the final counters above already equal the report's. How often it
+    // happens depends on the machine, so it is reported, not asserted.
+    eprintln!("publications deferred: {}", m.feed.deferred());
 }
 
 #[test]

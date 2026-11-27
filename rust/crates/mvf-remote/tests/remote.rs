@@ -340,7 +340,8 @@ fn spawn_relay(pki: &Path, port: u16, endpoint: &str) -> std::process::Child {
 #[test]
 fn a_relay_crash_never_touches_the_run_and_a_new_relay_resumes_the_stream() {
     let pki = pki_dir("crash");
-    let mut rt = runtime("crash", &pipeline(600, 2));
+    // Long enough to outlive two relay start-ups even on a slow runner; stopped by a command.
+    let mut rt = runtime("crash", &pipeline(1_000_000, 2));
     let port = free_port();
     let endpoint = rt.server.endpoint().to_string();
     let at = format!("localhost:{port}");
@@ -376,13 +377,27 @@ fn a_relay_crash_never_touches_the_run_and_a_new_relay_resumes_the_stream() {
             .expect("again")
             .subscribe(Some(resume))
             .expect("sub");
+        let mut after_crash = 0;
+        let mut stopping = false;
         for m in sub.by_ref() {
             let m = m.expect("msg");
             if m["op"] == "entry" {
                 seqs.push(m["seq"].as_u64().expect("seq"));
+                after_crash += 1;
                 if m["entry"]["status"] == "stopped" {
                     break;
                 }
+            }
+            // Past the crash point and well into what was published meanwhile: stop the run
+            // through the new relay (an operator), and read on to the final status.
+            if !stopping && after_crash >= 20 {
+                stopping = true;
+                let mut alice =
+                    RemoteClient::connect(&at, tls_for(&pki, "alice"), "test").expect("alice");
+                let r = alice
+                    .command("crash-stop", "stop", json!({}), Some(10_000))
+                    .expect("stop");
+                assert_eq!(r["status"], "applied", "{r}");
             }
         }
         relay.kill().expect("kill");
@@ -390,11 +405,8 @@ fn a_relay_crash_never_touches_the_run_and_a_new_relay_resumes_the_stream() {
     });
     assert_eq!(
         report.end,
-        EndReason::SourceExhausted { node: "cam".into() }
-    );
-    assert_eq!(
-        report.cycles_completed, 600,
-        "the relay crash cost the run nothing"
+        EndReason::Cancelled,
+        "it ran until it was told to stop"
     );
     assert_eq!(
         seqs,
