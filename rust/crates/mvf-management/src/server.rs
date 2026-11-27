@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::command::{Audit, Commands, Control, Role, Session};
 use crate::endpoint::{self, Instance};
 use crate::feed::{Feed, Read};
 use crate::model::API;
@@ -28,6 +29,10 @@ pub struct ServerOptions {
     pub max_request: usize,
     /// An idle subscription gets a heartbeat this often (default 1 s).
     pub heartbeat: Duration,
+    /// The run's controls; without them the endpoint is observation-only.
+    pub control: Option<Control>,
+    /// Append-only audit log of commands and refused connections.
+    pub audit: Option<PathBuf>,
 }
 
 impl Default for ServerOptions {
@@ -38,6 +43,8 @@ impl Default for ServerOptions {
             write_timeout: Duration::from_secs(2),
             max_request: 64 * 1024,
             heartbeat: Duration::from_secs(1),
+            control: None,
+            audit: None,
         }
     }
 }
@@ -50,6 +57,9 @@ struct Counters {
     disconnected: AtomicU64,
     /// The cursor of every streaming client (for a clean shutdown).
     cursors: std::sync::Mutex<Vec<Arc<AtomicU64>>>,
+    /// Commands being carried out: their replies must go out before the endpoint closes (a
+    /// `stop` ends the run, and the run's end closes the endpoint).
+    commands_in_flight: AtomicUsize,
 }
 
 /// A running management endpoint. Dropping it closes the endpoint and its registration.
@@ -106,6 +116,13 @@ impl Server {
                 registry: PathBuf::new(),
             },
         )?;
+        let audit = options
+            .audit
+            .as_deref()
+            .map(Audit::open)
+            .transpose()?
+            .map(Arc::new);
+        let commands = Arc::new(Commands::new(options.control.clone(), audit));
         let stop = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(Counters::default());
         let listener = Arc::new(std::sync::Mutex::new(Some(listener)));
@@ -118,7 +135,9 @@ impl Server {
             );
             std::thread::Builder::new()
                 .name("mvf-management".into())
-                .spawn(move || accept_loop(&listener, &stop, &feed, &options, &counters))?
+                .spawn(move || {
+                    accept_loop(&listener, &stop, &feed, &options, &counters, &commands)
+                })?
         };
         Ok(Self {
             feed,
@@ -152,8 +171,9 @@ impl Server {
 }
 
 impl Server {
-    /// Waits up to `timeout` for every streaming client to have been sent everything published
-    /// so far (the final status, at the end of a run). A stuck client is not waited for longer.
+    /// Waits up to `timeout` for every command in flight to have been answered and every
+    /// streaming client to have been sent everything published so far (the final status, at the
+    /// end of a run). A stuck client is not waited for longer.
     pub fn drain(&self, timeout: Duration) {
         let target = self.feed.last_seq();
         let deadline = std::time::Instant::now() + timeout;
@@ -164,7 +184,8 @@ impl Server {
                 .lock()
                 .map(|c| c.iter().any(|c| c.load(Ordering::Relaxed) < target))
                 .unwrap_or(false);
-            if !behind {
+            let answering = self.counters.commands_in_flight.load(Ordering::SeqCst) > 0;
+            if !behind && !answering {
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -197,6 +218,7 @@ fn accept_loop(
     feed: &Arc<Feed>,
     options: &ServerOptions,
     counters: &Arc<Counters>,
+    commands: &Arc<Commands>,
 ) {
     loop {
         let accepted = {
@@ -217,6 +239,9 @@ fn accept_loop(
         };
         if !authorized {
             counters.refused.fetch_add(1, Ordering::Relaxed);
+            if let Some(a) = commands.audit() {
+                a.record(json!({"event": "connection-refused", "reason": "unauthorized", "via": "local"}));
+            }
             let _ = send(
                 &mut conn,
                 &json!({"op": "error", "code": "unauthorized", "message": "this endpoint serves its owner only"}),
@@ -233,18 +258,19 @@ fn accept_loop(
         }
         counters.accepted.fetch_add(1, Ordering::Relaxed);
         counters.clients.fetch_add(1, Ordering::Relaxed);
-        let (feed, options, mine, stop) = (
+        let (feed, options, mine, stop, commands) = (
             feed.clone(),
             options.clone(),
             counters.clone(),
             stop.clone(),
+            commands.clone(),
         );
         let spawned = std::thread::Builder::new()
             .name("mvf-management-client".into())
             .spawn(move || {
                 // A bug in a client handler must never reach the engine or other clients.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    serve(conn, &feed, &options, &stop, &mine)
+                    serve(conn, &feed, &options, &stop, &mine, &commands)
                 }));
                 if !matches!(result, Ok(Ok(()))) {
                     mine.disconnected.fetch_add(1, Ordering::Relaxed);
@@ -309,11 +335,12 @@ fn serve(
     options: &ServerOptions,
     stop: &AtomicBool,
     counters: &Counters,
+    commands: &Commands,
 ) -> std::io::Result<()> {
     conn.set_write_timeout(options.write_timeout)?;
     let mut writer = conn.duplicate()?;
     let mut reader = BufReader::new(conn);
-    let mut greeted = false;
+    let mut session: Option<Session> = None;
     loop {
         let line = match read_request(&mut reader, options.max_request)? {
             None => return Ok(()),
@@ -341,7 +368,7 @@ fn serve(
             return Ok(());
         };
         let op = msg["op"].as_str().unwrap_or_default();
-        if !greeted && op != "hello" {
+        if session.is_none() && op != "hello" {
             send(&mut writer, &error("hello-first", "send hello first"))?;
             return Ok(());
         }
@@ -363,13 +390,32 @@ fn serve(
                     )?;
                     return Ok(());
                 }
-                greeted = true;
+                let s = match Session::from_hello(&msg) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        send(&mut writer, &error("invalid", e))?;
+                        return Ok(());
+                    }
+                };
+                let features: Vec<&str> = (commands.available() && s.role == Role::Operator)
+                    .then_some("commands")
+                    .into_iter()
+                    .collect();
                 send(
                     &mut writer,
-                    &json!({"op": "hello", "api": API, "runtime": feed.hello()}),
+                    &json!({"op": "hello", "api": API, "runtime": feed.hello(), "principal": s.principal, "role": s.role.as_str(), "features": features}),
                 )?;
+                session = Some(s);
             }
             "ping" => send(&mut writer, &json!({"op": "pong"}))?,
+            "command" => {
+                let s = session.clone().unwrap_or_else(Session::local);
+                counters.commands_in_flight.fetch_add(1, Ordering::SeqCst);
+                let reply = commands.execute(feed, &s, &msg);
+                let sent = send(&mut writer, &reply);
+                counters.commands_in_flight.fetch_sub(1, Ordering::SeqCst);
+                sent?;
+            }
             "snapshot" => {
                 let (seq, snapshot) = feed.snapshot();
                 send(

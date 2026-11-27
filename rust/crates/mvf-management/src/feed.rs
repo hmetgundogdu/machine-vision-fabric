@@ -311,6 +311,35 @@ impl Feed {
         (s.last, snapshot)
     }
 
+    /// Waits until `until` for an entry after `after` that `f` recognises (a command's outcome).
+    pub fn wait_for<T>(
+        &self,
+        after: u64,
+        until: Instant,
+        mut f: impl FnMut(&Value) -> Option<T>,
+    ) -> Option<T> {
+        let mut cursor = after;
+        loop {
+            let now = Instant::now();
+            if now >= until {
+                return None;
+            }
+            match self.read_after(cursor, until - now) {
+                Read::Entries(entries) => {
+                    for (seq, line) in entries {
+                        cursor = seq;
+                        if let Ok(v) = serde_json::from_str::<Value>(&line)
+                            && let Some(t) = f(&v["entry"])
+                        {
+                            return Some(t);
+                        }
+                    }
+                }
+                Read::Gap { to, .. } => cursor = to,
+            }
+        }
+    }
+
     /// Entries after `cursor`, waiting up to `wait` for one to arrive.
     pub fn read_after(&self, cursor: u64, wait: Duration) -> Read {
         let mut s = self.lock();

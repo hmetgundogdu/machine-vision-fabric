@@ -108,10 +108,13 @@ enum Command {
         /// Pipelined: depth of each inter-stage queue (default 2).
         #[arg(long)]
         queue: Option<usize>,
-        /// Serve live observation on a local endpoint only this OS user can reach (#33); see
-        /// `mvf-rs manage`.
+        /// Serve live observation and commands on a local endpoint only this OS user can reach
+        /// (#33); see `mvf-rs manage`.
         #[arg(long)]
         manage: bool,
+        /// With --manage: the audit log of commands (default `<pipeline dir>/.mvf/audit.jsonl`).
+        #[arg(long)]
+        audit: Option<PathBuf>,
     },
     /// List the builtins and backends this host provides.
     Host,
@@ -159,6 +162,7 @@ fn main() -> ExitCode {
             mode,
             queue,
             manage,
+            audit,
         } => {
             if require_gpu && gpu_context().is_none() {
                 return fail(
@@ -194,7 +198,7 @@ fn main() -> ExitCode {
                     rollbacks: expect_rollbacks,
                     max_cutover_us,
                 }),
-                manage,
+                manage.then_some(audit),
             )
         }
         Command::Manage { command } => manage::run(command),
@@ -671,9 +675,9 @@ fn run(
     json: bool,
     updates: Option<&Path>,
     expect: Option<Expectations>,
-    manage: bool,
+    manage: Option<Option<PathBuf>>,
 ) -> ExitCode {
-    let feed = manage.then(|| {
+    let feed = manage.is_some().then(|| {
         mvf_management::Feed::new(
             mvf_management::RuntimeInfo {
                 pipeline: String::new(),
@@ -724,7 +728,7 @@ fn run(
         last: std::time::Instant::now(),
         cycle_ms: Vec::new(),
     };
-    options.cancel = cancel;
+    options.cancel = cancel.clone();
     // Management (#33): the endpoint opens before the run and closes after the final status.
     let mut managed = match &feed {
         Some(feed) => {
@@ -734,12 +738,32 @@ fn run(
                 .map(|s| (s.id, s.backend))
                 .collect();
             feed.set_topology(&mvf_management::Topology::of(engine.graph(), &backends));
+            let audit = manage.clone().flatten().unwrap_or_else(|| {
+                services
+                    .package_dir
+                    .as_deref()
+                    .unwrap_or(Path::new("."))
+                    .join(".mvf/audit.jsonl")
+            });
+            let control = mvf_management::Control {
+                handle: engine.control(),
+                cancel: cancel.clone(),
+                resolver: std::sync::Arc::new(resolver(args)),
+            };
             match mvf_management::Server::start(
                 feed.clone(),
-                mvf_management::ServerOptions::default(),
+                mvf_management::ServerOptions {
+                    control: Some(control),
+                    audit: Some(audit.clone()),
+                    ..mvf_management::ServerOptions::default()
+                },
             ) {
                 Ok(server) => {
-                    eprintln!("  management endpoint: {}", server.endpoint());
+                    eprintln!(
+                        "  management endpoint: {} (audit: {})",
+                        server.endpoint(),
+                        audit.display()
+                    );
                     let tap = mvf_management::Tap::new(
                         feed.clone(),
                         engine.graph().nodes.iter().map(|n| n.id.clone()),

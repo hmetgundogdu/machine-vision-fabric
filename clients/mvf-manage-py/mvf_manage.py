@@ -9,8 +9,12 @@ nothing in the API is Rust-specific.
     python3 mvf_manage.py list
     python3 mvf_manage.py --endpoint PATH status [--json]
     python3 mvf_manage.py --endpoint PATH watch [--from SEQ] [--until-stopped] [--json]
+    python3 mvf_manage.py --endpoint PATH command NAME --id ID [--args JSON]
 
 Without --endpoint it uses the single runtime registered in the per-user runtime directory.
+Through an `mvf-remote` relay, over mutual TLS 1.3:
+
+    python3 mvf_manage.py --remote HOST:PORT --ca ca.pem --cert me.pem --key me.key status
 """
 
 import argparse
@@ -18,6 +22,7 @@ import glob
 import json
 import os
 import socket
+import ssl
 import sys
 
 API = 1
@@ -47,8 +52,18 @@ def registered():
 class Connection:
     """One connection: line-oriented JSON both ways."""
 
-    def __init__(self, endpoint):
-        if os.name == "nt":
+    def __init__(self, endpoint, remote=None):
+        if remote is not None:
+            host, port = remote["address"].rsplit(":", 1)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.minimum_version = ssl.TLSVersion.TLSv1_3
+            context.load_verify_locations(remote["ca"])
+            context.load_cert_chain(remote["cert"], remote["key"])
+            raw = socket.create_connection((host, int(port)))
+            self._sock = context.wrap_socket(raw, server_hostname=host)
+            self._read = self._sock.recv
+            self._write = self._sock.sendall
+        elif os.name == "nt":
             self._file = open(endpoint, "r+b", buffering=0)
             self._read = self._file.read
             self._write = self._file.write
@@ -76,8 +91,8 @@ class Connection:
         return self.receive()
 
 
-def connect(endpoint):
-    conn = Connection(endpoint)
+def connect(endpoint, remote=None):
+    conn = Connection(endpoint, remote)
     reply = conn.request({"op": "hello", "api": [API], "client": "mvf-manage-py"})
     if not reply or reply.get("op") != "hello":
         raise SystemExit("refused: %s" % json.dumps(reply))
@@ -106,6 +121,10 @@ def show_status(snapshot):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--endpoint")
+    parser.add_argument("--remote", help="an mvf-remote relay, HOST:PORT")
+    parser.add_argument("--ca")
+    parser.add_argument("--cert")
+    parser.add_argument("--key")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list")
     status = sub.add_parser("status")
@@ -114,6 +133,11 @@ def main():
     watch.add_argument("--from", dest="start", type=int)
     watch.add_argument("--until-stopped", action="store_true")
     watch.add_argument("--json", action="store_true")
+    command = sub.add_parser("command")
+    command.add_argument("name")
+    command.add_argument("--id", required=True)
+    command.add_argument("--args", default="{}")
+    command.add_argument("--deadline-ms", type=int)
     args = parser.parse_args()
 
     if args.command == "list":
@@ -121,7 +145,17 @@ def main():
             print("%-8s %-24s %s" % (r["pid"], r["pipeline"], r["endpoint"]))
         return 0
 
-    conn = connect(pick_endpoint(args))
+    if args.remote:
+        conn = connect(None, {"address": args.remote, "ca": args.ca, "cert": args.cert, "key": args.key})
+    else:
+        conn = connect(pick_endpoint(args))
+    if args.command == "command":
+        request = {"op": "command", "id": args.id, "command": args.name, "args": json.loads(args.args)}
+        if args.deadline_ms is not None:
+            request["deadlineMs"] = args.deadline_ms
+        reply = conn.request(request)
+        print(json.dumps(reply))
+        return 0 if reply.get("status") == "applied" else 1
     if args.command == "status":
         reply = conn.request({"op": "snapshot"})
         if args.json:

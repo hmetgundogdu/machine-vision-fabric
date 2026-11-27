@@ -1,0 +1,31 @@
+[package]
+name = "mvf-remote"
+description = "MVF remote management relay (#33 part 2): a separate, optional process that serves the local management API over mutually authenticated TLS, with an access list, roles and an audit log; plus its client and a small private-CA tool."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "mvf-remote"
+path = "src/main.rs"
+
+[dependencies]
+mvf-management = { path = "../mvf-management" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+clap = { version = "4.6.10", features = ["derive"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
+ring = "0.17.14"
+time = "0.3.55"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+libc = "0.2.191"
+mvf-engine = { path = "../mvf-engine" }
+mvf-graph = { path = "../mvf-graph" }

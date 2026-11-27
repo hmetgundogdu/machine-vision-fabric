@@ -1,10 +1,14 @@
 # MVF management API v1 (#33)
 
-How a client observes a running MVF runtime. Version 1 is **read-only**: a client can see the
-graph, its live state, events and logs, and cannot change anything. Commands come with the
-authorization model of part 2 ([ADR-0007](../docs/rust-runtime/adr-0007-runtime-management.md)).
-Reference implementations: `rust/crates/mvf-management` (server and client), `mvf-rs manage` (CLI)
-and `clients/mvf-manage-py` (a standard-library Python client).
+How a client observes and commands a running MVF runtime: the graph, its live state, events and
+logs, and authorized commands that go through the engine's own validation
+([ADR-0007](../docs/rust-runtime/adr-0007-runtime-management.md)).
+
+Reference implementations:
+- `rust/crates/mvf-management`: the server and client;
+- `mvf-rs manage`: the local CLI;
+- `rust/crates/mvf-remote`: the TLS relay and remote client;
+- `clients/mvf-manage-py`: a Python client using only the standard library, local or over TLS.
 
 ## Endpoint
 
@@ -21,7 +25,8 @@ and `clients/mvf-manage-py` (a standard-library Python client).
   - The registry file lives in `%LOCALAPPDATA%\mvf\run`.
 - **Discovery:** each runtime writes `<name>.json` next to its endpoint with `endpoint`, `pid`,
   `pipeline`, `startedAtMs` and `api`. Both files are removed when the runtime stops.
-- There is no network listener. Remote access is a separate, optional relay (part 2).
+- There is no network listener in the runtime. Remote access goes through the separate relay
+  (see [Remote](#remote-the-relay)).
 
 ## Framing
 
@@ -31,7 +36,8 @@ One JSON object per line, UTF-8, in both directions. A request line is at most 6
 
 | Request | Reply |
 |---|---|
-| `{"op":"hello","api":[1],"client":"name"}` (must come first) | `{"op":"hello","api":1,"runtime":{pid, version, pipeline, mode, startedAtMs, api}}` |
+| `{"op":"hello","api":[1],"client":"name"}` (must come first) | `{"op":"hello","api":1,"runtime":{pid, version, pipeline, mode, startedAtMs, api},"principal":"local","role":"operator","features":["commands"]}` |
+| `{"op":"command","id":"k-1","command":"…","args":{…},"deadlineMs":5000}` | see [Commands](#commands) |
 | `{"op":"snapshot"}` | `{"op":"snapshot","seq":N,"snapshot":{…}}` |
 | `{"op":"ping"}` | `{"op":"pong"}` |
 | `{"op":"subscribe","from":S}` | the stream below, starting at entry `S` |
@@ -46,6 +52,7 @@ Errors are `{"op":"error","code":…,"message":…}`. The codes:
 | `malformed` | the line is not JSON | closed |
 | `too-large` | the line is over 64 KiB | closed |
 | `unknown-op` | the op is not defined | stays open |
+| `invalid` | `onBehalfOf` names no valid principal or role | closed |
 | `unauthorized` | wrong OS user | closed |
 | `busy` | more than 8 clients | closed |
 
@@ -105,6 +112,78 @@ Errors are `{"op":"error","code":…,"message":…}`. The codes:
   it gets `gap`, then a fresh `snapshot`, then the stream after it.
 - **End of the run:** the stream delivers the final `status` before the runtime closes the
   endpoint. The server waits up to 1 s for clients to catch up.
+
+## Sessions and roles
+
+- **Roles:**
+  - `observer`: snapshot, subscribe, ping;
+  - `operator`: also commands.
+- The endpoint's owner is an `operator`, as principal `local`.
+- **`onBehalfOf`:** a client running as the owner (the relay) may speak for someone else:
+  `{"op":"hello","api":[1],"onBehalfOf":{"principal":"alice","role":"observer","via":"…"}}`.
+  The session then has that principal and role, never more than `operator`. An unknown role is
+  refused (`invalid`).
+- **`features`** lists `commands` only when this runtime takes commands and the role allows
+  them.
+
+## Commands
+
+```json
+{"op":"command","id":"ops-17","command":"set-value","args":{"node":"thr","value":41},"deadlineMs":5000}
+{"op":"command","id":"ops-17","command":"set-value","status":"applied","afterSeq":812,"event":{"kind":"value-set","node":"thr","cycle":96}}
+```
+
+| `command` | `args` | Applied when the engine reports |
+|---|---|---|
+| `stop` | — | status `stopped` (a clean stop at the next cycle boundary) |
+| `pause` / `resume` | `forMs` (pause) | live `paused` / `resumed` (needs a `loop`) |
+| `set-value` | `node`, `value` | live `value-set` |
+| `configure` | `node`, `field`, `value` | live `reconfigured` or `reopened` |
+| `replace` | `node` and one of `builtin`, `module` or `contract` (inside the package); `config`, `probationCycles`, `storage` | replacement `promoted` |
+| `rollback` / `commit` | `node` | replacement `rolled-back` / `committed` |
+
+- **Validation:** every command except `stop` becomes one update-plan step and is validated
+  exactly as in `mvf-rs run --updates`. The engine applies it at a cycle boundary. A contract path
+  must stay inside the package: no absolute paths, no `..`.
+- **`status`:**
+
+  | Status | Meaning |
+  |---|---|
+  | `applied` | the engine reported the effect; `event` is its record |
+  | `rejected` | the engine refused it; nothing changed |
+  | `pending` | no outcome before `deadlineMs` (default 5000, at most 60000); follow the stream after `afterSeq` |
+  | `refused` | not sent: `forbidden` (role), `unknown-command`, `invalid` (arguments), `id-required` or `unavailable` |
+
+- **Idempotency:** `id` is required, 1–128 characters `[A-Za-z0-9-_.:]`. A repeated `id` from the
+  same principal is never sent again; the first reply comes back with `"duplicate": true`. The
+  last 4096 ids are remembered.
+- **Audit:** every command, refused ones included, is appended to the runtime's audit log as one
+  JSON line: principal, role, via, id, command, args, status, event. The default log is
+  `<pipeline dir>/.mvf/audit.jsonl` (mode 0600), or the file given by `--audit`. Refused
+  connections are recorded there too.
+- **Shutdown:** replies to commands in flight are delivered before the endpoint closes. A `stop`
+  therefore always gets its answer.
+
+## Remote: the relay
+
+`mvf-remote serve` runs as the runtime's user, next to it, and listens only on the address it is
+given.
+
+- **Protocol:** the same JSON lines over **TLS 1.3 with a client certificate**. The relay checks
+  each connection in turn:
+  1. The certificate must chain to the relay's CA and be within its validity dates.
+  2. Its SHA-256 fingerprint must be in `access.json` and not revoked. The file is re-read for
+     every connection.
+  3. The listed name and role become `onBehalfOf` on the relay's own connection to the local
+     endpoint.
+- **Commands:** an observer's command is refused at the relay (`forbidden`) and never reaches
+  the runtime; the runtime would refuse it too.
+- **Audit:** the runtime audits commands under the remote principal, `via` the relay and the
+  peer address. The relay keeps its own log of admitted and refused connections and forbidden
+  requests.
+- **Limits:** 8 clients, a 5 s handshake, a 5 min idle timeout, a 5 s write timeout, requests of
+  at most 64 KiB.
+- **Certificates:** `mvf-remote pki init|issue|revoke` manages a small private CA (ECDSA P-256).
 
 ## Guarantees and budgets
 

@@ -8,10 +8,12 @@
 //!   (see [`sys`] for how each platform enforces that). [`Client`] is the other end.
 //! - The wire protocol is newline-delimited JSON, API version 1: `protocol/management-v1.md`.
 //!
-//! Remote access, commands and authorization are part 2 (ADR-0007). Nothing here lets a client
-//! change what the engine does.
+//! Part 2 adds [`command`]: authorized, idempotent, deadline-bounded and audited commands that go
+//! through the engine's own validation. Remote access is a separate relay process (`mvf-remote`),
+//! never a network listener in the runtime (ADR-0007).
 
 pub mod client;
+pub mod command;
 pub mod endpoint;
 pub mod feed;
 pub mod model;
@@ -19,6 +21,7 @@ pub mod server;
 pub mod sys;
 
 pub use client::{Client, Subscription};
+pub use command::{Audit, Commands, Control, Role, Session};
 pub use endpoint::{Instance, list, runtime_dir};
 pub use feed::{Feed, FeedConfig, Read, RuntimeInfo, Tap, Tee};
 pub use model::{API, Histogram, Topology};

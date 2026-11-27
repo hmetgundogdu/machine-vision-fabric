@@ -1,5 +1,6 @@
-//! `mvf-rs manage …` (#33 part 1): observe a running runtime over its local management endpoint
-//! (`mvf-rs run --manage`). Read-only in this version: nothing here changes what the engine does.
+//! `mvf-rs manage …` (#33): observe a running runtime over its local management endpoint
+//! (`mvf-rs run --manage`), and run commands as its owner. Every command goes through the engine's
+//! own validation, is idempotent by `--id`, and is written to the run's audit log.
 
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -8,6 +9,8 @@ use clap::Subcommand;
 use mvf_management::{Client, list, runtime_dir};
 use serde_json::Value;
 
+// Parsed once from the command line; boxing the larger variant would buy nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum ManageCommand {
     /// Runtimes registered for this user.
@@ -43,6 +46,45 @@ pub enum ManageCommand {
         /// Give up reconnecting after this many seconds without a connection (default 30).
         #[arg(long, default_value_t = 30)]
         reconnect_secs: u64,
+    },
+    /// Run a command: stop, pause, resume, set-value, configure, replace, rollback, commit.
+    Command {
+        /// The command.
+        name: String,
+        /// Endpoint; default: the only registered runtime.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Idempotency key: repeating a command with the same id never runs it twice (default:
+        /// generated).
+        #[arg(long)]
+        id: Option<String>,
+        /// Target node.
+        #[arg(long)]
+        node: Option<String>,
+        /// `set-value` / `configure`: the new value, as JSON.
+        #[arg(long)]
+        value: Option<String>,
+        /// `configure`: the bound config field.
+        #[arg(long)]
+        field: Option<String>,
+        /// `replace`: candidate module id.
+        #[arg(long)]
+        module: Option<String>,
+        /// `replace`: candidate builtin.
+        #[arg(long)]
+        builtin: Option<String>,
+        /// `replace`: candidate contract, inside the pipeline's package.
+        #[arg(long)]
+        contract: Option<String>,
+        /// `replace`: candidate config, as a JSON object.
+        #[arg(long)]
+        config: Option<String>,
+        /// `pause`: resume by itself after this many milliseconds.
+        #[arg(long)]
+        for_ms: Option<u64>,
+        /// Wait at most this long for the outcome (default 5000, at most 60000).
+        #[arg(long)]
+        deadline_ms: Option<u64>,
     },
 }
 
@@ -130,6 +172,63 @@ pub fn run(command: ManageCommand) -> ExitCode {
                 until_stopped,
                 Duration::from_secs(reconnect_secs),
             )
+        }
+        ManageCommand::Command {
+            name,
+            endpoint: e,
+            id,
+            node,
+            value,
+            field,
+            module,
+            builtin,
+            contract,
+            config,
+            for_ms,
+            deadline_ms,
+        } => {
+            let e = match endpoint(e) {
+                Ok(e) => e,
+                Err(code) => return code,
+            };
+            let parse = |what: &str, text: Option<String>| -> Result<Option<Value>, ExitCode> {
+                text.map(|t| {
+                    serde_json::from_str(&t)
+                        .map_err(|err| fail(format!("--{what} is not JSON: {err}")))
+                })
+                .transpose()
+            };
+            let (value, config) = match (parse("value", value), parse("config", config)) {
+                (Ok(v), Ok(c)) => (v, c),
+                (Err(code), _) | (_, Err(code)) => return code,
+            };
+            let args = serde_json::json!({
+                "node": node, "value": value, "field": field, "module": module,
+                "builtin": builtin, "contract": contract, "config": config, "forMs": for_ms,
+            });
+            let id = id.unwrap_or_else(|| {
+                format!(
+                    "cli-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                )
+            });
+            let reply = Client::connect(&e, "mvf-rs")
+                .and_then(|mut c| c.command(&id, &name, args, deadline_ms));
+            match reply {
+                Ok(r) => {
+                    println!("{r}");
+                    match r["status"].as_str() {
+                        Some("applied") => ExitCode::SUCCESS,
+                        Some("pending") => ExitCode::from(3),
+                        _ => ExitCode::from(1),
+                    }
+                }
+                Err(err) => fail(format!("{e}: {err}")),
+            }
         }
     }
 }

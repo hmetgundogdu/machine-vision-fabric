@@ -429,3 +429,61 @@ fn a_managed_run_is_listed_watched_and_reports_its_final_status() {
         .expect("status");
     assert!(!out.status.success(), "no runtime left to report on");
 }
+
+/// `mvf-rs manage command stop` stops a managed run at the next boundary, and the command is
+/// audited (#33 part 2).
+#[test]
+fn a_managed_run_stops_on_a_command_and_audits_it() {
+    let dir = std::env::temp_dir().join(format!("mvf-cli-command-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let pipeline = dir.join("pipeline.yaml");
+    std::fs::write(
+        &pipeline,
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: { name: stoppable }\nspec:\n  nodes:\n    - { id: cam, builtin: synthetic-source, config: { width: 8, height: 8, frames: 1000000, intervalMs: 5 } }\n    - { id: sink, builtin: record }\n  edges:\n    data:\n      - { from: cam.frame, to: sink.frame }\n",
+    )
+    .expect("pipeline");
+    let runtime = dir.join("run");
+    let audit = dir.join("audit.jsonl");
+    let mut run = mvf()
+        .args(["run", "--manage", "--audit"])
+        .arg(&audit)
+        .arg(&pipeline)
+        .env("MVF_RUNTIME_DIR", &runtime)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("run");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let stop = loop {
+        let out = mvf()
+            .args(["manage", "command", "stop", "--id", "cli-stop-1"])
+            .env("MVF_RUNTIME_DIR", &runtime)
+            .output()
+            .expect("command");
+        if out.status.success() {
+            break out;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    let reply: serde_json::Value = serde_json::from_slice(&stop.stdout).expect("reply");
+    assert_eq!(reply["status"], "applied", "{reply}");
+    assert!(
+        run.wait().expect("wait").success(),
+        "a commanded stop is a clean end"
+    );
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(&audit)
+        .expect("audit")
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json"))
+        .collect();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["command"], "stop");
+    assert_eq!(records[0]["principal"], "local");
+    assert_eq!(records[0]["status"], "applied");
+}

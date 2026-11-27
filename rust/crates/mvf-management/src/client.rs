@@ -87,6 +87,22 @@ impl Client {
         ))
     }
 
+    /// Runs a command (`stop`, `pause`, `resume`, `set-value`, `configure`, `replace`, `rollback`,
+    /// `commit`) under idempotency key `id`, waiting at most `deadline_ms` for the outcome.
+    pub fn command(
+        &mut self,
+        id: &str,
+        command: &str,
+        args: Value,
+        deadline_ms: Option<u64>,
+    ) -> std::io::Result<Value> {
+        let mut req = json!({"op": "command", "id": id, "command": command, "args": args});
+        if let Some(d) = deadline_ms {
+            req["deadlineMs"] = json!(d);
+        }
+        self.request(&req)
+    }
+
     /// Subscribes from sequence `from` (inclusive), or, without one, from a fresh snapshot.
     pub fn subscribe(mut self, from: Option<u64>) -> std::io::Result<Subscription> {
         let mut req = json!({"op": "subscribe"});
