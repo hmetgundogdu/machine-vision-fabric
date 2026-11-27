@@ -59,7 +59,10 @@ where the scheduler places the child. Pinned to one CPU, the SDKs' own costs sho
 | Rust fixture | 73.1 → 70.3 | −4 % |
 
 The anonymous-pipe round trip with its reader-thread hop costs about 60–70 µs there, whatever the
-framing. [Stage 23](stages/23.md) adds the direct Windows receive path that this pointed to.
+framing. [Stage 23](stages/23.md) adds the direct Windows receive path that this pointed to. On
+the CI runner, in one run, it cuts cycle time by 24–40 % against the reader thread for every
+node: C++ 40.8 → 24.4, .NET 36.9 → 23.5, the Rust fixture 42.4 → 25.6 µs/frame. That brings
+Windows on a par with the Ubuntu and macOS runners.
 
 ## Decision
 
