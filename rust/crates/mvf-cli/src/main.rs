@@ -1,4 +1,4 @@
-//! `mvf-rs` — native CLI for the MVF Rust runtime.
+//! `mvf` — native CLI for the MVF Rust runtime.
 //!
 //! Exit codes: 0 = run ended normally (cycle limit, source exhausted, cancelled) or validation passed;
 //! 1 = a node failed or could not start; 2 = invalid input (YAML, contract, graph, negotiation).
@@ -24,9 +24,9 @@ use mvf_worker::WorkerBackend;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "mvf-rs",
+    name = "mvf",
     version,
-    about = "MVF runtime (Rust): validate, run, import and manage MVF pipelines"
+    about = "MachineVisionFabric runtime: validate, run, import and manage pipelines"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -126,7 +126,7 @@ enum Command {
         #[arg(long)]
         queue: Option<usize>,
         /// Serve live observation and commands on a local endpoint only this OS user can reach
-        /// (#33); see `mvf-rs manage`.
+        /// (#33); see `mvf manage`.
         #[arg(long)]
         manage: bool,
         /// With --manage: the audit log of commands (default `<pipeline dir>/.mvf/audit.jsonl`).
@@ -155,7 +155,7 @@ enum Command {
         #[command(subcommand)]
         command: image::ImageCommand,
     },
-    /// Observe a running `mvf-rs run --manage` (#33): list, status, watch.
+    /// Observe a running `mvf run --manage` (#33): list, status, watch.
     Manage {
         #[command(subcommand)]
         command: manage::ManageCommand,
@@ -486,7 +486,7 @@ fn import_legacy(
     }
     if !report.unresolved.is_empty() {
         eprintln!(
-            "{} module(s) cannot run under mvf-rs yet; the pipeline was written but does not validate",
+            "{} module(s) cannot run under mvf yet; the pipeline was written but does not validate",
             report.unresolved.len()
         );
         return ExitCode::from(1);

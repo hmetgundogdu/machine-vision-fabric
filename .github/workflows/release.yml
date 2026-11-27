@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   dotnet-sdk-nuget:
-    name: .NET SDK → NuGet
+    name: .NET worker SDK → NuGet
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,12 +19,9 @@ jobs:
       - name: Pack
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          # The SDK depends on the two contract assemblies, so they must be published too — otherwise
-          # authors cannot restore MachineVisionFabric.Sdk and resort to hand-built fallback DLLs whose
-          # assembly identity drifts from the runtime's (the plugin-load FileNotFoundException class).
-          dotnet pack src/core/Mvf.Graph/Mvf.Graph.csproj -c Release -p:Version="$VERSION" -o dist
-          dotnet pack src/core/Mvf.Abstractions/Mvf.Abstractions.csproj -c Release -p:Version="$VERSION" -o dist
-          dotnet pack src/sdk/dotnet/Mvf.Sdk/Mvf.Sdk.csproj -c Release -p:Version="$VERSION" -o dist
+          # C# nodes run under `mvf` as workers built with this SDK (#32). The in-process SDK of the
+          # legacy runtime (Mvf.Sdk, Mvf.Graph, Mvf.Abstractions) is archived; its last packages are 1.1.0.
+          dotnet pack src/sdk/dotnet/Mvf.Worker/Mvf.Worker.csproj -c Release -p:Version="$VERSION" -o dist
       - uses: actions/upload-artifact@v4
         with:
           name: nuget
@@ -78,41 +75,10 @@ jobs:
           name: cpp-${{ matrix.label }}
           path: mvf-sdk-cpp-${{ github.ref_name }}-${{ matrix.label }}.zip
 
+  # The CLI (#10, #34): `mvf` (validate, run, import, manage), the mvf-remote relay and signer, and
+  # mvf-display-host. No .NET or Docker needed to run them.
   cli:
     name: CLI (${{ matrix.label }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-latest,  label: linux-x64, rid: linux-x64 }
-          - { os: macos-latest,   label: osx-arm64, rid: osx-arm64 }
-          - { os: windows-latest, label: win-x64,   rid: win-x64 }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          global-json-file: global.json
-      # Just the CLI: a single self-contained executable per OS (no dotnet on PATH needed,
-      # no integration modules or packages bundled).
-      - name: Publish CLI (single-file, self-contained)
-        shell: pwsh
-        run: |
-          $v = "${{ github.ref_name }}".TrimStart('v')
-          dotnet publish src/cli/Mvf.Cli/Mvf.Cli.csproj -c Release -r ${{ matrix.rid }} `
-            --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
-            -p:Version=$v -o cli-out --nologo
-          $ext = if ($IsWindows) { ".exe" } else { "" }
-          Copy-Item "cli-out/Mvf.Cli$ext" "mvf-cli-${{ matrix.label }}$ext"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cli-${{ matrix.label }}
-          path: mvf-cli-${{ matrix.label }}*
-
-  # The Rust runtime (#10, #34): mvf-rs (validate, run, import, manage), the mvf-remote relay and
-  # signer, and the mvf-display-host. No .NET or Docker needed to run them.
-  rust-runtime:
-    name: Rust runtime (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -136,23 +102,27 @@ jobs:
           [ "$want" = "$have" ] || { echo "tag $GITHUB_REF_NAME, but rust/Cargo.toml says $have"; exit 1; }
       - name: Build (release)
         run: cargo build --release --locked -p mvf-cli -p mvf-remote -p mvf-display-host
+        env:
+          # Shipped binaries without debug info (the repository profile keeps it for profiling).
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
+          CARGO_PROFILE_RELEASE_STRIP: "debuginfo"
       - name: Package
         shell: pwsh
         run: |
           $ext = if ($IsWindows) { ".exe" } else { "" }
-          $stage = "stage/mvf-rs-${{ github.ref_name }}-${{ matrix.label }}"
+          $stage = "stage/mvf-${{ github.ref_name }}-${{ matrix.label }}"
           New-Item -ItemType Directory -Force $stage | Out-Null
-          foreach ($b in "mvf-rs", "mvf-remote", "mvf-display-host") { Copy-Item "target/release/$b$ext" $stage }
+          foreach ($b in "mvf", "mvf-remote", "mvf-display-host") { Copy-Item "target/release/$b$ext" $stage }
           Copy-Item ../LICENSE $stage
-          Compress-Archive -Path $stage -DestinationPath "../mvf-rs-${{ github.ref_name }}-${{ matrix.label }}.zip"
+          Compress-Archive -Path $stage -DestinationPath "../mvf-${{ github.ref_name }}-${{ matrix.label }}.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: rust-${{ matrix.label }}
-          path: mvf-rs-${{ github.ref_name }}-${{ matrix.label }}.zip
+          name: cli-${{ matrix.label }}
+          path: mvf-${{ github.ref_name }}-${{ matrix.label }}.zip
 
   release:
     name: Publish GitHub Release
-    needs: [dotnet-sdk-nuget, python-sdk-wheel, cpp-sdk, cli, rust-runtime]
+    needs: [dotnet-sdk-nuget, python-sdk-wheel, cpp-sdk, cli]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

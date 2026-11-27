@@ -1,7 +1,7 @@
 //! Opt-in image previews (#33 part 3).
 //!
 //! - **Opt-in per node.** Only nodes the operator named when starting the runtime
-//!   (`mvf-rs run --manage --preview cam`) are ever sampled. Nothing is previewed by default.
+//!   (`mvf run --manage --preview cam`) are ever sampled. Nothing is previewed by default.
 //! - **Capped.**
 //!   - Sampling is at most `max_fps` per node, and the engine hands over a frame only when the
 //!     single-slot queue is free.

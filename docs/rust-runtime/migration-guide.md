@@ -1,30 +1,32 @@
-# Migrating a legacy pipeline to the Rust runtime (`mvf-rs`)
+# Migrating a legacy pipeline to `mvf`
 
-Since v1.1.0 the release ships both runtimes:
+`mvf` is the MVF runtime. The legacy .NET runtime (engine, CLI, in-process SDK and modules,
+egress) is archived (#34):
 
-- **`mvf-rs`** (Rust) is the runtime new pipelines should use.
-- **The legacy .NET CLI** (`mvf-cli-<os>`) is unchanged, and stays the rollback path until a real
-  pipeline has been validated on the edge (#34).
+- **Code:** branch `archive/dotnet-legacy`, tag `dotnet-legacy-final`.
+- **Last release that ships it:** v1.1.0, which has the legacy CLI as `mvf-cli-<os>` and the Rust
+  runtime as `mvf-rs-v1.1.0-<os>.zip`. From v2.0.0 the binary is called `mvf`.
 
-Nothing below removes or changes a legacy package. The importer writes `pipeline.yaml` next to
-`pipeline.json`, and both runtimes can run the same package side by side.
+Nothing below changes a legacy package. The importer writes `pipeline.yaml` next to
+`pipeline.json`, so the legacy CLI from v1.1.0 can still run the same package for comparison or
+rollback.
 
 ## 1. Install
 
-Download `mvf-rs-v1.1.0-<os>.zip` from the release and unpack it. It holds:
+Download `mvf-<version>-<os>.zip` from the release and unpack it. It holds:
 
-- `mvf-rs`;
+- `mvf`;
 - `mvf-remote` (TLS relay, package signing);
 - `mvf-display-host`.
 
-No .NET, Docker or CLR is needed to run them. Python modules need Python 3 and the MVF Python SDK,
-as they do under .NET.
+No .NET, Docker or CLR is needed to run them. Python modules need Python 3 and the MVF Python SDK
+(`pip install mvf-sdk`), as they did under .NET.
 
 ## 2. Convert
 
 ```text
-mvf-rs import packages/my-line                 # writes packages/my-line/pipeline.yaml, then validates it
-mvf-rs import packages/my-line --modules ../modules --force
+mvf import packages/my-line                 # writes packages/my-line/pipeline.yaml, then validates it
+mvf import packages/my-line --modules ../modules --force
 ```
 
 What the importer does, and refuses:
@@ -58,7 +60,7 @@ What the importer does, and refuses:
 
 ## 4. Settings and bindings
 
-- **Bindings and values.** The .NET CLI asks for a missing binding. `mvf-rs` never prompts: it
+- **Bindings and values.** The .NET CLI asks for a missing binding. `mvf` never prompts: it
   reads `<package>/.mvf/bindings.json` or `MVF_BINDING_<KEY>`, and otherwise names the missing key
   before the first cycle. Example: `MVF_BINDING_CAMERA_SERIAL=DEF456`.
 - **Pacing** (`frameIntervalMs`) and relative paths (`sourceFolder`, `outputRoot`) mean the same
@@ -66,19 +68,20 @@ What the importer does, and refuses:
 
 ## 5. Run
 
-| .NET CLI | mvf-rs |
+| .NET CLI | mvf |
 |---|---|
-| `execute-graph --package P --max-cycles N` | `mvf-rs run P/pipeline.yaml --max-cycles N` |
+| `execute-graph --package P --max-cycles N` | `mvf run P/pipeline.yaml --max-cycles N` |
 | `--integrations-root modules` | `--modules modules` (default: the nearest `modules/` above the package) |
-| `validate-pipeline --path P/pipeline.json` | `mvf-rs validate P/pipeline.yaml` |
-| live TUI dashboard | `mvf-rs run … --manage`, then `mvf-rs manage watch` / `status` / `preview` |
-| `modules`, `packages` | `mvf-rs host` (builtins and backends) |
-| stage-parallel run | `mvf-rs run … --mode pipelined` |
+| `validate-pipeline --path P/pipeline.json` | `mvf validate P/pipeline.yaml` |
+| live TUI dashboard | `mvf run … --manage`, then `mvf manage watch` / `status` / `preview` |
+| `modules`, `packages` | `mvf host` (builtins and backends) |
+| stage-parallel run | `mvf run … --mode pipelined` |
 
 ## 6. Validate before switching over
 
 Run both runtimes on the same input and compare what they write. For the demo packages this is
-automated, converting each legacy package with the importer:
+automated. The script checks out the archived engine (tag `dotnet-legacy-final`) into
+`.legacy-dotnet/`, builds it, and converts each legacy package with the importer:
 
 ```text
 RUST_SOURCE=import rust/scripts/parity-demos.sh
@@ -87,24 +90,28 @@ RUST_SOURCE=import RUST_MODE=pipelined rust/scripts/parity-demos.sh
 
 It compares every dataset file by SHA-256, plus per-frame metadata.
 
-For a real line, do the same with its recorded frames: point a folder source at them, run
-`mvf-cli execute-graph` and `mvf-rs run`, and compare the two `out/` directories. Then run
-`mvf-rs` in shadow, beside the production runtime with outputs to a separate folder, for a
+For a real line, do the same with its recorded frames:
+
+1. Point a folder source at them.
+2. Run the legacy CLI (`mvf-cli-<os> execute-graph`, from v1.1.0) and `mvf run`.
+3. Compare the two `out/` directories.
+
+Then run `mvf` in shadow, beside the production runtime with outputs to a separate folder, for a
 soak period before switching.
 
 ## 7. Rollback
 
-- The legacy package is untouched. Run it with the legacy CLI from the same release
-  (`mvf-cli-<os>`), or from v1.0.0.
+- The legacy package is untouched. Run it with the v1.1.0 legacy CLI (`mvf-cli-<os>`), or build
+  it from the archive: `git worktree add ../mvf-legacy dotnet-legacy-final`.
 - Delete `pipeline.yaml`, or keep it: the legacy CLI only reads `pipeline.json`.
 - Binding values in `.mvf/bindings.json` are shared, so a value edited under one runtime is seen
   by the other.
 
 ## Known differences
 
-- **No interactive TUI or prompts in `mvf-rs`.** Observation and commands go through
+- **No interactive TUI or prompts in `mvf`.** Observation and commands go through
   `--manage` (local, authenticated) and optionally `mvf-remote` (mutual TLS).
-- **Live edits** come from an update plan (`--updates`) or `mvf-rs manage command`, not from
+- **Live edits** come from an update plan (`--updates`) or `mvf manage command`, not from
   keystrokes.
 - **Realtime egress is not ported.** `--egress tcp|ws|udp` on the .NET CLI (live state and frame
   data to external viewers) has no Rust equivalent. The management feed and previews cover

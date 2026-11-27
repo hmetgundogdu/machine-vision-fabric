@@ -1223,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-cli"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "clap",
  "ctrlc",
@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-compute"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "mvf-contract",
  "mvf-engine",
@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-container"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "mvf-contract",
  "mvf-display",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-contract"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "saphyr-parser",
  "semver",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-display"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "crc32fast",
  "libc",
@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-display-host"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "memmap2",
  "mvf-contract",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-engine"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "mvf-contract",
  "mvf-display",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-graph"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "mvf-contract",
  "regex",
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-ipc"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "libc",
  "mvf-engine",
@@ -1350,7 +1350,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-management"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "ed25519-dalek",
  "libc",
@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-memory"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "memmap2",
  "serde",
@@ -1374,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-oci"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "flate2",
  "serde",
@@ -1386,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-remote"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "clap",
  "libc",
@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-storage"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "libc",
  "mvf-contract",
@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "mvf-worker"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "libc",
  "mvf-contract",

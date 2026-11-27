@@ -207,7 +207,7 @@ impl OciBackend {
                 NodeError::new(
                     NodeErrorKind::StartFailed,
                     format!(
-                        "image {digest} is not in the store (import it with `mvf-rs image import`)"
+                        "image {digest} is not in the store (import it with `mvf image import`)"
                     ),
                 )
             })

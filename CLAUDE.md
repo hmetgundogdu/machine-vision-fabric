@@ -80,7 +80,8 @@ The central system may observe:
 
 ## Technology Defaults
 
-- engine: `C# / .NET 10 LTS`
+- engine: `Rust` (`rust/`, the `mvf` executable); the legacy C# / .NET runtime is archived (branch `archive/dotnet-legacy`, #34)
+- node SDKs: Python, C++ and C# (`Mvf.Worker`), all as supervised workers
 - studio UI: `React + TypeScript + React Flow`
 - desktop shell if ever needed: `Tauri`
 - inference: `ONNX Runtime`

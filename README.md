@@ -4,190 +4,142 @@
 [![Release](https://img.shields.io/github/v/release/hmetgundogdu/machine-vision-fabric?sort=semver)](https://github.com/hmetgundogdu/machine-vision-fabric/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**MachineVisionFabric (MVF)** is an open-source, high-performance **polyglot pipeline engine**.
-You compose a strict, typed graph of processing nodes — and write those nodes in **.NET, Python,
-or C++**, mixing languages freely in the same pipeline. Typed payloads — images, tensors, raw
-blobs, or any data/signal — move between nodes **zero-copy through a shared-memory arena**: no
-serialization, no base64, so a Python node and a C++ node hand off a tensor at memory speed. Data
-flow and control flow are separate, typed edges. It runs self-contained at the edge; a central
-server is optional and only ever observes.
+**MachineVisionFabric (MVF)** is an open-source edge runtime for **typed vision pipelines**.
 
-<p align="center">
-  <img src="docs/assets/cli-demo.svg" alt="mvf CLI live graph dashboard running inspection-demo" width="860">
-</p>
+- **Graph:** a strict, directional graph of nodes, written in **Python, C++ or C#** and mixed freely
+  in one pipeline.
+- **Data:** typed payloads (images, tensors, blobs, JSON) move between nodes **zero-copy** through
+  a shared-memory arena.
+- **Edges:** data flow and control flow are separate, typed edge kinds.
+- **Edge-first:** the runtime runs self-contained on panel PCs, industrial PCs and NUC-class
+  devices. A central system is optional and only observes.
 
-Above is the CLI's **live graph dashboard** running `packages/inspection-demo` — a 13-node graph
-(folder-source simulator → fork → Python brightness/counter + invert workers → switch → routed
-dataset sinks) executing end-to-end with **no hardware**. Node boxes are colour-coded by
-category, show their live config and per-node stats, and the executing node is highlighted; the
-**log panel** underneath streams every node execution, timing, and recovery event as it happens.
-Full walkthrough: [**CLI guide**](docs/cli-guide.md).
+The runtime is **`mvf`**, a single native executable written in Rust, with no .NET, JVM or Docker
+dependency.
 
 ## Why MVF
 
-- **Polyglot, one protocol** — write a node in **.NET, Python, or C++** and mix them in one graph;
-  they all speak the same stdio control + shared-memory data contract.
-- **High performance** — typed payloads live in a shared-memory arena and are read/written **in
-  place (zero-copy, no base64)**; a pipelined, parallel executor keeps stages busy and joins
-  multiple inputs.
-- **Strict typed graph** — every edge is typed and schema-validated at runtime, not just in a UI:
-  `NODE(typed output) → NODE(typed input)`.
-- **Data flow ≠ control flow** — payload transfer (**data edges**) and decisions/signals
-  (**control edges**) are separate first-class link types, never collapsed.
-- **Any payload** — images, tensors (dtype + shape), raw blobs, or JSON; the descriptor is
-  self-describing, so a node always knows the type it receives.
-- **Runs anywhere, nothing to install to try** — self-contained at the edge, no central server;
-  simulator sources ship in-box so the demos run with no hardware attached.
+- **Polyglot, one protocol.** Python, C++ and .NET nodes are supervised worker processes that
+  speak the same stdio control protocol, with payloads in the shared-memory arena ([worker
+  protocol v2](protocol/worker-v2.md)).
+- **Strict typed graph.** Ports, payload types and config schemas are validated when the
+  pipeline loads, and again at run time: `NODE(typed output) → NODE(typed input)`.
+- **Data flow ≠ control flow.** Frames and tensors move on data edges. Decisions (`if`,
+  `switch`, gates) move on control edges.
+- **Built for the line:**
+  - serial or pipelined execution, with per-node parallelism;
+  - failure policies (`fail`, `skip`, `restart`) and backpressure;
+  - checkpoints and resume;
+  - live node replacement with probation and rollback.
+- **Fabrics for real deployments:** networking ([#23](https://github.com/hmetgundogdu/machine-vision-fabric/issues/23)),
+  storage (volumes, pinned models; [#31](https://github.com/hmetgundogdu/machine-vision-fabric/issues/31)),
+  display (windows and input from nodes; [#30](https://github.com/hmetgundogdu/machine-vision-fabric/issues/30)),
+  and optional daemonless OCI containers on Linux.
+- **Observable and manageable:**
+  - an authenticated local management endpoint for status, events, commands and opt-in
+    previews;
+  - an optional mutual-TLS relay (`mvf-remote`);
+  - signed package upload ([#33](https://github.com/hmetgundogdu/machine-vision-fabric/issues/33)).
+- **Testable without hardware.** Simulator sources (folder sequence, synthetic camera) are built
+  in.
 
-See [`docs/architecture-foundation.md`](docs/architecture-foundation.md) and
-[`docs/roadmap.md`](docs/roadmap.md) for the full design.
+Design: [`docs/architecture-foundation.md`](docs/architecture-foundation.md) and the runtime's
+decision records in [`docs/rust-runtime/`](docs/rust-runtime/README.md).
 
 ## Repository layout
 
 ```text
 machine-vision-fabric/
-├── src/
-│   ├── core/            Mvf.Graph (typed graph + validation), Mvf.Abstractions (contracts)
-│   ├── engine/          Mvf.Engine (pipelined scheduler, checkpoint/restore, backpressure)
-│   ├── hosting/         Mvf.Hosting.Worker (out-of-process module host)
-│   ├── transports/      Mvf.Transport.SharedMemory (zero-copy data plane)
-│   ├── sdk/
-│   │   ├── dotnet/      Mvf.Sdk         → NuGet:  MachineVisionFabric.Sdk
-│   │   ├── python/      mvf_sdk         → wheel:  mvf-sdk
-│   │   └── cpp/         mvf/sdk.hpp     → lib:    libmvf_sdk.{so,dylib} / mvf_sdk.dll
-│   └── cli/             Mvf.Cli (headless host + live TUI dashboard)
-├── modules/             integration modules (.NET + Python) discovered at runtime
-├── packages/            runnable pipeline packages (pipeline.json)
-├── tools/               Mvf.SchemaExporter
-├── tests/               engine test suite
-└── protocol/            the language-agnostic module wire protocol
+├── rust/                 the runtime: Cargo workspace (crates/), examples/, scripts/
+│   └── crates/mvf-cli    → the `mvf` executable
+├── src/sdk/
+│   ├── python/           mvf_sdk                 → wheel: mvf-sdk
+│   ├── cpp/              mvf/sdk.hpp             → libmvf_sdk.{so,dylib} / mvf_sdk.dll
+│   └── dotnet/Mvf.Worker C# worker SDK           → NuGet: MachineVisionFabric.Worker
+├── modules/              worker modules with node.yaml contracts (Python examples)
+├── packages/             legacy-format pipeline packages (pipeline.json), kept as import/parity fixtures
+├── clients/mvf-manage-py Python client for the management endpoint
+├── protocol/             worker and management protocols
+└── docs/                 design documents
 ```
 
 ## Install
 
-### The Rust runtime: `mvf-rs` (v1.1.0+)
+### Download
 
-New pipelines should use the Rust runtime. Download `mvf-rs-<version>-<os>.zip` from the
-[latest release](https://github.com/hmetgundogdu/machine-vision-fabric/releases/latest). It holds
-`mvf-rs`, `mvf-remote` and `mvf-display-host`, and needs no .NET or Docker.
+Get `mvf-<version>-<os>.zip` from the
+[latest release](https://github.com/hmetgundogdu/machine-vision-fabric/releases/latest). It is
+available for Linux x64, macOS arm64 and Windows x64, and holds:
 
-Legacy `pipeline.json` packages convert in place with `mvf-rs import`; see the
-[migration guide](docs/rust-runtime/migration-guide.md). The .NET CLI below is unchanged and stays
-the rollback path until the retirement gate in #34.
-
-```bash
-unzip mvf-rs-v1.1.0-linux-x64.zip && cd mvf-rs-v1.1.0-linux-x64
-./mvf-rs import ../packages/loop-demo          # writes packages/loop-demo/pipeline.yaml and validates it
-./mvf-rs run ../packages/loop-demo/pipeline.yaml --max-cycles 50
-```
-
-### Download the legacy .NET CLI (no .NET required)
-
-Grab a single self-contained executable for your OS from the
-[latest release](https://github.com/hmetgundogdu/machine-vision-fabric/releases/latest):
-
-| OS | Asset |
+| | |
 |---|---|
-| Linux | `mvf-cli-linux-x64` |
-| macOS (Apple Silicon) | `mvf-cli-osx-arm64` |
-| Windows | `mvf-cli-win-x64.exe` |
+| `mvf` | validate, run, import and manage pipelines |
+| `mvf-remote` | optional mutual-TLS relay to a runtime's management endpoint, and package signing |
+| `mvf-display-host` | optional window host for nodes that present images (Display Fabric) |
 
-```bash
-chmod +x mvf-cli-linux-x64
-./mvf-cli-linux-x64 packages
-```
+Python modules need Python 3 and the SDK, `pip install mvf-sdk`. In a checkout, `mvf` finds
+`src/sdk/python` by itself.
 
 ### Build from source
 
-Requires the .NET SDK pinned in `global.json` (.NET 10).
+Needs the Rust toolchain pinned in `rust/rust-toolchain.toml`:
 
 ```bash
-dotnet build Mvf.slnx -c Release
-dotnet run --project src/cli/Mvf.Cli -- packages
+cd rust && cargo build --release -p mvf-cli     # → rust/target/release/mvf
 ```
 
 ## Quickstart
 
 ```bash
-# List runnable pipeline packages and discovered modules
-dotnet run --project src/cli/Mvf.Cli -- packages
-dotnet run --project src/cli/Mvf.Cli -- modules
-
-# Validate a pipeline graph
-dotnet run --project src/cli/Mvf.Cli -- validate-pipeline --path packages/inspection-demo/pipeline.json
-
-# Run the inspection demo — live TUI dashboard
-dotnet run --project src/cli/Mvf.Cli -- execute-graph --package packages/inspection-demo
-
-# ...or headless (as in the screenshot): plain output, stop after N cycles
-dotnet run --project src/cli/Mvf.Cli -- execute-graph --package packages/inspection-demo --no-tui --max-cycles 3
+mvf host                                                     # builtins and backends on this machine
+mvf validate rust/examples/inspection-demo/pipeline.yaml     # YAML, contracts, typed edges, placement
+mvf run rust/examples/loop-demo/pipeline.yaml --max-cycles 50
+mvf run rust/examples/inspection-demo/pipeline.yaml --max-cycles 100 --mode pipelined
 ```
 
-The A→Z walkthrough — every command, the **`loop`** primitive that makes a pipeline iterate, and
-driving a run live (pause, node navigation, live edits) — is in the [**CLI guide**](docs/cli-guide.md).
+Observe a running pipeline:
 
-### Demo packages (hardware-free)
+```bash
+mvf run rust/examples/inspection-demo/pipeline.yaml --manage --preview cam
+mvf manage watch            # live node stats and events, from another terminal
+mvf manage preview --node cam --count 3 --out shots
+```
 
-| Package | Shows |
+### Example pipelines (hardware-free)
+
+| `rust/examples/…` | Shows |
 |---|---|
-| `inspection-demo` | 13-node inspection graph, polyglot workers, routed dataset sinks |
-| `loop-demo` | graph iteration authority (`loop` primitive, whole-graph pause) |
-| `value-demo` | typed value / select primitives |
-| `multilang-demo` | .NET + Python nodes in one graph |
-| `py-brightness-demo`, `py-invert-demo` | single Python classifier / transformer |
+| `inspection-demo` | 13 nodes: fork, switch, value, loop, three Python workers, routed dataset sinks |
+| `loop-demo` | the `loop` primitive (iteration owner), live value and module binding |
+| `value-demo` | typed `value` / `select` primitives with bindings |
+| `gated` | control edges gating a branch |
+| `live-update` | live node replacement and rollback from an update plan |
+| `python-worker` | a single Python worker node |
+| `display-demo` | a node that opens windows and reacts to clicks |
 
-## Write a module (Python · .NET · C++)
+## Write a node (Python · C++ · C#)
 
-A node is a small program that receives a typed payload and returns a result — a **processor**
-(new payload out), a **classifier** (a label/signal for `if`/`switch` routing), an **analyzer**
-(optional visual output + control decision + structured inference metadata), a **source**, or a
-**sink**. All three SDKs speak the [same protocol](protocol/README.md), so the language is your
-choice and nodes interoperate in one graph. The steps below are the same shape in every language.
+A node is a small program that receives a typed payload and returns a result:
 
-### 1 · Get the SDK
+- **processor:** a new payload out;
+- **classifier:** a label for `if`/`switch` routing;
+- **analyzer:** an optional derived frame, a decision and structured metadata;
+- **source** or **sink**.
 
-| Language | Install | `runtime` tag |
-|---|---|---|
-| Python | `pip install mvf-sdk` | `python` |
-| .NET | NuGet `MachineVisionFabric.Sdk` | `dotnet` (in-process) |
-| C++ | link `libmvf_sdk` — [`src/sdk/cpp`](src/sdk/cpp) | `native` |
-
-### 2 · Write the node
-
-A processor gets a zero-copy `payload` (bytes, or an image/tensor) and returns a new one:
+### 1 · Write it
 
 ```python
-# Python — pip install mvf-sdk
+# Python: pip install mvf-sdk
 from mvf_sdk import run_processor, blob
 
 def transform(payload, meta):
-    return blob(bytes(255 - b for b in payload.memory))   # any transform over the payload
+    return blob(bytes(255 - b for b in payload.memory))   # read in place from shared memory
 
 run_processor("py.invert", transform)
 ```
 
-An analyzer can emit both a derived frame and structured inference outputs in the same cycle:
-
-```python
-from mvf_sdk import analysis, blob, run_analyzer
-
-def analyze(payload, meta):
-    frame = bytes(payload.memory)
-    mean = sum(frame) / len(frame) if frame else 0.0
-    label = "black" if mean < 10 else "ok"
-    return analysis(
-        frame=blob(frame),
-        label=label,
-        measurement=mean,
-        unit="mean-byte",
-        value={"mean": mean, "label": label},
-    )
-
-run_analyzer("py.brightness-analyzer", analyze)
-```
-
 ```cpp
-// C++ — link libmvf_sdk
+// C++: link libmvf_sdk
 #include "mvf/sdk.hpp"
 using namespace mvf;
 int main() {
@@ -201,83 +153,108 @@ int main() {
 ```
 
 ```csharp
-// .NET — reference MachineVisionFabric.Sdk (bases: FrameSource/Processor/Classifier/SinkModuleBase)
-public sealed class BrightnessGate : FrameProcessorModuleBase<Options>
+// C#: NuGet MachineVisionFabric.Worker (a worker executable, no in-process plugin)
+using Mvf.Worker;
+
+return WorkerModule.RunProcessor("dotnet.invert", (payload, _) =>
 {
-    protected override IntegrationModuleDescriptor BuildDescriptor() =>
-        IntegrationModuleDescriptorBuilder.CreateProcessor<Options>(
-            "net.brightness-gate", "Brightness Gate", "1.0.0", "brightness-gate", "…");
-
-    protected override IFrameProcessor CreateProcessor(Options o) => new Gate(o);
-}
+    var input = payload.Data;
+    var inverted = new byte[input.Length];
+    for (var i = 0; i < input.Length; i++) inverted[i] = (byte)(255 - input[i]);
+    return Output.Blob(inverted);
+});
 ```
 
-### 3 · Declare it — `module.json`
+### 2 · Declare it: `node.yaml`
 
-```json
-{ "id": "cpp.invert", "kind": "processor", "runtime": "native", "entry": "mvf_invert" }
+```yaml
+apiVersion: mvf.dev/v1alpha1
+kind: NodeContract
+metadata: { id: py.invert, version: 1.0.0, description: Inverts every byte. }
+spec:
+  ports:
+    inputs:  [{ name: frame, channel: data, type: frame }]
+    outputs: [{ name: frame, channel: data, type: frame }]
+  artifacts:
+    - { backend: worker, runtime: python, entry: invert.py, protocol: 1 }
+  lifecycle: { replacement: stateless }
 ```
 
-`runtime` picks the launcher and what `entry` points at: `python` → the `.py`, `native` → the
-compiled binary, `dotnet` → the `.dll`.
+Put it in a directory under `modules/`; `mvf` finds it by `metadata.id`. The full contract
+(config schema, lifecycle, permissions, storage, display) is in
+[`docs/rust-runtime/node-contract.md`](docs/rust-runtime/node-contract.md).
 
-### 4 · Wire it into a pipeline — `pipeline.json`
+### 3 · Wire it: `pipeline.yaml`
 
-Reference the module by `id` on a node and connect typed ports with edges:
-
-```json
-{
-  "name": "my-pipeline",
-  "nodes": [
-    { "id": "cam",    "module": "mvf.folder-source",  "config": { "sourceFolder": "frames" } },
-    { "id": "invert", "module": "cpp.invert" },
-    { "id": "save",   "module": "mvf.dataset-writer",  "config": { "outputRoot": "out" } }
-  ],
-  "edges": [
-    { "from": "cam.frame",    "to": "invert.frame" },
-    { "from": "invert.frame", "to": "save.frame" }
-  ]
-}
+```yaml
+apiVersion: mvf.dev/v1alpha1
+kind: Pipeline
+metadata: { name: my-pipeline }
+spec:
+  nodes:
+    - { id: cam, builtin: folder-source, config: { sourceFolder: frames } }
+    - { id: invert, module: py.invert }
+    - { id: save, builtin: dataset-writer, config: { outputRoot: out } }
+  edges:
+    data:
+      - { from: cam.frame, to: invert.frame }
+      - { from: invert.frame, to: save.frame }
 ```
 
-The data graph is a strict DAG, so this runs **one pass**. To replay the folder or run continuously,
-add a `loop` node and close the tail back to it (`{ "from": "save", "to": "cycle" }`) — the loop owns
-iteration and whole-graph pause. See the [**CLI guide**](docs/cli-guide.md) for the loop model and
-driving a run live.
+The data graph is a strict DAG, so this runs one pass over the folder. To keep running, add a
+`loop` node (`primitive: loop`, `config: { mode: forever }`) and close the tail into it under
+`edges.loop` (`{ from: save, to: cycle }`). See
+[`docs/rust-runtime/graph-primitives.md`](docs/rust-runtime/graph-primitives.md).
 
-### 5 · Run it
+### 4 · Run it
 
 ```bash
-mvf execute-graph --package my-package
+mvf run my-pipeline/pipeline.yaml
 ```
 
-The engine discovers the module, launches it (in-process for `dotnet`, as a supervised worker for
-`python`/`native`), streams frames through the shared-memory arena, and shows every node live in the
-dashboard. Full runnable examples:
-[Python](modules/py-invert-transformer) · [.NET](modules/dotnet-brightness-gate) ·
-[C++](src/sdk/cpp/examples) · deeper guide: [`docs/sdk-quickstart.md`](docs/sdk-quickstart.md).
+## Coming from the legacy .NET runtime
+
+The original .NET engine, CLI, in-process SDK (`MachineVisionFabric.Sdk`), in-process modules
+and egress are **archived** ([#34](https://github.com/hmetgundogdu/machine-vision-fabric/issues/34)):
+
+- **Code:** branch [`archive/dotnet-legacy`](https://github.com/hmetgundogdu/machine-vision-fabric/tree/archive/dotnet-legacy),
+  tag `dotnet-legacy-final`.
+- **Last release that ships it:** [v1.1.0](https://github.com/hmetgundogdu/machine-vision-fabric/releases/tag/v1.1.0)
+  (`mvf-cli-<os>`, and the `MachineVisionFabric.Sdk` 1.1.0 packages).
+
+To move a legacy package:
+
+```bash
+mvf import packages/my-line        # pipeline.json → pipeline.yaml next to it, then validated
+```
+
+- **Converted:** ids, builtins, edge kinds and the .NET failure behaviour.
+- **Refused:** anything it cannot carry over.
+- **Named:** every .NET in-process module that needs a `Mvf.Worker` port.
+
+The steps, the command mapping and the rollback are in the
+[migration guide](docs/rust-runtime/migration-guide.md).
 
 ## Releases & CI
 
-- **CI** (`.github/workflows/ci.yml`) runs on every push/PR: builds + tests the .NET solution
-  (with Python for the module-spawning tests), builds the Python wheel, and compiles the C++
-  SDK on Linux/macOS/Windows.
-- **Release** (`.github/workflows/release.yml`) runs on a `v*` tag and publishes, all versioned
-  from the tag:
-  - `.nupkg` — `MachineVisionFabric.Sdk`
-  - `.whl` + sdist — `mvf-sdk`
-  - `mvf-sdk-cpp-<ver>-{linux-x64,osx-arm64,win-x64}.zip` — C++ shared library + header
-  - `mvf-cli-{linux-x64,osx-arm64,win-x64}` — self-contained single-file CLI
-
-Cut a release by tagging: `git tag v0.1.2 && git push origin v0.1.2`.
+- **CI** (`.github/workflows/ci.yml`) runs on every push and PR:
+  - the runtime on Linux, macOS and Windows: format, lint, tests with real Python, C++ and .NET
+    workers, and the real-window display smoke test;
+  - the .NET worker SDK, the Python wheel and the C++ SDK.
+- **Release** (`.github/workflows/release.yml`) runs on a `v*` tag that matches
+  `rust/Cargo.toml`, and publishes:
+  - `mvf-<tag>-{linux-x64,osx-arm64,win-x64}.zip`;
+  - `MachineVisionFabric.Worker` (`.nupkg`);
+  - `mvf-sdk` (wheel + sdist);
+  - `mvf-sdk-cpp-<tag>-<os>.zip`.
 
 ## Documentation
 
-- [CLI Guide](docs/cli-guide.md) — run pipelines A→Z, the `loop` primitive, live control
-- [Architecture Foundation](docs/architecture-foundation.md)
-- [Pipeline Graph Foundation](docs/pipeline-graph-foundation.md)
-- [Integration SDK Strategy](docs/integration-sdk-strategy.md) · [SDK Quickstart](docs/sdk-quickstart.md)
-- [Roadmap](docs/roadmap.md)
+- [Runtime overview and decision records](docs/rust-runtime/README.md)
+- [Node contract](docs/rust-runtime/node-contract.md) · [Graph primitives](docs/rust-runtime/graph-primitives.md)
+- [Worker protocol v2](protocol/worker-v2.md) · [Management protocol](protocol/management-v1.md)
+- [Migration from the legacy runtime](docs/rust-runtime/migration-guide.md) · [Retirement inventory](docs/rust-runtime/legacy-retirement.md)
+- [Architecture foundation](docs/architecture-foundation.md) · [Roadmap](docs/roadmap.md)
 
 ## License
 

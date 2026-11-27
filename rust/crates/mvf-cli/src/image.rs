@@ -1,4 +1,4 @@
-//! `mvf-rs image …` — the offline OCI content store (no Docker daemon, no network).
+//! `mvf image …` — the offline OCI content store (no Docker daemon, no network).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

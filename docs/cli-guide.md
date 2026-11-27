@@ -1,5 +1,10 @@
 # MVF CLI — from zero to a running pipeline
 
+> **Legacy document.** It describes the archived .NET runtime and its CLI (branch
+> `archive/dotnet-legacy`, tag `dotnet-legacy-final`, last shipped in v1.1.0). For the current
+> runtime `mvf`, see the [README](../README.md) and the
+> [migration guide](rust-runtime/migration-guide.md).
+
 The `mvf` CLI is the edge runtime: it discovers modules, validates a pipeline graph, runs it, and
 draws a **live dashboard** while it executes. This guide walks the whole path A → Z — install,
 inspect, validate, run, **loop**, drive the dashboard live, and read back a finished run.

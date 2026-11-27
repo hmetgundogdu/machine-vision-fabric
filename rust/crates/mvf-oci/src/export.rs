@@ -3,7 +3,7 @@
 //!
 //! Formats:
 //! - **OCI layout** (`oci-layout`, `index.json`, `blobs/sha256/…`): the OCI Image Layout spec; read
-//!   by `skopeo`, `crane`, `podman load`, `docker load` (Docker 25+) and by `mvf-rs image import`.
+//!   by `skopeo`, `crane`, `podman load`, `docker load` (Docker 25+) and by `mvf image import`.
 //! - **Docker archive**: the same OCI layout **plus** a `manifest.json` (`Config`, `RepoTags`,
 //!   `Layers` pointing into `blobs/`), which is what `docker save` writes since Docker 25 and what
 //!   `docker load` reads on every version that understands `blobs/` paths.

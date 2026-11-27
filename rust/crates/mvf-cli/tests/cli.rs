@@ -8,7 +8,7 @@ fn examples() -> PathBuf {
 }
 
 fn mvf() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_mvf-rs"))
+    Command::new(env!("CARGO_BIN_EXE_mvf"))
 }
 
 #[test]
@@ -430,7 +430,7 @@ fn a_managed_run_is_listed_watched_and_reports_its_final_status() {
     assert!(!out.status.success(), "no runtime left to report on");
 }
 
-/// `mvf-rs manage command stop` stops a managed run at the next boundary, and the command is
+/// `mvf manage command stop` stops a managed run at the next boundary, and the command is
 /// audited (#33 part 2).
 #[test]
 fn a_managed_run_stops_on_a_command_and_audits_it() {
@@ -835,7 +835,7 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-/// `mvf-rs import` (#34): a legacy .NET package becomes a valid Rust pipeline next to it, the
+/// `mvf import` (#34): a legacy .NET package becomes a valid Rust pipeline next to it, the
 /// converted pipeline runs, and what cannot be carried over is refused or named.
 #[test]
 fn import_converts_a_legacy_package_and_names_what_it_cannot_carry_over() {

@@ -4,7 +4,7 @@
 # live `value`; `cam.frameIntervalMs` is a live module binding (editing it reopens the source, which
 # restarts at frame 0). Pause/resume and edits are scripted with `--updates updates.yaml`.
 #
-#   mvf-rs run rust/examples/loop-demo/pipeline.yaml --max-cycles 200 --updates rust/examples/loop-demo/updates.yaml
+#   mvf run rust/examples/loop-demo/pipeline.yaml --max-cycles 200 --updates rust/examples/loop-demo/updates.yaml
 apiVersion: mvf.dev/v1alpha1
 kind: Pipeline
 metadata:

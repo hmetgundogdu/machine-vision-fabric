@@ -1,5 +1,10 @@
 # Build and publish a pipeline
 
+> **Legacy document.** It describes the archived .NET runtime and its CLI (branch
+> `archive/dotnet-legacy`, tag `dotnet-legacy-final`, last shipped in v1.1.0). For the current
+> runtime `mvf`, see the [README](../README.md) and the
+> [migration guide](rust-runtime/migration-guide.md).
+
 End-to-end journey for an outside developer: author a node with the SDK, wire it into a
 typed pipeline, run it on the CLI, and publish a self-contained deployment. Everything here
 is **hardware-free** — the demo modules use simulator sources.

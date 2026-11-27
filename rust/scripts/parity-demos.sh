@@ -8,7 +8,7 @@
 #   CYCLES=40 SKIP_BUILD=1 rust/scripts/parity-demos.sh
 #   RUST_MODE=pipelined rust/scripts/parity-demos.sh   # the Rust twins stage-parallel
 #   RUST_SOURCE=import rust/scripts/parity-demos.sh    # convert each legacy package with
-#                                                     # `mvf-rs import` instead of using the twin (#34)
+#                                                     # `mvf import` instead of using the twin (#34)
 #
 # value-demo: the .NET CLI exposes no selection output, so its dataset is compared like the others
 # and the Rust selections are checked against what the .NET reference tests assert
@@ -23,13 +23,21 @@ DEMOS=${DEMOS:-"inspection-demo loop-demo value-demo"}
 WORK=${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/mvf-parity.XXXXXX")}
 export MVF_BINDING_CAMERA_SERIAL=DEF456
 
-if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
-  echo "Building .NET (Release) and Rust (release)..." >&2
-  (cd "$REPO" && dotnet build Mvf.slnx -c Release -v q --nologo >/dev/null)
-  (cd "$REPO/rust" && cargo build --release --locked -p mvf-cli >/dev/null 2>&1)
+# The legacy .NET engine is archived (#34). LEGACY_ROOT is a checkout of it: by default a worktree of
+# the tag `dotnet-legacy-final` at <repo>/.legacy-dotnet (git-ignored), made and built on first use.
+LEGACY_ROOT=${LEGACY_ROOT:-$REPO/.legacy-dotnet}
+if [[ ! -d "$LEGACY_ROOT" ]]; then
+  git -C "$REPO" rev-parse -q --verify dotnet-legacy-final >/dev/null \
+    || git -C "$REPO" fetch -q origin tag dotnet-legacy-final
+  git -C "$REPO" worktree add -q --detach "$LEGACY_ROOT" dotnet-legacy-final
 fi
-DOTNET_CLI=$(ls "$REPO"/src/cli/Mvf.Cli/bin/Release/net*/Mvf.Cli.dll | head -1)
-MVF_RS="$REPO/rust/target/release/mvf-rs"
+if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
+  echo "Building the legacy .NET engine (Release) and mvf (release)..." >&2
+  (cd "$LEGACY_ROOT" && dotnet build Mvf.slnx -c Release -v q --nologo >/dev/null)
+  (cd "$REPO/rust" && cargo build --release --locked -p mvf-cli >/dev/null)
+fi
+DOTNET_CLI=$(ls "$LEGACY_ROOT"/src/cli/Mvf.Cli/bin/Release/net*/Mvf.Cli.dll | head -1)
+MVF_RS="$REPO/rust/target/release/mvf"
 
 mkdir -p "$WORK/dotnet" "$WORK/rust/packages" "$WORK/rust/rust/examples"
 cp -R "$REPO/packages/multilang-demo" "$WORK/dotnet/"
@@ -50,11 +58,11 @@ for node in doc["nodes"]:
 json.dump(doc, open(path, "w"), indent=1)
 PY
   out=$(cd "$WORK/dotnet" && dotnet "$DOTNET_CLI" execute-graph --package "$WORK/dotnet/$demo" \
-    --no-tui --no-prompt --max-cycles "$CYCLES" --integrations-root "$REPO/modules" 2>&1)
+    --no-tui --no-prompt --max-cycles "$CYCLES" --integrations-root "$LEGACY_ROOT/modules" 2>&1)
   echo "$out" | grep -q 'Succeeded:True' || { echo ".NET $demo failed:"; echo "$out" | tail -5; exit 1; }
 
   if [[ "$RUST_SOURCE" == "import" ]]; then
-    # Rust: the legacy package itself (pacing off, as for .NET), converted by `mvf-rs import`.
+    # Rust: the legacy package itself (pacing off, as for .NET), converted by `mvf import`.
     rm -rf "$WORK/rust/packages/$demo"
     cp -R "$WORK/dotnet/$demo" "$WORK/rust/packages/$demo"
     rm -rf "$WORK/rust/packages/$demo/out" "$WORK/rust/packages/$demo/.mvf"

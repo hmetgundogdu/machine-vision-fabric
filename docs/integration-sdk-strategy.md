@@ -1,5 +1,10 @@
 # Integration SDK Strategy
 
+> **Legacy document.** It describes the archived .NET runtime and its CLI (branch
+> `archive/dotnet-legacy`, tag `dotnet-legacy-final`, last shipped in v1.1.0). For the current
+> runtime `mvf`, see the [README](../README.md) and the
+> [migration guide](rust-runtime/migration-guide.md).
+
 ## Goal
 
 External developers build integration modules against a stable public contract surface —

@@ -1,4 +1,4 @@
-//! `mvf-rs import` (#34): converts a legacy .NET pipeline package (`pipeline.json`) into a Rust
+//! `mvf import` (#34): converts a legacy .NET pipeline package (`pipeline.json`) into a Rust
 //! pipeline (`pipeline.yaml`), written next to it so relative paths keep their meaning, and then
 //! validates it on this host.
 //!
@@ -461,7 +461,7 @@ fn block(v: &Value, indent: usize, out: &mut String) {
 /// The YAML text of a converted document, with a header comment.
 pub fn yaml(doc: &Value, source: &Path, header: &[String]) -> String {
     let mut out = format!(
-        "# Converted from {} by `mvf-rs import` (MVF {}, issue #34).\n",
+        "# Converted from {} by `mvf import` (MVF {}, issue #34).\n",
         source.display(),
         env!("CARGO_PKG_VERSION")
     );

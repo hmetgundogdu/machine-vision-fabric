@@ -11,7 +11,7 @@ PLATFORM=${PLATFORM:-linux/arm64}
 mkdir -p "$OUT"
 [[ -s "$FIXTURES/python.tar" ]] || { echo "run rust/scripts/oci-testhost.sh first (fixtures)"; exit 1; }
 
-echo "== build mvf-rs (release, Linux)"
+echo "== build mvf (release, Linux)"
 docker run --rm --platform "$PLATFORM" \
   -v "$REPO":/src -v mvf-cargo-registry:/usr/local/cargo/registry -v mvf-linux-target:/target \
   -e CARGO_TARGET_DIR=/target -w /src/rust rust:1.95-bookworm \
@@ -24,7 +24,7 @@ docker run --rm --platform "$PLATFORM" --privileged --cgroupns=host --shm-size=5
     apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends runc time >/dev/null
     command -v python3 >/dev/null && { echo "python3 present on test host"; exit 1; } || echo "python3: absent"
     echo "kernel: $(uname -srm)"; runc --version | head -1
-    MVF=/target/release/mvf-rs; export MVF_STORE=/root/.mvf/store
+    MVF=/target/release/mvf; export MVF_STORE=/root/.mvf/store
     W=/tmp/p0; mkdir -p $W/candidates; cp -r /src/rust/examples/p0/nodes /src/rust/examples/p0/pipeline-linux.yaml $W/
     $MVF image import /fixtures/python.tar --name python:base >/dev/null
     pkg() { $MVF image package --base python:base --name "mvf/p0-$1:1" --module "$2" --entry "$3" \

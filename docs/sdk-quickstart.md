@@ -1,5 +1,10 @@
 # SDK Quickstart
 
+> **Legacy document.** It describes the archived .NET runtime and its CLI (branch
+> `archive/dotnet-legacy`, tag `dotnet-legacy-final`, last shipped in v1.1.0). For the current
+> runtime `mvf`, see the [README](../README.md) and the
+> [migration guide](rust-runtime/migration-guide.md).
+
 How to author an MVF integration module. All three SDKs speak the same protocol (stdio
 control plane + shared-memory data plane, see [`protocol/README.md`](../protocol/README.md)),
 so a module is interchangeable across languages. See

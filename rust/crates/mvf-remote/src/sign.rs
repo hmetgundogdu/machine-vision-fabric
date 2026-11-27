@@ -4,8 +4,8 @@
 //! ```text
 //! mvf-remote sign keygen --dir keys                 keys/signer.pk8 (0600) and keys/signer.pub
 //! mvf-remote sign package --key keys/signer.pk8 --package inspect-v2 --out inspect-v2.sig.json ./inspect-v2
-//! mvf-rs run --manage --allow-uploads --trust-signer keys/signer.pub …   (on the edge box)
-//! mvf-rs manage upload --package inspect-v2 --signature inspect-v2.sig.json ./inspect-v2
+//! mvf run --manage --allow-uploads --trust-signer keys/signer.pub …   (on the edge box)
+//! mvf manage upload --package inspect-v2 --signature inspect-v2.sig.json ./inspect-v2
 //! ```
 //!
 //! A signature is Ed25519 over `mvf_management::upload::signing_bytes`: the package name and every

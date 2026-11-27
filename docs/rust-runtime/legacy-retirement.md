@@ -1,47 +1,59 @@
-# Retiring the legacy .NET runtime (#34): inventory and gate
+# Retiring the legacy .NET runtime (#34)
 
-**Status (v1.1.0):** the transition has started, and nothing has been removed.
+**Status (v2.0.0): archived.**
 
-- `mvf-rs` is the canonical runtime, and the release ships it beside the unchanged legacy CLI.
-- [migration-guide.md](migration-guide.md) covers conversion (`mvf-rs import`), validation and
-  rollback.
-- Removal waits for the gate below. #34 itself says it does not authorize immediate removal.
+- **Who decided:** the maintainer asked for the legacy runtime to be removed from `main` and
+  archived.
+- **Where it went:**
+  - **Code:** branch `archive/dotnet-legacy` and tag `dotnet-legacy-final`, both at `67d9d75`.
+    Full history; nothing was rewritten.
+  - **Last release that ships it:** v1.1.0, with the legacy CLI `mvf-cli-<os>`, the
+    `MachineVisionFabric.{Graph,Abstractions,Sdk}` 1.1.0 packages and the Rust runtime as
+    `mvf-rs`. It stays as the immutable rollback.
+- **What ships instead:** `main` builds, tests and releases only `mvf` and the SDKs. The CLI was
+  renamed from `mvf-rs` to `mvf` in v2.0.0.
 
-## Inventory
+## What moved where
 
-| Project | Role | Classification |
+| Project | Role | Now |
 |---|---|---|
-| `src/core/Mvf.Graph`, `src/core/Mvf.Abstractions` | contract types; packed to NuGet with the SDK | **retain** (the SDK depends on them) |
-| `src/sdk/dotnet/Mvf.Worker` (+ `examples/`) | .NET worker SDK for the Rust runtime (#32) | **retain**: the supported way to run C# under Rust |
-| `src/sdk/dotnet/Mvf.Sdk` | in-process module SDK of the legacy engine | **retain** while in-process modules exist; migrate modules to `Mvf.Worker` |
-| `src/engine/Mvf.Engine` | legacy graph engine | **remove after the gate** |
-| `src/cli/Mvf.Cli` | legacy CLI (TUI, egress, prompts) | **remove after the gate**; the rollback path until then |
-| `src/hosting/Mvf.Hosting.Worker` | the legacy engine's worker host | **remove after the gate** |
-| `src/transports/Mvf.Transport.SharedMemory` | the legacy engine's shared-memory transport | **remove after the gate** (Rust: `mvf-memory`; .NET workers: `Mvf.Worker`'s own arena) |
-| `src/egress/Mvf.Egress` | live egress from the legacy engine | **migrate**: no Rust equivalent yet. It blocks removal for any line that uses egress |
-| `src/egress/Mvf.Egress.Client`, `clients/mvf-egress-client` | egress client SDKs | **retain** while egress exists |
-| `modules/…FolderSource`, `modules/…DatasetWriter` | in-process modules | **remove after the gate**: Rust builtins `folder-source` and `dataset-writer` match (byte-identical datasets) |
-| `modules/…CognexCamera`, `…SyntheticCamera`, `…BlackScreenCheck`, `…DarkFrameFilter`, `modules/dotnet-brightness-gate` | in-process modules | **migrate** to `Mvf.Worker` + `node.yaml` before removal (the importer reports them MISSING) |
-| `modules/py-*` | Python modules with `node.yaml` | **retain**: both runtimes run them |
-| `tests/Mvf.Engine.Tests` | legacy engine tests | **keep as reference** until removal; their behaviour is tracked in [parity-matrix.md](parity-matrix.md) |
-| `tools/Mvf.SchemaExporter` | JSON schema of `pipeline.json` | **remove after the gate** |
-| `packages/*/pipeline.json` | legacy packages | **retain** as parity fixtures (`RUST_SOURCE=import rust/scripts/parity-demos.sh`) |
-| CI `.NET build + test`, release job `cli` (legacy CLI) | | **keep until removal**, so the rollback binary is still built |
+| `src/engine/Mvf.Engine` | legacy graph engine | **archived** |
+| `src/cli/Mvf.Cli` | legacy CLI (TUI, egress, prompts) | **archived**. `mvf` is the CLI; the legacy binary is in v1.1.0 |
+| `src/hosting/Mvf.Hosting.Worker` | the legacy engine's worker host | **archived** |
+| `src/transports/Mvf.Transport.SharedMemory` | the legacy engine's shared memory | **archived** (Rust: `mvf-memory`; .NET workers: `Mvf.Worker`'s arena) |
+| `src/egress/*`, `clients/mvf-egress-client` | live egress and its clients | **archived**: no Rust equivalent yet (see Gaps) |
+| `src/core/Mvf.Graph`, `src/core/Mvf.Abstractions`, `src/sdk/dotnet/Mvf.Sdk` | in-process module SDK | **archived**: only the legacy engine loads in-process modules. The last packages are 1.1.0 |
+| `modules/MachineVisionFabric.Integrations.*`, `modules/dotnet-brightness-gate` | in-process modules | **archived**. Folder source and dataset writer are `mvf` builtins (byte-identical datasets); the others need a `Mvf.Worker` port |
+| `modules/py-tunable-transformer` | Python module with only a legacy `module.json` | **archived** (no `node.yaml`) |
+| `tests/Mvf.Engine.Tests`, `tools/Mvf.SchemaExporter`, `publish.ps1` | legacy tests and tooling | **archived**. The behaviour is tracked in [parity-matrix.md](parity-matrix.md) |
+| `src/sdk/dotnet/Mvf.Worker` (+ `examples/`) | .NET worker SDK for `mvf` (#32) | **kept**, and published as `MachineVisionFabric.Worker` |
+| `src/sdk/python`, `src/sdk/cpp`, `modules/py-*` | worker SDKs and modules | **kept** |
+| `packages/*/pipeline.json` | legacy packages | **kept** as import and parity fixtures |
+| CI `.NET build + test`, release jobs `cli` (legacy) and NuGet (in-process SDK) | | **replaced**: the CI job builds and packs the worker SDK; the release ships `mvf` and `MachineVisionFabric.Worker` |
 
-## Gate (from #34)
+## Comparing against the legacy engine
 
-| Prerequisite | State |
-|---|---|
-| Functional parity for primitives, policies, checkpoints, lifecycle, bindings, payloads, live replacement | done for DAG graphs ([parity-matrix.md](parity-matrix.md)); demo datasets byte-identical, also when converted by `mvf-rs import` |
-| IPC (#32) and SDKs (Python, C++, .NET) pass | done; CI runs all three against the Rust runtime |
-| Production capabilities and platforms | Windows, Linux, macOS native and worker: CI PASS. #26 (Linux + GPU host) and #27 (Windows OCI): **BLOCKED** on hardware. Egress: **not ported** |
-| First usable Rust release, pinned for the Rotary migration | **v1.1.0** (this release) |
-| Rotary validation on edge hardware: parity, performance, shadow, soak, recovery, tested rollback | **open**: the maintainer's real legacy pipeline is the next step |
-| Stable release, migration guide, accepted gaps | guide: [migration-guide.md](migration-guide.md); gaps above |
-| Maintainer approval after evidence | **open** |
+`rust/scripts/parity-demos.sh` and `rust/scripts/bench-baseline.sh` still compare with the legacy
+engine. They check out `dotnet-legacy-final` into `.legacy-dotnet/` (git-ignored, or set
+`LEGACY_ROOT`) and build it there.
 
-After the gate:
+```text
+$ RUST_SOURCE=import DEMOS="inspection-demo loop-demo value-demo multilang-demo" rust/scripts/parity-demos.sh
+inspection-demo          60         60  IDENTICAL
+loop-demo                24         24  IDENTICAL
+value-demo               24         24  IDENTICAL
+multilang-demo            8          8  IDENTICAL
+PARITY PASS
+```
 
-1. Remove the "remove" rows and their CI and release jobs.
-2. Make the README point only at `mvf-rs`.
-3. Keep the v1.0.0 and v1.1.0 tags and their release artifacts as the immutable rollback.
+## Gaps the archive leaves
+
+- **Realtime egress** (`--egress tcp|ws|udp`) is not ported. A line that needs it runs the
+  v1.1.0 legacy CLI until it is.
+- **.NET in-process integrations** (Cognex camera, dark-frame filter, black-screen check,
+  synthetic camera) need a `Mvf.Worker` port. `mvf import` names them.
+- **No TUI or interactive prompts.** Observation goes through `mvf run --manage` and `mvf manage`.
+- **Blocked on hardware:** #26 (Linux + GPU host) and #27 (Windows OCI).
+- **Rotary validation** on edge hardware (parity, performance, shadow, soak, recovery, rollback)
+  is the maintainer's real-pipeline migration, in progress. The v1.1.0 legacy CLI is its
+  rollback.

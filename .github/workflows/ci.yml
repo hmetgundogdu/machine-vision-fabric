@@ -10,21 +10,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  dotnet:
-    name: .NET build + test
+  # The .NET worker SDK and its examples (the runtime tests drive them as real workers below).
+  dotnet-worker-sdk:
+    name: .NET worker SDK
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
-      # The engine tests spawn real Python modules (readiness, warm-pool, pipelined executor).
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: python -m pip install --upgrade pip numpy
       - run: dotnet build Mvf.slnx -c Release --nologo
-      - run: dotnet test Mvf.slnx -c Release --no-build --nologo
+      - run: dotnet pack src/sdk/dotnet/Mvf.Worker/Mvf.Worker.csproj -c Release -o dist --nologo
 
   python-sdk:
     name: Python SDK wheel
@@ -37,20 +33,8 @@ jobs:
       - run: python -m pip install --upgrade pip build
       - run: python -m build src/sdk/python
 
-  egress-client-ts:
-    name: Egress client (TypeScript)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      # Codec/framing tests run via Node's built-in test runner + type stripping — no install needed.
-      - run: npm test
-        working-directory: clients/mvf-egress-client
-
-  # Research workspace for the Pure Rust core (issue #10). Isolated under rust/; it never touches the
-  # .NET jobs above, and a failure here says nothing about the shipping .NET engine.
+  # The runtime (`mvf`, issue #10). The legacy .NET runtime is archived (branch
+  # archive/dotnet-legacy, tag dotnet-legacy-final; #34).
   rust:
     name: Rust runtime (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

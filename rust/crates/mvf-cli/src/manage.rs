@@ -1,5 +1,5 @@
-//! `mvf-rs manage …` (#33): observe a running runtime over its local management endpoint
-//! (`mvf-rs run --manage`), and run commands as its owner. Every command goes through the engine's
+//! `mvf manage …` (#33): observe a running runtime over its local management endpoint
+//! (`mvf run --manage`), and run commands as its owner. Every command goes through the engine's
 //! own validation, is idempotent by `--id`, and is written to the run's audit log.
 
 use std::process::ExitCode;
@@ -124,7 +124,7 @@ pub enum ManageCommand {
 }
 
 fn fail(message: impl std::fmt::Display) -> ExitCode {
-    eprintln!("mvf-rs manage: {message}");
+    eprintln!("mvf manage: {message}");
     ExitCode::from(1)
 }
 
@@ -137,7 +137,7 @@ fn endpoint(given: Option<String>) -> Result<String, ExitCode> {
     match found.as_slice() {
         [one] => Ok(one.endpoint.clone()),
         [] => Err(fail(format!(
-            "no runtime registered in {} (start one with `mvf-rs run --manage`)",
+            "no runtime registered in {} (start one with `mvf run --manage`)",
             dir.display()
         ))),
         many => Err(fail(format!(
@@ -176,7 +176,7 @@ pub fn run(command: ManageCommand) -> ExitCode {
                 Ok(e) => e,
                 Err(code) => return code,
             };
-            let snapshot = Client::connect(&e, "mvf-rs").and_then(|mut c| c.snapshot());
+            let snapshot = Client::connect(&e, "mvf").and_then(|mut c| c.snapshot());
             match snapshot {
                 Ok((_, s)) if json => {
                     println!("{s}");
@@ -219,7 +219,7 @@ pub fn run(command: ManageCommand) -> ExitCode {
                 Ok(e) => e,
                 Err(code) => return code,
             };
-            let mut c = match Client::connect(&e, "mvf-rs") {
+            let mut c = match Client::connect(&e, "mvf") {
                 Ok(c) => c,
                 Err(err) => return fail(format!("{e}: {err}")),
             };
@@ -289,7 +289,7 @@ pub fn run(command: ManageCommand) -> ExitCode {
                 Ok(e) => e,
                 Err(code) => return code,
             };
-            let mut c = match Client::connect(&e, "mvf-rs") {
+            let mut c = match Client::connect(&e, "mvf") {
                 Ok(c) => c,
                 Err(err) => return fail(format!("{e}: {err}")),
             };
@@ -355,7 +355,7 @@ pub fn run(command: ManageCommand) -> ExitCode {
                         .unwrap_or(0)
                 )
             });
-            let reply = Client::connect(&e, "mvf-rs")
+            let reply = Client::connect(&e, "mvf")
                 .and_then(|mut c| c.command(&id, &name, args, deadline_ms));
             match reply {
                 Ok(r) => {
@@ -470,7 +470,7 @@ fn watch(
 ) -> ExitCode {
     let mut last_ok = Instant::now();
     loop {
-        let sub = Client::connect(endpoint, "mvf-rs").and_then(|c| c.subscribe(from));
+        let sub = Client::connect(endpoint, "mvf").and_then(|c| c.subscribe(from));
         let mut sub = match sub {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return fail(e),

@@ -60,7 +60,7 @@ Updated by every slice; the stage reports carry the details.
 | Per-node arena isolation | — | `spec.memory.arena: private`, `MVF_ISOLATE_ARENAS` | new (#28) |
 | Source workers (a worker with no input) | — (sources are in-process modules) | worker capability `source`, Python `run_source` | new (#23) |
 | Worker control protocol | stdio JSON lines (v1) | v1 and v2 (binary frames, direct read on Unix), negotiated per child | new (#32) — Python SDK and Rust fixture on v2; C++/.NET on v1 |
-| Node filesystem (volumes, artifacts, scratch) | — (modules read paths from their config) | `spec.storage.mounts`, pipeline `spec.volumes`, `mvf-storage`, `mvf-rs volume` | new (#31) — OCI: kernel-enforced binds and tmpfs quotas; workers: resolved paths, not isolated; digest-pinned artifacts per generation |
+| Node filesystem (volumes, artifacts, scratch) | — (modules read paths from their config) | `spec.storage.mounts`, pipeline `spec.volumes`, `mvf-storage`, `mvf volume` | new (#31) — OCI: kernel-enforced binds and tmpfs quotas; workers: resolved paths, not isolated; digest-pinned artifacts per generation |
 | Node presentation (windows, input) | — (no display concept; `mvf` TUI only) | `permissions.display` (`native`, `managed-surface`), `mvf-display` surfaces, `mvf-display-host` | new (#30) — macOS, Linux X11/Wayland, Windows (CI) verified; Linux OCI nodes present through bind-mounted surfaces; the window follows restarts, live replacement and rollback |
 | Per-node network policy (inbound listeners, outbound destinations, return traffic) | — (host networking only) | `permissions.network`, `mvf_container::network`, pipeline `network` binding | new (#23) — Linux OCI enforced (netns + nftables); Windows BLOCKED |
 | OCI layer-level rootfs cache, seccomp allowlist, LSM option | — | `mvf_oci::LayerCache`, `isolation.syscalls`, `isolation.lsm` | new (#28) — LSM enforcement BLOCKED on the test host |
@@ -74,7 +74,7 @@ Updated by every slice; the stage reports carry the details.
 
 | Behaviour | Rust | Status |
 |---|---|---|
-| OCI image store (import/verify/export, Docker interop) | `mvf-oci`, `mvf-rs image …` | new — stage 07 |
+| OCI image store (import/verify/export, Docker interop) | `mvf-oci`, `mvf image …` | new — stage 07 |
 | Daemonless OCI node execution, default-deny sandbox, `spec.permissions` | `mvf-container` | new — Linux only (stage 08) |
 | GPU compute nodes, device-resident payloads | `mvf-compute` | new — tested on Apple M4/Metal (stage 09) |
 | PLC simulator with duplicate-commit detection | `plc-sim` builtin | new — stage 10 |

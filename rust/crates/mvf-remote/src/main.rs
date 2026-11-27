@@ -3,7 +3,7 @@
 //! On the edge box:
 //!   mvf-remote pki init --dir pki --host panel-07 --host 10.0.0.7
 //!   mvf-remote pki issue --dir pki --name alice --role operator
-//!   mvf-remote serve --pki pki --listen 10.0.0.7:7443        # next to `mvf-rs run --manage`
+//!   mvf-remote serve --pki pki --listen 10.0.0.7:7443        # next to `mvf run --manage`
 //! On the operator's machine (with ca.pem and alice's certificate and key):
 //!   mvf-remote status --connect panel-07:7443 --ca ca.pem --cert alice.pem --key alice.key
 //!   mvf-remote watch …   mvf-remote command pause …

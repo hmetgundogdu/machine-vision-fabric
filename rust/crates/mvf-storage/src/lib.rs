@@ -761,7 +761,7 @@ pub fn default_root() -> PathBuf {
     }
 }
 
-/// A retained volume, for `mvf-rs volume list|inspect`.
+/// A retained volume, for `mvf volume list|inspect`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeInfo {

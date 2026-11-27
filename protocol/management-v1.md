@@ -6,13 +6,13 @@ logs, and authorized commands that go through the engine's own validation
 
 Reference implementations:
 - `rust/crates/mvf-management`: the server and client;
-- `mvf-rs manage`: the local CLI;
+- `mvf manage`: the local CLI;
 - `rust/crates/mvf-remote`: the TLS relay and remote client;
 - `clients/mvf-manage-py`: a Python client using only the standard library, local or over TLS.
 
 ## Endpoint
 
-- Started by `mvf-rs run --manage`.
+- Started by `mvf run --manage`.
 - **Unix:** a socket in the per-user runtime directory: `$MVF_RUNTIME_DIR`, else
   `$XDG_RUNTIME_DIR/mvf`, else `~/.mvf/run`.
   - The directory must be mode 0700 and owned by the user; anything else is refused. The socket
@@ -149,7 +149,7 @@ Errors are `{"op":"error","code":…,"message":…}`. The codes:
 | `stage` | `package`, `files: {path: digest}`, `signature: {key, sig}` when signers are trusted | the package is staged (no engine event); the reply carries `staged.contract` for `replace` and `staged.signedBy` |
 
 - **Validation:** every command except `stop` becomes one update-plan step and is validated
-  exactly as in `mvf-rs run --updates`. The engine applies it at a cycle boundary. A contract path
+  exactly as in `mvf run --updates`. The engine applies it at a cycle boundary. A contract path
   must stay inside the package: no absolute paths, no `..`.
 - **`status`:**
 

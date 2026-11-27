@@ -1,71 +1,23 @@
-# MachineVisionFabric — Real-World Projects
+# Modules
 
-Bu dizin gerçek donanımlara bağlanan entegrasyon modüllerini ve hazır senaryoları içerir.
+Worker modules the `mvf` runtime finds by contract id. Each directory holds a `node.yaml`
+contract, and `mvf run` searches the nearest `modules/` above a pipeline, or `--modules DIR`.
 
----
+| Module | Kind |
+|---|---|
+| `py-invert-transformer` | Python transformer |
+| `py-brightness-classifier`, `py-brightness-analyzer`, `py-frame-counter`, `py-warmup-classifier` | Python analyzers and classifiers |
+| `py-camera-preview` | Python display node (Display Fabric, #30) |
+| `py-ftp-source` | Python source over the network (Network Fabric, #23) |
+| `py-model-inspector` | Python model and storage example (Storage Fabric, #31) |
+| `py-bench-touch`, `py-bench-numpy` | benchmark workloads |
 
-## Senaryo: Cognex In-Sight — Dark Frame Filter — Dataset Writer
+- **Python** modules use the SDK in `src/sdk/python`.
+- **C# nodes** are worker executables built with `src/sdk/dotnet/Mvf.Worker` (examples in
+  `src/sdk/dotnet/examples`).
+- **C++ nodes** use `src/sdk/cpp`.
 
-**Pipeline:**
-```
-Cognex Camera (source)
-    → frame →
-Dark Frame Filter (compute)       ← karanlık frame'leri atar
-    → frame (sadece parlak frame) →
-Dataset Writer (output)
-```
-
-Sürekli çalışır, Ctrl+C ile durdurulur.
-
----
-
-## Kamera IP'sini Nasıl Değiştirirsin?
-
-`packages/cognex-dark-filter-dataset/pipeline.json` dosyasını aç:
-
-```json
-{
-  "id": "camera1",
-  "config": {
-    "ipAddress": "192.168.1.11",   ← BUNU DEĞİŞTİR
-    "cameraId": "cognex-cam-1",
-    ...
-  }
-}
-```
-
----
-
-## Publish ve Çalıştırma
-
-```powershell
-# Repo kökünden
-powershell -File publish.ps1 -IncludeRealWorld
-
-# Çalıştır
-cd publish\mvf
-.\MachineVisionFabric.Cli.exe execute-graph --package packages\cognex-dark-filter-dataset
-```
-
----
-
-## Karanlık Eşik Ayarı
-
-`pipeline.json` → `dark-filter` node:
-
-```json
-"config": {
-  "minimumMeanBrightness": 18.0   ← 0–255 arası, düşür = daha az filtre, artır = daha katı
-}
-```
-
----
-
-## Entegrasyon Modülleri
-
-| Modül | ID | Açıklama |
-|---|---|---|
-| CognexCamera | `mvf.realworld-cognex-camera` | Cognex In-Sight HMI WebSocket kaynak |
-| DarkFrameFilter | `mvf.realworld-dark-frame-filter` | OpenCV ortalama parlaklık filtresi |
-
-`mvf.dataset-writer` platform `examples/integrations/` içindedir.
+The legacy .NET in-process integrations (Cognex camera, dark-frame filter, black-screen check,
+folder source, dataset writer, synthetic camera) are archived with the legacy runtime: branch
+`archive/dotnet-legacy`, tag `dotnet-legacy-final` (#34). The folder source and dataset writer are
+`mvf` builtins. The others need a `Mvf.Worker` port to run under `mvf`.

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # #17 interoperability check between Docker and the MVF content store, both directions.
 #
-#   Docker -> MVF : `docker save` archive imported with `mvf-rs image import` (no daemon involved:
+#   Docker -> MVF : `docker save` archive imported with `mvf image import` (no daemon involved:
 #                   the import only reads the tar) and re-verified blob by blob.
-#   MVF -> Docker : `mvf-rs image export` as a Docker archive and as an OCI layout, each loaded with
+#   MVF -> Docker : `mvf image export` as a Docker archive and as an OCI layout, each loaded with
 #                   `docker load` and run with `docker run`; the loaded image id must equal the MVF
 #                   manifest digest (containerd image store) — i.e. the identical image.
 #
@@ -19,7 +19,7 @@ NAME=${NAME:-docker.io/library/busybox:1.37}
 PLATFORM=${PLATFORM:-linux/arm64}
 
 (cd "$REPO/rust" && cargo build -q --locked -p mvf-cli)
-MVF=("$REPO/rust/target/debug/mvf-rs" image --store "$WORK/store")
+MVF=("$REPO/rust/target/debug/mvf" image --store "$WORK/store")
 rm -rf "$WORK" && mkdir -p "$WORK"
 
 echo "== fixture: $IMAGE ($PLATFORM)"

@@ -27,5 +27,5 @@ YAML
 target/release/mvf-display-host &
 HOST=$!
 trap 'kill $HOST 2>/dev/null || true' EXIT
-BIN=target/release/mvf-rs
+BIN=target/release/mvf
 "$BIN" run examples/display-demo/pipeline.yaml --modules "$MODULES" --modules "$RUST/../modules" "$@"

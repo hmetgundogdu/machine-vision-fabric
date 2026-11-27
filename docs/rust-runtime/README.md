@@ -1,10 +1,12 @@
 # Rust runtime (issue #10)
 
-> **v1.1.0: first usable release.** `mvf-rs` ships in the release beside the unchanged legacy
-> .NET CLI. To move a legacy `pipeline.json` package, see the
-> [migration guide](migration-guide.md) (`mvf-rs import`). The retirement inventory and gate
-> (#34) are in [legacy-retirement.md](legacy-retirement.md), and the import evidence is in
-> [stage 29](stages/29.md).
+> **v2.0.0: `mvf` is the MVF runtime.**
+> - The legacy .NET runtime is archived: branch `archive/dotnet-legacy`, tag
+>   `dotnet-legacy-final`, last shipped in v1.1.0 ([legacy-retirement.md](legacy-retirement.md),
+>   [stage 30](stages/30.md)).
+> - To move a legacy `pipeline.json` package, see the [migration guide](migration-guide.md)
+>   (`mvf import`, [stage 29](stages/29.md)).
+> - Until v1.1.0 the binary was called `mvf-rs`, and older stage reports use that name.
 
 Research branch `research/rust-runtime`. Implements the ordered backlog of
 [#10](https://github.com/hmetgundogdu/machine-vision-fabric/issues/10): Gate A (#11–#16) and Gate B
@@ -33,7 +35,7 @@ mechanical change once the .NET host retires.
 | `mvf-display-host` | #30 | Optional `mvf-display-host` for the user's session (winit + softbuffer), `mvf-cube` (Rust 3D renderer node), `mvf-native-window` (native-UI PoC). Nothing else links it. |
 | `mvf-ipc` | #32 | Worker protocol v2: binary framing and bodies (host and Rust children), the fixture child, benchmarks against v1 and fault injection. |
 | `mvf-storage` | #31 | Storage Fabric: provisioning of persistent, shared, host-bind and digest-pinned artifact volumes and scratch; path safety; retention, sweep and accounting. The OS does the I/O. |
-| `mvf-cli` | #12– | `mvf-rs` native CLI: `contract`, `validate`, `run`, `import` (legacy `pipeline.json`, #34), `host`, `image`, `manage`, `volume`. |
+| `mvf-cli` | #12– | `mvf` native CLI: `contract`, `validate`, `run`, `import` (legacy `pipeline.json`, #34), `host`, `image`, `manage`, `volume`. |
 
 ## Commands
 

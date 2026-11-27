@@ -3,7 +3,7 @@
 
 Standard library only. It speaks the protocol in protocol/management-v1.md: newline-delimited
 JSON over the runtime's local endpoint. That is a Unix socket on Linux and macOS, and a named
-pipe on Windows. The Rust CLI (`mvf-rs manage`) is the reference client; this one shows that
+pipe on Windows. The Rust CLI (`mvf manage`) is the reference client; this one shows that
 nothing in the API is Rust-specific.
 
     python3 mvf_manage.py list

@@ -27,13 +27,21 @@ SIZES=${SIZES:-"65536 1048576 6291456"}
 FRAMES_DIR=packages/bench/assets/frames
 OUT=${OUT:-rust/target/bench-baseline.txt}
 
-if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
-  echo "Building .NET (Release) and Rust (release)..." >&2
-  dotnet build Mvf.slnx -c Release -v q --nologo >/dev/null
-  (cd rust && cargo build --release --locked -p mvf-cli >/dev/null 2>&1)
+# The legacy .NET engine is archived (#34). LEGACY_ROOT is a checkout of it: by default a worktree of
+# the tag `dotnet-legacy-final` at <repo>/.legacy-dotnet (git-ignored), made and built on first use.
+LEGACY_ROOT=${LEGACY_ROOT:-$REPO/.legacy-dotnet}
+if [[ ! -d "$LEGACY_ROOT" ]]; then
+  git -C "$REPO" rev-parse -q --verify dotnet-legacy-final >/dev/null \
+    || git -C "$REPO" fetch -q origin tag dotnet-legacy-final
+  git -C "$REPO" worktree add -q --detach "$LEGACY_ROOT" dotnet-legacy-final
 fi
-MVF_RS="$REPO/rust/target/release/mvf-rs"
-DOTNET_CLI=$(ls src/cli/Mvf.Cli/bin/Release/net*/Mvf.Cli.dll | head -1)
+if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
+  echo "Building the legacy .NET engine (Release) and mvf (release)..." >&2
+  (cd "$LEGACY_ROOT" && dotnet build Mvf.slnx -c Release -v q --nologo >/dev/null)
+  (cd rust && cargo build --release --locked -p mvf-cli >/dev/null)
+fi
+MVF_RS="$REPO/rust/target/release/mvf"
+DOTNET_CLI=$(ls "$LEGACY_ROOT"/src/cli/Mvf.Cli/bin/Release/net*/Mvf.Cli.dll | head -1)
 
 gen() {
   rm -rf "$FRAMES_DIR"; mkdir -p "$FRAMES_DIR"
@@ -79,7 +87,8 @@ for size in $SIZES; do
   for mode in touch numpy; do
     # .NET (existing engine, unchanged)
     timed dotnet "$DOTNET_CLI" execute-graph --path "packages/bench/pipeline-$mode.json" \
-      --package packages/bench --max-cycles "$CYCLES" --mode serial --no-tui
+      --package packages/bench --max-cycles "$CYCLES" --mode serial --no-tui \
+      --integrations-root "$LEGACY_ROOT/modules"
     echo "$RUN_OUT" | grep -q 'Succeeded:True' || { echo ".NET run failed"; echo "$RUN_OUT" | tail -5; exit 1; }
     dur=$(echo "$RUN_OUT" | grep -oE 'duration:[0-9.,]+' | head -1 | cut -d: -f2 | tr ',' '.')
     node=$(echo "$RUN_OUT" | grep -E '^  bench:' | grep -oE 'avg=[0-9.,]+' | cut -d= -f2 | tr ',' '.')

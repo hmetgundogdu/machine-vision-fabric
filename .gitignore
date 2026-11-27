@@ -40,3 +40,6 @@ publish/
 
 # C++ SDK build trees
 src/sdk/cpp/build/
+
+# The archived legacy .NET engine, checked out by rust/scripts/{parity-demos,bench-baseline}.sh (#34)
+/.legacy-dotnet/

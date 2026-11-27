@@ -8,7 +8,7 @@
 # Differences from the .NET document, all syntactic: node ids are lower-case (`save-black`), data and
 # loop edges are separate lists, and the folder source states its simulator camera id explicitly.
 #
-#   mvf-rs run rust/examples/inspection-demo/pipeline.yaml --max-cycles 200
+#   mvf run rust/examples/inspection-demo/pipeline.yaml --max-cycles 200
 apiVersion: mvf.dev/v1alpha1
 kind: Pipeline
 metadata:

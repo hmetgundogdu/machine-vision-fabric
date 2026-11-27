@@ -1,5 +1,10 @@
 # Realtime Egress — design
 
+> **Legacy document.** It describes the archived .NET runtime and its CLI (branch
+> `archive/dotnet-legacy`, tag `dotnet-legacy-final`, last shipped in v1.1.0). For the current
+> runtime `mvf`, see the [README](../README.md) and the
+> [migration guide](rust-runtime/migration-guide.md).
+
 > Milestone **EG** (`roadmap.md`). Lets a running pipeline *emit while it runs* so an external panel /
 > studio / observer can watch it live — **without** ever touching the execution hot path.
 

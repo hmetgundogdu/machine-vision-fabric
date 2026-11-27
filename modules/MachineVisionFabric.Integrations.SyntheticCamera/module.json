@@ -1,8 +1,0 @@
-{
-  "id": "mvf.synthetic-camera",
-  "name": "Synthetic Belt Camera",
-  "version": "1.0.0",
-  "kind": "source",
-  "runtime": "dotnet",
-  "entry": "MachineVisionFabric.Integrations.SyntheticCamera.dll"
-}

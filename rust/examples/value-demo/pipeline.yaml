@@ -6,7 +6,7 @@
 #
 # The selections are recorded so the outputs can be compared with the .NET engine.
 #
-#   MVF_BINDING_CAMERA_SERIAL=DEF456 mvf-rs run rust/examples/value-demo/pipeline.yaml --max-cycles 4
+#   MVF_BINDING_CAMERA_SERIAL=DEF456 mvf run rust/examples/value-demo/pipeline.yaml --max-cycles 4
 apiVersion: mvf.dev/v1alpha1
 kind: Pipeline
 metadata:

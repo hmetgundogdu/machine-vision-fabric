@@ -906,7 +906,7 @@ impl Engine {
 /// The only accepted `kind` for update plans.
 pub const UPDATE_PLAN_KIND: &str = "UpdatePlan";
 
-/// A scripted sequence of updates applied while a pipeline runs (`mvf-rs run --updates plan.yaml`).
+/// A scripted sequence of updates applied while a pipeline runs (`mvf run --updates plan.yaml`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct UpdatePlan {

@@ -1,4 +1,4 @@
-//! `mvf-rs volume`: list, inspect and explicitly delete retained volumes (#31). Volume data is
+//! `mvf volume`: list, inspect and explicitly delete retained volumes (#31). Volume data is
 //! never removed by a node stopping, a replacement or the engine exiting; only `delete --yes` does.
 
 use std::path::Path;

@@ -1,6 +1,6 @@
 [package]
 name = "mvf-cli"
-description = "mvf-rs: native CLI for the MVF Rust runtime (no CLR, no Docker daemon)."
+description = "mvf: native CLI for the MVF Rust runtime (no CLR, no Docker daemon)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "mvf-rs"
+name = "mvf"
 path = "src/main.rs"
 
 [dependencies]

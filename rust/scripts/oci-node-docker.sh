@@ -10,7 +10,7 @@ WORK="$REPO/rust/target/oci-node-docker"
 PLATFORM=${PLATFORM:-linux/arm64}
 FIXTURE="$REPO/rust/target/oci-testhost/fixtures/python.tar"   # from oci-testhost.sh
 (cd "$REPO/rust" && cargo build -q --locked -p mvf-cli)
-MVF=("$REPO/rust/target/debug/mvf-rs" image --store "$WORK/store")
+MVF=("$REPO/rust/target/debug/mvf" image --store "$WORK/store")
 rm -rf "$WORK" && mkdir -p "$WORK"
 
 "${MVF[@]}" import "$FIXTURE" --name python:base --platform "$PLATFORM" >/dev/null

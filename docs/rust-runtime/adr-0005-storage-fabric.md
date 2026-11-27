@@ -55,7 +55,7 @@ Inspection nodes need files: model weights, calibration, incoming images, result
      first failed write.
 5. **Lifecycle.**
    - **Persistent and shared data:** never removed by a stop, a crash, a restart, a replacement or
-     the engine exiting. Only `mvf-rs volume delete <pipeline>/<volume> --yes` removes it.
+     the engine exiting. Only `mvf volume delete <pipeline>/<volume> --yes` removes it.
      Volumes are scoped to the pipeline's name.
    - **Scratch:** fresh per generation instance. A worker's scratch is a host directory removed
      when its generation goes, and swept after a crash (dead engine pid). A sandbox's scratch is a
