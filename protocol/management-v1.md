@@ -195,7 +195,9 @@ Opt-in, capped, audited and never retained.
 - **Retention and audit:** only the latest preview per node is kept in memory. Previews are not
   in the ring, snapshots, the audit log or on disk. Opening a preview is audited
   (`preview-opened`: principal, node, fps).
-- **Executor:** previews come from the serial executor only.
+- **Executor:** both. In the pipelined executor a mid-graph node's preview is the output of its
+  next execution after the sample was asked for, so its cycle may trail the source's by the
+  queue depth. Every preview carries the cycle it shows.
 
 ## Uploads
 

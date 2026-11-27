@@ -9,6 +9,7 @@
   (node networking), #30, #31. Separate from #21 (Event Fabric).
 - **Evidence:** [stage 24](stages/24.md) (part 1), [stage 25](stages/25.md) (part 2),
   [stage 26](stages/26.md) (part 3), [stage 27](stages/27.md) (package signatures),
+  [stage 28](stages/28.md) (previews in the pipelined executor),
   `crates/mvf-management/tests/{manage,commands}.rs`, `crates/mvf-remote/tests/remote.rs`,
   `crates/mvf-cli/tests/cli.rs`. Spec: [`protocol/management-v1.md`](../../protocol/management-v1.md).
 
@@ -101,6 +102,16 @@ deploy prepared artifacts, replace and roll back nodes, and see previews. The co
      does not fit is skipped, never queued.
    - **Retention:** only the latest preview per node, in memory. It is never in the ring,
      snapshots, the audit log or on disk. Opening a preview is audited.
+   - **Pipelined executor ([stage 28](stages/28.md)).** The observer lives on the driver thread,
+     so sources are sampled as in the serial executor. For a mid-graph node the driver asks once
+     per cycle while no sample of it is in flight, and sets a per-node flag. The node's stage
+     thread clears it after its next execution and sends that execution's outputs (shared
+     leases) back on the event channel it already uses for node events. So a stage never
+     waits, and has at most one sample per node in flight. An unarmed stage pays one relaxed
+     atomic load per execution.
+     - **Rejected:** a thread-safe observer called from the stage threads (every observer would
+       need locking for a feature most runs leave off); sending every output to the driver
+       (a lease per frame held until the driver drains).
    - **Rejected:**
      - a binary side channel: a second framing through the relay for a stream capped at
        kilobytes per second;
@@ -158,6 +169,7 @@ Part 3 (release builds):
 | 50k cycles of 64×48 RGB, previews off / on (2 fps) | 10.1–10.8 / 10.3 µs/cycle | 11.55–11.66 / 11.73–11.74 µs/cycle |
 | one preview of 1280×960 RGB → 160×120, on the preview thread | 0.70 ms, 77 KB on the wire | 0.58 ms, 77 KB |
 | 32 MiB upload over the local endpoint (base64 chunks, digest checks, staging) | 81 MiB/s | 78 MiB/s |
+| pipelined, 50k cycles of 64×48 RGB, previews of a source and a stage off / on (2 fps, wall) ([stage 28](stages/28.md)) | 12.22 / 12.21–12.26 µs/cycle | 12.53–12.83 / 12.50–12.96 µs/cycle |
 
 ## Threat model (parts 1–3)
 
@@ -203,9 +215,9 @@ Part 3 (release builds):
 
 - **Part 2** is done ([stage 25](stages/25.md)). `start` is not a command: a runtime that is not
   running has no endpoint, and starting one is the job of the host's service manager.
-- **Part 3** is done ([stage 26](stages/26.md); signatures in [stage 27](stages/27.md)), except:
-  - previews from the pipelined executor (serial only);
-  - edge-hardware measurements (BLOCKED).
+- **Part 3** is done ([stage 26](stages/26.md); signatures in [stage 27](stages/27.md);
+  previews in the pipelined executor in [stage 28](stages/28.md)), except edge-hardware
+  measurements (BLOCKED).
 - **Part 3, as originally planned:**
   - opt-in previews with resolution, rate and bandwidth caps;
   - artifact upload with digest and signature policy, staged before activation and resumable

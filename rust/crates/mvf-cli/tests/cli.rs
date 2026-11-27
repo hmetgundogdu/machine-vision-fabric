@@ -740,3 +740,83 @@ fn mvf_management_key(public: &[u8]) -> String {
     let hex: String = public.iter().map(|b| format!("{b:02x}")).collect();
     format!("ed25519:{hex}")
 }
+
+#[test]
+fn a_pipelined_managed_run_serves_previews_of_a_mid_graph_node() {
+    let dir = std::env::temp_dir().join(format!("mvf-cli-pipelined-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let pipeline = dir.join("pipeline.yaml");
+    std::fs::write(
+        &pipeline,
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: { name: pipelined }\nspec:\n  nodes:\n    - { id: cam, builtin: synthetic-source, config: { width: 320, height: 240, channels: 3, frames: 1000000, intervalMs: 5 } }\n    - { id: pass, builtin: passthrough }\n    - { id: sink, builtin: record }\n  edges:\n    data:\n      - { from: cam.frame, to: pass.frame }\n      - { from: pass.frame, to: sink.frame }\n",
+    )
+    .expect("pipeline");
+    let runtime = dir.join("run");
+    let mut run = mvf()
+        .args([
+            "run",
+            "--mode",
+            "pipelined",
+            "--manage",
+            "--preview",
+            "pass",
+        ])
+        .arg(&pipeline)
+        .env("MVF_RUNTIME_DIR", &runtime)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("run");
+    let manage = |args: &[&str]| {
+        mvf()
+            .arg("manage")
+            .args(args)
+            .env("MVF_RUNTIME_DIR", &runtime)
+            .output()
+            .expect("manage")
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let shots = dir.join("shots");
+    std::fs::create_dir_all(&shots).expect("shots");
+    loop {
+        let out = manage(&[
+            "preview",
+            "--node",
+            "pass",
+            "--count",
+            "2",
+            "--out",
+            shots.to_str().expect("path"),
+        ]);
+        if out.status.success() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let pngs: Vec<_> = std::fs::read_dir(&shots)
+        .expect("shots")
+        .flatten()
+        .collect();
+    assert_eq!(pngs.len(), 2);
+    for p in &pngs {
+        assert_eq!(
+            &std::fs::read(p.path()).expect("png")[..8],
+            b"\x89PNG\r\n\x1a\n"
+        );
+    }
+    let status = manage(&["status", "--json"]);
+    let s: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status");
+    assert_eq!(s["runtime"]["mode"], "pipelined", "{s}");
+    assert!(
+        manage(&["command", "stop", "--id", "pipelined-stop"])
+            .status
+            .success()
+    );
+    assert!(run.wait().expect("wait").success());
+}

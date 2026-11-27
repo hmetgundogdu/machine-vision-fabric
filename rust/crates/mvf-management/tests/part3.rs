@@ -296,6 +296,126 @@ fn previews_are_opt_in_downscaled_rate_capped_audited_and_never_retained() {
     );
 }
 
+/// Checks a preview against the synthetic source frame of its cycle (nearest-neighbour 2:1).
+fn assert_preview_of_source(p: &Value) {
+    let png = mvf_management::preview::unbase64(p["data"].as_str().expect("data")).expect("base64");
+    let (w, h, c, px) = decode_png(&png);
+    assert_eq!((w, h, c), (160, 120, 3));
+    let cycle = p["cycle"].as_u64().expect("cycle");
+    let source = SyntheticSource::pixels(0, cycle, 320 * 240 * 3);
+    for (y, x) in [(0usize, 0usize), (10, 37), (119, 159)] {
+        let s = ((2 * y) * 320 + 2 * x) * 3;
+        assert_eq!(
+            &px[(y * 160 + x) * 3..(y * 160 + x) * 3 + 3],
+            &source[s..s + 3],
+            "{} pixel ({y},{x}) of cycle {cycle}",
+            p["node"]
+        );
+    }
+}
+
+/// Wants every output of one node, beside the [`Tap`].
+struct Every {
+    node: &'static str,
+    asked: u64,
+    /// (cycle, whether the frame is that cycle's source frame)
+    got: Vec<(u64, bool)>,
+}
+
+impl Observer for Every {
+    fn wants_outputs(&mut self, node: &str) -> bool {
+        let yes = node == self.node;
+        self.asked += u64::from(yes);
+        yes
+    }
+    fn outputs(
+        &mut self,
+        cycle: u64,
+        node: &str,
+        outputs: &std::collections::BTreeMap<String, mvf_engine::Value>,
+    ) {
+        assert_eq!(node, self.node, "only what it asked for");
+        let bytes = outputs["frame"].payload().expect("frame").bytes();
+        let exact = bytes == SyntheticSource::pixels(0, cycle, bytes.len()).as_slice();
+        self.got.push((cycle, exact));
+    }
+}
+
+#[test]
+fn previews_come_from_the_pipelined_executor_beside_another_observer() {
+    let mut rt = runtime(
+        "pipelined",
+        &pipeline(320, 240, 3, 5),
+        Some(PreviewConfig {
+            nodes: vec!["cam".into(), "pass".into()],
+            max_fps: 5.0,
+            max_pixels: 160 * 120,
+            bytes_per_second: 8 << 20,
+        }),
+    );
+    let mut every = Every {
+        node: "pass",
+        asked: 0,
+        got: Vec::new(),
+    };
+    let mut tap = Tap::new(
+        rt.feed.clone(),
+        rt.engine.graph().nodes.iter().map(|n| n.id.clone()),
+    );
+    let options = RunOptions {
+        cancel: rt.cancel.clone(),
+        pipelined: true,
+        ..RunOptions::default()
+    };
+    let cancel = rt.cancel.clone();
+    let endpoint = rt.server.endpoint().to_string();
+    let engine = &mut rt.engine;
+    let mut received = Vec::new();
+    let report = std::thread::scope(|scope| {
+        let every = &mut every;
+        let h = scope.spawn(move || {
+            let r = engine.run(&options, &mut Tee::new(every, &mut tap));
+            tap.finish(&r);
+            r
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // A source (driver thread) and a mid-graph node (its own stage thread).
+            for node in ["cam", "pass"] {
+                let (mut raw, _) = Raw::open(&endpoint, Some(("pia", "previewer")));
+                raw.send(&json!({"op": "preview", "node": node, "fps": 5}));
+                let t0 = Instant::now();
+                while t0.elapsed() < Duration::from_millis(800) {
+                    let m = raw.read();
+                    if m["op"] == "preview" {
+                        received.push(m);
+                    }
+                }
+            }
+        }));
+        cancel.cancel();
+        let report = h.join().expect("run");
+        if let Err(p) = outcome {
+            std::panic::resume_unwind(p);
+        }
+        report
+    });
+    assert_eq!(report.end, EndReason::Cancelled);
+    for node in ["cam", "pass"] {
+        let mine: Vec<_> = received.iter().filter(|p| p["node"] == node).collect();
+        assert!(mine.len() >= 2, "{} previews of {node}", mine.len());
+        for p in mine {
+            assert_preview_of_source(p);
+        }
+    }
+    // The other observer had its own samples of `pass`, each exactly that cycle's frame: the Tee
+    // kept its requests apart from the Tap's although the two interleave.
+    assert!(every.got.len() >= 10, "{} samples", every.got.len());
+    assert!(every.got.iter().all(|(_, exact)| *exact));
+    assert!(every.got.windows(2).all(|w| w[0].0 < w[1].0));
+    assert!(every.asked - every.got.len() as u64 <= 1);
+}
+
 #[test]
 fn a_viewer_over_its_byte_budget_gets_fewer_previews_not_a_queue() {
     let mut rt = runtime(
@@ -527,6 +647,34 @@ fn bench_previews_and_uploads() {
             "previews {:<5} {:.3} us/cycle over {} cycles",
             previews,
             r.cycles_ms * 1e3 / r.cycles_completed as f64,
+            r.cycles_completed
+        );
+    }
+    // The same in the pipelined executor, previewing the source and a mid-graph stage (wall time:
+    // stages overlap, so the sum of cycle times is not the run's cost).
+    for previews in [false, true, false, true] {
+        let mut rt = runtime(
+            "bench-preview-pipelined",
+            text,
+            previews.then(|| PreviewConfig {
+                nodes: vec!["cam".into(), "pass".into()],
+                ..Default::default()
+            }),
+        );
+        let mut tap = Tap::new(
+            rt.feed.clone(),
+            rt.engine.graph().nodes.iter().map(|n| n.id.clone()),
+        );
+        let options = RunOptions {
+            pipelined: true,
+            ..RunOptions::default()
+        };
+        let t = Instant::now();
+        let r = rt.engine.run(&options, &mut tap);
+        eprintln!(
+            "pipelined previews {:<5} {:.3} us/cycle (wall) over {} cycles",
+            previews,
+            t.elapsed().as_secs_f64() * 1e6 / r.cycles_completed as f64,
             r.cycles_completed
         );
     }

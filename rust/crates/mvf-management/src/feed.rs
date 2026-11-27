@@ -613,8 +613,10 @@ impl Observer for Tap {
 pub struct Tee<'a, A: ?Sized, B: ?Sized> {
     a: &'a mut A,
     b: &'a mut B,
-    /// Which of the two asked for the outputs of the node being executed.
-    wanted: (bool, bool),
+    /// Per node, how many samples each of the two asked for and has not had yet. In the serial
+    /// executor `outputs` follows `wants_outputs` at once; in the pipelined one other nodes'
+    /// calls come in between (see [`Observer::wants_outputs`]).
+    wanted: Vec<(String, [u32; 2])>,
 }
 
 impl<'a, A: Observer + ?Sized, B: Observer + ?Sized> Tee<'a, A, B> {
@@ -623,7 +625,7 @@ impl<'a, A: Observer + ?Sized, B: Observer + ?Sized> Tee<'a, A, B> {
         Self {
             a,
             b,
-            wanted: (false, false),
+            wanted: Vec::new(),
         }
     }
 }
@@ -645,15 +647,39 @@ impl<A: Observer + ?Sized, B: Observer + ?Sized> Observer for Tee<'_, A, B> {
     }
 
     fn wants_outputs(&mut self, node: &str) -> bool {
-        self.wanted = (self.a.wants_outputs(node), self.b.wants_outputs(node));
-        self.wanted.0 || self.wanted.1
+        let asked = [self.a.wants_outputs(node), self.b.wants_outputs(node)];
+        if !asked.contains(&true) {
+            return false;
+        }
+        let i = match self.wanted.iter().position(|(n, _)| n == node) {
+            Some(i) => i,
+            None => {
+                self.wanted.push((node.to_string(), [0, 0]));
+                self.wanted.len() - 1
+            }
+        };
+        for (count, yes) in self.wanted[i].1.iter_mut().zip(asked) {
+            if yes {
+                *count = count.saturating_add(1);
+            }
+        }
+        true
     }
 
     fn outputs(&mut self, cycle: u64, node: &str, outputs: &BTreeMap<String, mvf_engine::Value>) {
-        if self.wanted.0 {
+        let Some((_, counts)) = self.wanted.iter_mut().find(|(n, _)| n == node) else {
+            return;
+        };
+        let due = [counts[0] > 0, counts[1] > 0];
+        for (count, d) in counts.iter_mut().zip(due) {
+            if d {
+                *count -= 1;
+            }
+        }
+        if due[0] {
             self.a.outputs(cycle, node, outputs);
         }
-        if self.wanted.1 {
+        if due[1] {
             self.b.outputs(cycle, node, outputs);
         }
     }

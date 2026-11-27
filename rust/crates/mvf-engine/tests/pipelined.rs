@@ -591,3 +591,104 @@ fn arena_sizing_follows_the_graph() {
     assert_eq!(pipelined::arena_slots_for(&g, 2, 8), 8);
     assert_eq!(pipelined::arena_slots_for(&g, 8, 8), 1 + 8 * 2 + 2);
 }
+
+/// Wants every output of the named nodes and keeps (node, cycle) → payload checksum.
+#[derive(Default)]
+struct Samples {
+    want: Vec<&'static str>,
+    asked: std::collections::BTreeMap<String, u64>,
+    got: Vec<(String, u64, u64)>,
+}
+
+impl Observer for Samples {
+    fn wants_outputs(&mut self, node: &str) -> bool {
+        let yes = self.want.contains(&node);
+        if yes {
+            *self.asked.entry(node.to_string()).or_default() += 1;
+        }
+        yes
+    }
+    fn outputs(
+        &mut self,
+        cycle: u64,
+        node: &str,
+        outputs: &std::collections::BTreeMap<String, Value>,
+    ) {
+        let sum = outputs["frame"].payload().expect("frame").checksum();
+        self.got.push((node.to_string(), cycle, sum));
+    }
+}
+
+#[test]
+fn pipelined_hands_sampled_outputs_to_the_observer_exactly_as_serial_produces_them() {
+    let text = doc(
+        &[
+            CAM,
+            "{ id: inv, builtin: invert }",
+            "{ id: par, contract: parallel-invert.yaml, parallelism: 3 }",
+            "{ id: sink, builtin: record }",
+        ],
+        &[
+            "{ from: cam.frame, to: inv.frame }",
+            "{ from: inv.frame, to: par.frame }",
+            "{ from: par.frame, to: sink.frame }",
+        ],
+        &[],
+        "",
+    );
+    let want = vec!["cam", "inv", "par"];
+    let mut serial = Samples {
+        want: want.clone(),
+        ..Samples::default()
+    };
+    engine(&text, &HostServices::default()).run(&RunOptions::default(), &mut serial);
+    let truth: std::collections::BTreeMap<(String, u64), u64> = serial
+        .got
+        .iter()
+        .map(|(n, c, s)| ((n.clone(), *c), *s))
+        .collect();
+    assert_eq!(
+        truth.len(),
+        3 * 40,
+        "serial: every executed node, every cycle"
+    );
+
+    let mut sampled = Samples {
+        want,
+        ..Samples::default()
+    };
+    let report = engine(&text, &HostServices::default()).run(&pipelined(), &mut sampled);
+    assert_eq!(report.cycles_completed, 40);
+    for (n, c, s) in &sampled.got {
+        assert_eq!(
+            truth.get(&(n.clone(), *c)),
+            Some(s),
+            "{n} at cycle {c}: what serial produced"
+        );
+    }
+    for node in ["cam", "inv", "par"] {
+        let cycles: Vec<u64> = sampled
+            .got
+            .iter()
+            .filter(|(n, _, _)| n == node)
+            .map(|(_, c, _)| *c)
+            .collect();
+        assert!(!cycles.is_empty(), "{node} was sampled");
+        assert!(
+            cycles.windows(2).all(|w| w[0] < w[1]),
+            "{node}: in cycle order"
+        );
+        // Every `true` is answered by one sample, except at most one still armed at the end.
+        let asked = sampled.asked[node];
+        assert!(
+            asked - cycles.len() as u64 <= 1,
+            "{node}: asked {asked}, sampled {}",
+            cycles.len()
+        );
+    }
+    // The source runs on the driver thread and is sampled like the serial executor does it.
+    assert_eq!(
+        sampled.got.iter().filter(|(n, _, _)| n == "cam").count(),
+        40
+    );
+}

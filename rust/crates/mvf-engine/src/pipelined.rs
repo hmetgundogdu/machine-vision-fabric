@@ -21,7 +21,7 @@
 //!   serial cycle at a time, so cut-over and rollback keep their exact semantics.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -95,6 +95,12 @@ enum StageEvent {
     },
     Done {
         cycle: u64,
+    },
+    /// The outputs of a node the driver armed (a sampled preview, #33).
+    Outputs {
+        cycle: u64,
+        node: usize,
+        outputs: BTreeMap<String, Value>,
     },
     Fatal(EndReason),
 }
@@ -286,6 +292,11 @@ impl Engine {
 
         let (events_tx, events_rx) = mpsc::channel::<StageEvent>();
         let abort_at = AtomicU64::new(u64::MAX);
+        // One flag per node. The driver arms it when the observer wants a stage's outputs; the
+        // stage disarms it and sends the outputs of its next execution back (#33 previews).
+        let taps: Vec<AtomicBool> = (0..graph.nodes.len())
+            .map(|_| AtomicBool::new(false))
+            .collect();
         let every = self.checkpoint.every;
         let loop_spec = graph.loop_spec;
         let ctx = RecoveryCtx {
@@ -337,12 +348,15 @@ impl Engine {
                 let node = &nodes[i];
                 let ctx = &ctx;
                 let abort_at = &abort_at;
+                let tap = &taps[i];
                 handles.push(scope.spawn(move || {
                     if slot.replicas.is_empty() {
-                        run_stage(i, node, slot, inbound, out, ctx, cancel, &events, abort_at)
+                        run_stage(
+                            i, node, slot, inbound, out, ctx, cancel, &events, abort_at, tap,
+                        )
                     } else {
                         run_parallel_stage(
-                            i, node, slot, inbound, out, ctx, cancel, &events, abort_at,
+                            i, node, slot, inbound, out, ctx, cancel, &events, abort_at, tap,
                         )
                     }
                 }));
@@ -360,6 +374,11 @@ impl Engine {
                     generation,
                     outcome,
                 } => observer.node(cycle, &nodes[node].id, generation, &outcome),
+                StageEvent::Outputs {
+                    cycle,
+                    node,
+                    outputs,
+                } => observer.outputs(cycle, &nodes[node].id, &outputs),
                 StageEvent::Done { cycle } => {
                     *done.entry(cycle).or_default() += 1;
                     while done.get(&(*completed + 1)).copied() == Some(stage_count) {
@@ -412,6 +431,13 @@ impl Engine {
                     }
                     if every > 0 && (cycle - 1).is_multiple_of(every) {
                         break 'driver None; // epoch barrier after cycle - 1
+                    }
+                }
+                // Arm the stages whose outputs the observer wants (at most one sample in flight
+                // per node; the observer is asked again once it has been sent).
+                for &i in &stages {
+                    if !taps[i].load(Ordering::Acquire) && observer.wants_outputs(&nodes[i].id) {
+                        taps[i].store(true, Ordering::Release);
                     }
                 }
                 // Every driver node, in execution order (sources first).
@@ -570,6 +596,9 @@ fn drive(
     let inputs = Inputs::new();
     match execute_slot(slot, node, cycle, &inputs, ctx, cancel, log, Some(live)) {
         Executed::Outputs(outputs, duration) => {
+            if observer.wants_outputs(&slot.id) {
+                observer.outputs(cycle, &slot.id, &outputs);
+            }
             observer.node(
                 cycle,
                 &slot.id,
@@ -789,6 +818,24 @@ fn gate(
     }
 }
 
+/// Sends `outputs` to the driver if it armed `tap` for this node, and disarms it. The values are
+/// shared, not copied; a relaxed load keeps the unarmed case to one read.
+fn sample(
+    tap: &AtomicBool,
+    events: &Sender<StageEvent>,
+    cycle: u64,
+    node: usize,
+    outputs: &BTreeMap<String, Value>,
+) {
+    if tap.load(Ordering::Relaxed) && tap.swap(false, Ordering::AcqRel) {
+        let _ = events.send(StageEvent::Outputs {
+            cycle,
+            node,
+            outputs: outputs.clone(),
+        });
+    }
+}
+
 fn send_all(out: &[(String, SyncSender<Message>)], cycle: u64, outputs: &BTreeMap<String, Value>) {
     for (port, tx) in out {
         let _ = tx.send((cycle, outputs.get(port).cloned()));
@@ -807,6 +854,7 @@ fn run_stage(
     cancel: &CancellationToken,
     events: &Sender<StageEvent>,
     abort_at: &AtomicU64,
+    tap: &AtomicBool,
 ) -> StageReport {
     let mut report = StageReport::default();
     let empty = BTreeMap::new();
@@ -846,6 +894,7 @@ fn run_stage(
                     Some(&mut report.live),
                 ) {
                     Executed::Outputs(outputs, duration) => {
+                        sample(tap, events, cycle, index, &outputs);
                         send_all(&out, cycle, &outputs);
                         NodeOutcome::Executed {
                             duration,
@@ -893,6 +942,7 @@ fn run_parallel_stage(
     cancel: &CancellationToken,
     events: &Sender<StageEvent>,
     abort_at: &AtomicU64,
+    tap: &AtomicBool,
 ) -> StageReport {
     type Work = (u64, Inputs);
     type Done = (
@@ -960,6 +1010,7 @@ fn run_parallel_stage(
                                 slot.stats.executed += 1;
                                 slot.stats.total_us = slot.stats.total_us.saturating_add(us);
                                 slot.stats.max_us = slot.stats.max_us.max(us);
+                                sample(tap, events, c, index, &outputs);
                                 send_all(&out, c, &outputs);
                                 NodeOutcome::Executed {
                                     duration,

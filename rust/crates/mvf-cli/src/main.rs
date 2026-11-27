@@ -366,15 +366,18 @@ fn services_for(args: &PipelineArgs, base: HostServices) -> HostServices {
 }
 
 fn load_engine(args: &PipelineArgs, services: &HostServices) -> Result<Engine, ExitCode> {
-    load_engine_for(args, services, None)
+    load_engine_for(args, services, None, 0)
 }
 
 /// With `pipelined_queue`, the arena is sized from the graph (unless `--arena-slots` was given):
-/// stage-parallel runs keep a queue's worth of frames in flight per edge.
+/// stage-parallel runs keep a queue's worth of frames in flight per edge. `previews` (the number
+/// of `--preview` nodes) adds the slots a sampled frame can hold while it is handed to the preview
+/// thread: one in transit per node, one queued and one being downscaled.
 fn load_engine_for(
     args: &PipelineArgs,
     services: &HostServices,
     pipelined_queue: Option<usize>,
+    previews: usize,
 ) -> Result<Engine, ExitCode> {
     let text = std::fs::read_to_string(&args.pipeline)
         .map_err(|e| fail(2, format!("{}: {e}", args.pipeline.display())))?;
@@ -383,8 +386,10 @@ fn load_engine_for(
     if let Some(queue) = pipelined_queue
         && args.arena_slots.is_none()
     {
+        let preview_slots = if previews == 0 { 0 } else { previews + 2 };
         services.arena_config.slot_count =
-            mvf_engine::pipelined::arena_slots_for(&graph, queue, services.arena_config.slot_count);
+            mvf_engine::pipelined::arena_slots_for(&graph, queue, services.arena_config.slot_count)
+                + preview_slots;
     }
     Engine::build(graph, &host_backends(), &services).map_err(|e| fail(2, e))
 }
@@ -739,7 +744,8 @@ fn run(
             .queue
             .unwrap_or(mvf_engine::pipelined::DEFAULT_QUEUE)
     });
-    let mut engine = match load_engine_for(args, &services, queue) {
+    let previews = manage.as_ref().map_or(0, |m| m.preview.len());
+    let mut engine = match load_engine_for(args, &services, queue, previews) {
         Ok(e) => e,
         Err(code) => return code,
     };

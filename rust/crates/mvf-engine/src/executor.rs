@@ -78,15 +78,22 @@ pub trait Observer {
     fn events(&mut self, events: &EngineEvents<'_>) {
         let _ = events;
     }
-    /// Whether this observer wants `node`'s output values this cycle (a sampled preview, #33).
-    /// Asked once per executed node; the default is no, so nothing is handed out.
+    /// Whether this observer wants `node`'s output values (a sampled preview, #33). The default
+    /// is no, so nothing is handed out. Each `true` asks for one [`Observer::outputs`] call for
+    /// `node`:
+    /// - **serial executor:** asked once per executed node, and `outputs` follows at once;
+    /// - **pipelined executor:** sources are asked the same way, on the driver thread. Other
+    ///   nodes are asked by the driver once per cycle while no sample of them is in flight, and
+    ///   the outputs of the node's next execution arrive later, possibly with other nodes' calls
+    ///   in between. None arrives if the node does not execute again before the run ends or
+    ///   stops at a boundary.
     fn wants_outputs(&mut self, node: &str) -> bool {
         let _ = node;
         false
     }
-    /// The outputs of a node it wanted, before they go downstream. Values are shared, not copied:
-    /// a frame is a lease on its arena slot, and holding it keeps that slot in use. Serial
-    /// executor only.
+    /// The outputs of a node it wanted, before they go downstream (serial) or while they do
+    /// (pipelined). Values are shared, not copied: a frame is a lease on its arena slot, and
+    /// holding it keeps that slot in use.
     fn outputs(
         &mut self,
         cycle: u64,
