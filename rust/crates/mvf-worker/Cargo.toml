@@ -12,6 +12,7 @@ publish.workspace = true
 mvf-contract = { path = "../mvf-contract" }
 mvf-display = { path = "../mvf-display" }
 mvf-storage = { path = "../mvf-storage" }
+mvf-ipc = { path = "../mvf-ipc" }
 mvf-engine = { path = "../mvf-engine" }
 mvf-graph = { path = "../mvf-graph" }
 mvf-memory = { path = "../mvf-memory" }

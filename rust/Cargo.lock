@@ -1099,6 +1099,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvf-ipc"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "mvf-engine",
+ "mvf-graph",
+ "mvf-worker",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mvf-memory"
 version = "0.1.0"
 dependencies = [
@@ -1141,6 +1153,7 @@ dependencies = [
  "mvf-display",
  "mvf-engine",
  "mvf-graph",
+ "mvf-ipc",
  "mvf-memory",
  "mvf-oci",
  "mvf-storage",

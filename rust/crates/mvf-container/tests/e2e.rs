@@ -351,6 +351,15 @@ fn python_module_runs_as_a_typed_sandboxed_oci_node_with_zero_copy() {
     );
     let proc = report.nodes.iter().find(|n| n.id == "proc").expect("proc");
     assert_eq!(proc.backend, "oci");
+    assert!(
+        services
+            .logs
+            .events()
+            .iter()
+            .any(|l| l.node == "proc" && l.message.contains("protocol=2")),
+        "the containerized SDK negotiated protocol v2 through the bundle environment: {:?}",
+        services.logs.events()
+    );
     let frames: Vec<(u64, String)> = services
         .recorder
         .records()

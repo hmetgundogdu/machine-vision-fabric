@@ -682,7 +682,11 @@ impl OciLauncher {
             net.teardown();
         }
     }
-    fn bundle(&mut self, arena: &Path) -> Result<LaunchSpec, NodeError> {
+    fn bundle(
+        &mut self,
+        arena: &Path,
+        protocol_env: &[(String, String)],
+    ) -> Result<LaunchSpec, NodeError> {
         let fail = |m: String| NodeError::new(NodeErrorKind::StartFailed, m);
         let userns = (self.backend.runtime.root
             && std::env::var_os("MVF_OCI_USERNS").is_none_or(|v| v != "0"))
@@ -744,6 +748,9 @@ impl OciLauncher {
             "PYTHONUNBUFFERED=1".to_string(),
             "PYTHONDONTWRITEBYTECODE=1".to_string(),
         ];
+        // The protocol offer crosses into the container through its explicit environment; the
+        // control channel itself is the container's stdio, inherited from runc (#32).
+        extra_env.extend(protocol_env.iter().map(|(k, v)| format!("{k}={v}")));
         if let Some(ip) = self.binding.as_ref().and_then(|b| b.advertise.clone()) {
             extra_env.push(format!("MVF_ADVERTISE_IP={ip}"));
         }
@@ -805,8 +812,8 @@ impl OciLauncher {
 }
 
 impl Launcher for OciLauncher {
-    fn prepare(&mut self, arena: &Path) -> Result<LaunchSpec, NodeError> {
-        self.bundle(arena)
+    fn prepare(&mut self, arena: &Path, env: &[(String, String)]) -> Result<LaunchSpec, NodeError> {
+        self.bundle(arena, env)
     }
 
     fn cleanup(&mut self) {
@@ -925,7 +932,7 @@ pub fn run_workload_with(
         storage: Vec::new(),
         grant: None,
     };
-    let spec = launcher.bundle(&arena)?;
+    let spec = launcher.bundle(&arena, &[])?;
     let mut child = Command::new(&spec.program)
         .args(&spec.args)
         .current_dir(&spec.cwd)

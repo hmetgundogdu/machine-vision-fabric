@@ -192,11 +192,147 @@ def analysis(frame=None, label=None, measurement=None, unit=None, details=None, 
     return AnalysisOutput(frame=frame, label=label, measurement=measurement, unit=unit, details=details, value=value)
 
 
-# ---- stdio control loop ----
+# ---- control channel: v1 JSON lines or v2 binary frames (#32, protocol/worker-v2.md) ----
+
+class _V1:
+    """Protocol v1: one JSON object per line on stdin/stdout."""
+    version = 1
+
+    def send(self, obj):
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+    def log(self, level, message):
+        self.send({"type": "log", "level": level, "message": message})
+
+    def messages(self):
+        for line in sys.stdin:
+            line = line.strip()
+            if line:
+                yield json.loads(line)
+
+
+class _V2:
+    """Protocol v2: length-prefixed binary frames on the inherited stdio pipes.
+
+    At start the channel is moved off the standard descriptors: fd 1 then points at stderr, so a
+    stray ``print()`` or a native library writing to stdout lands in the logs instead of corrupting
+    the protocol, and fd 0 reads nothing. Logs go to stderr as JSON lines.
+    """
+    version = 2
+    HDR = struct.Struct("<2sBBHHQII")
+    EXE = struct.Struct("<QQQQIHH")
+    RES = struct.Struct("<IIQQ")
+    NONE = 0xFFFFFFFFFFFFFFFF
+    KINDS = {"hello": 1, "ready": 2, "result": 4, "error": 5, "configured": 7, "state": 9,
+             "restored": 11}
+
+    def __init__(self):
+        self.session = os.environ.get("MVF_SESSION", "")
+        self.generation = int(os.environ.get("MVF_GENERATION", "1") or 1)
+        self.inp = os.fdopen(os.dup(0), "rb", buffering=0)
+        self.out = os.fdopen(os.dup(1), "wb", buffering=0)
+        null = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(null, 0)
+        os.close(null)
+        os.dup2(2, 1)
+
+    def _frame(self, kind, rid, body=b"", flags=0):
+        self.out.write(self.HDR.pack(b"MV", 2, kind, flags, 0, rid or 0, self.generation, len(body)) + body)
+
+    def send(self, obj):
+        t = obj["type"]
+        rid = obj.get("id") or 0
+        if t == "result":
+            flags, out, seq, tail = 0, 0, 0, {}
+            if obj.get("exhausted"):
+                flags |= 4
+            if "frame" in obj:
+                frame = obj["frame"]
+                if frame is None:
+                    flags |= 2
+                else:
+                    flags |= 1
+                    out = int(frame["shm"]["offset"])
+                    seq = int(frame.get("sequence") or 0)
+                    if frame.get("cameraId") is not None:
+                        tail["cameraId"] = frame["cameraId"]
+            for key in ("classification", "value"):
+                if obj.get(key) is not None:
+                    tail[key] = obj[key]
+            body = self.RES.pack(flags | (8 if tail else 0), 0, out, seq)
+            if tail:
+                body += json.dumps(tail).encode()
+            self._frame(4, rid, body)
+        elif t in ("hello", "ready"):
+            body = dict(obj, protocol=2, session=self.session) if t == "hello" else obj
+            self._frame(self.KINDS[t], 0, json.dumps(body).encode())
+        elif t == "error":
+            self._frame(5, rid, json.dumps({"message": obj.get("message", "")}).encode())
+        elif t == "state":
+            self._frame(9, rid, flags=1 if obj.get("empty") else 0)
+        elif t in ("restored", "configured"):
+            self._frame(self.KINDS[t], rid)
+        elif t == "log":
+            self.log(obj.get("level", "info"), obj.get("message", ""))
+
+    def log(self, level, message):
+        sys.stderr.write(json.dumps({"level": level, "message": message}) + "\n")
+        sys.stderr.flush()
+
+    def _read(self, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = self.inp.read(n - len(buf))
+            if not chunk:
+                return None
+            buf += chunk
+        return buf
+
+    def messages(self):
+        while True:
+            h = self._read(24)
+            if h is None:
+                return
+            magic, version, kind, flags, _, rid, generation, length = self.HDR.unpack(h)
+            if magic != b"MV" or version != 2:
+                raise RuntimeError("protocol v2: bad frame from the engine")
+            body = self._read(length) if length else b""
+            if length and body is None:
+                return
+            self.generation = generation
+            if kind == 3:
+                inp, seq, out, cap, deadline, cl, tl = self.EXE.unpack_from(body)
+                camera = body[40:40 + cl].decode()
+                content = body[40 + cl:40 + cl + tl].decode()
+                msg = {"type": "execute", "id": rid, "deadlineUs": deadline}
+                if inp != self.NONE:
+                    msg["frame"] = {"cameraId": camera, "sequence": seq, "contentType": content,
+                                    "shm": {"offset": inp}}
+                if out != self.NONE:
+                    msg["out"] = {"offset": out, "capacity": cap}
+                yield msg
+            elif kind == 6:
+                yield {"type": "configure", "id": rid, "config": json.loads(body or b"{}")}
+            elif kind == 8:
+                off, cap = struct.unpack("<QQ", body)
+                yield {"type": "checkpoint", "id": rid, "out": {"offset": off, "capacity": cap}}
+            elif kind == 10:
+                (off,) = struct.unpack("<Q", body[:8])
+                yield {"type": "restore", "id": rid, "shm": {"offset": off}}
+            elif kind == 12:
+                self._frame(13, rid)
+            elif kind == 15:
+                yield {"type": "shutdown"}
+            # kind 14 (cancel): this loop is single-threaded, so a cancel arrives after its request
+            # finished; the engine's deadline is what bounds a slow request.
+
+
+_wire = _V1()
+
 
 def _send(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    _wire.send(obj)
 
 
 def log(message, level="info"):
@@ -207,7 +343,7 @@ def log(message, level="info"):
     ``transform``/``classify``/``on_start``: the stdio loop is single-threaded, so the line is written
     in order and never collides with a result. ``level`` is ``debug``/``info``/``warn``/``error``.
     """
-    _send({"type": "log", "level": str(level), "message": str(message)})
+    _wire.log(str(level), str(message))
 
 
 def _open_arena(writable=False):
@@ -286,6 +422,9 @@ def _serve(module_id, capability, writable, on_execute, on_checkpoint, on_restor
     if arena is None:
         raise RuntimeError("MVF_ARENA_PATH is not set — the shared-memory data plane is required.")
     arena_view = memoryview(arena)
+    global _wire
+    if os.environ.get("MVF_PROTOCOL") == "2" and not isinstance(_wire, _V2):
+        _wire = _V2()
     features = ["configure"] if on_configure is not None else []
     try:
         hello = {"type": "hello", "protocol": 1, "moduleId": module_id, "capability": capability}
@@ -297,11 +436,7 @@ def _serve(module_id, capability, writable, on_execute, on_checkpoint, on_restor
             _send({"type": "ready", "moduleId": module_id})
         else:
             _send(hello)
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            msg = json.loads(line)
+        for msg in _wire.messages():
             msg_type = msg.get("type")
             if msg_type == "shutdown":
                 break

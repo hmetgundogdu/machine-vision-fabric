@@ -51,6 +51,8 @@ pub struct WorkerBackend {
     pools: pool::PoolRegistry,
     /// The session this engine runs in (native windows need an interactive one).
     session: mvf_display::Session,
+    /// Highest control protocol offered to children (#32): 2, or 1 to keep everything on v1.
+    protocol: u64,
 }
 
 impl Default for WorkerBackend {
@@ -75,7 +77,15 @@ impl WorkerBackend {
             isolate_arenas: std::env::var_os("MVF_ISOLATE_ARENAS").is_some_and(|v| v == "1"),
             pools: pool::PoolRegistry::default(),
             session: mvf_display::session::probe(),
+            protocol: offered_protocol(),
         }
+    }
+
+    /// Offers at most protocol `version` to children (1 = JSON lines only; 2 = binary frames when
+    /// the child speaks them, v1 otherwise).
+    pub fn with_protocol(mut self, version: u64) -> Self {
+        self.protocol = version;
+        self
     }
 
     /// Overrides the probed session (tests; a host that knows better).
@@ -281,17 +291,21 @@ impl ExecutionBackend for WorkerBackend {
                 spec.env
             ),
             target: self.warm_spares,
+            protocol: self.protocol,
             spec: spec.clone(),
             budget: Duration::from_millis(request.contract.spec.lifecycle.readiness_timeout_ms),
         });
         build_worker_node(
             request,
             Box::new(ProcessLauncher { spec }),
-            self.verify_inputs,
-            private,
-            recipe,
-            true,
-            storage,
+            WorkerOptions {
+                verify_inputs: self.verify_inputs,
+                private,
+                recipe,
+                trusted_network: true,
+                storage,
+                protocol: self.protocol,
+            },
         )
     }
 }
@@ -300,8 +314,9 @@ impl ExecutionBackend for WorkerBackend {
 /// whatever it created when the worker is gone. A plain process and an OCI container are both
 /// launchers; the protocol, supervision and data plane are identical.
 pub trait Launcher: Send {
-    /// The command to spawn. `arena` is the host path of the engine-owned arena.
-    fn prepare(&mut self, arena: &Path) -> Result<LaunchSpec, NodeError>;
+    /// The command to spawn. `arena` is the host path of the engine-owned arena; `env` is the
+    /// protocol offer (`MVF_PROTOCOL`, `MVF_SESSION`, `MVF_GENERATION`) the child must see.
+    fn prepare(&mut self, arena: &Path, env: &[(String, String)]) -> Result<LaunchSpec, NodeError>;
     /// Releases launcher resources (containers, bundles). Must be idempotent.
     fn cleanup(&mut self) {}
     /// This generation became the active one: take over what the launcher exposes outside the
@@ -319,12 +334,34 @@ pub struct ProcessLauncher {
 }
 
 impl Launcher for ProcessLauncher {
-    fn prepare(&mut self, arena: &Path) -> Result<LaunchSpec, NodeError> {
+    fn prepare(&mut self, arena: &Path, env: &[(String, String)]) -> Result<LaunchSpec, NodeError> {
         let mut spec = self.spec.clone();
         spec.env
             .push(("MVF_ARENA_PATH".into(), arena.as_os_str().to_owned()));
+        spec.env
+            .extend(env.iter().map(|(k, v)| (k.clone(), OsString::from(v))));
         Ok(spec)
     }
+}
+
+/// The protocol a host offers when the environment does not say (`MVF_PROTOCOL=1` keeps every
+/// child on v1: the rollback switch while v2 is being adopted).
+pub fn offered_protocol() -> u64 {
+    match std::env::var("MVF_PROTOCOL").ok().as_deref() {
+        Some("1") => 1,
+        _ => 2,
+    }
+}
+
+/// A request's remaining budget for the v2 `deadline` field (0 = none).
+fn budget_us(deadline: Option<Instant>) -> u32 {
+    deadline
+        .map(|d| {
+            d.saturating_duration_since(Instant::now())
+                .as_micros()
+                .min(u32::MAX as u128) as u32
+        })
+        .unwrap_or(0)
 }
 
 /// Builds a supervised protocol-v1 worker handle around any launcher (private arena when the
@@ -334,18 +371,45 @@ pub fn worker_node(
     launcher: Box<dyn Launcher>,
     verify_inputs: bool,
 ) -> Result<Box<dyn NodeHandle>, NodeError> {
-    build_worker_node(request, launcher, verify_inputs, false, None, false, None)
+    build_worker_node(
+        request,
+        launcher,
+        WorkerOptions {
+            verify_inputs,
+            private: false,
+            recipe: None,
+            trusted_network: false,
+            storage: None,
+            protocol: offered_protocol(),
+        },
+    )
+}
+
+/// How a worker node is built (beyond its request and launcher).
+struct WorkerOptions {
+    verify_inputs: bool,
+    private: bool,
+    recipe: Option<PoolRecipe>,
+    /// A trusted process shares the host network (logged as such).
+    trusted_network: bool,
+    storage: Option<mvf_storage::Grant>,
+    /// Highest protocol offered to the child.
+    protocol: u64,
 }
 
 fn build_worker_node(
     request: &InstantiateRequest<'_>,
     launcher: Box<dyn Launcher>,
-    verify_inputs: bool,
-    private: bool,
-    recipe: Option<PoolRecipe>,
-    trusted_network: bool,
-    storage: Option<mvf_storage::Grant>,
+    options: WorkerOptions,
 ) -> Result<Box<dyn NodeHandle>, NodeError> {
+    let WorkerOptions {
+        verify_inputs,
+        private,
+        recipe,
+        trusted_network,
+        storage,
+        protocol,
+    } = options;
     let recipe_marker = trusted_network;
     Ok(Box::new(WorkerNode {
         node_id: request.node_id.to_string(),
@@ -383,6 +447,7 @@ fn build_worker_node(
         pool: None,
         produced: 0,
         storage,
+        protocol,
     }))
 }
 
@@ -610,6 +675,8 @@ struct WorkerNode {
     produced: u64,
     /// This generation's mounts; scratch and artifact views go when it stops.
     storage: Option<mvf_storage::Grant>,
+    /// Highest protocol offered to the child.
+    protocol: u64,
 }
 
 impl WorkerNode {
@@ -622,7 +689,10 @@ impl WorkerNode {
     ) -> Result<(), NodeError> {
         let id = self.next_id;
         self.next_id += 1;
-        let line = serde_json::json!({"type": "configure", "id": id, "config": config}).to_string();
+        let line = protocol::HostMessage::Configure {
+            id,
+            config: config.clone(),
+        };
         let reply = match self.process.as_mut() {
             Some(p) => p.send(&line).and_then(|_| {
                 p.wait_for(Some(deadline), Some(cancel), |m| match m {
@@ -671,6 +741,15 @@ impl WorkerNode {
                 )
             }
             WaitError::Exited(info) => info.to_error(&format!("during {context}")),
+            WaitError::Protocol(violation) => {
+                if let Some(p) = process {
+                    p.kill();
+                }
+                NodeError::new(
+                    NodeErrorKind::Protocol,
+                    format!("{context}: protocol violation: {violation}; worker terminated"),
+                )
+            }
         };
         self.launcher.cleanup();
         self.log(e.message.clone());
@@ -713,7 +792,12 @@ impl WorkerNode {
         let reservation = arena.reserve().map_err(resource)?;
         let id = self.next_id;
         self.next_id += 1;
-        let line = protocol::execute_source(id, reservation.offset(), reservation.capacity());
+        let line = protocol::HostMessage::Execute {
+            id,
+            input: None,
+            out: Some((reservation.offset(), reservation.capacity())),
+            deadline_us: budget_us(ctx.deadline),
+        };
         let reply = match self.process.as_mut() {
             Some(p) => p.send(&line).and_then(|_| {
                 p.wait_for(ctx.deadline, Some(ctx.cancel), |m| match m {
@@ -831,7 +915,11 @@ fn handshake(
     else {
         unreachable!("accept() only admits hello");
     };
-    if protocol != protocol::PROTOCOL_VERSION {
+    // The version a child claims must be the one it frames its messages in (a JSON hello that
+    // says 2, or a frame that says 1, is not a version this host can talk to).
+    if (protocol != protocol::PROTOCOL_VERSION && protocol != protocol::PROTOCOL_V2)
+        || protocol != process.protocol()
+    {
         return Err(Handshake::Protocol(protocol));
     }
     if !ready {
@@ -853,6 +941,7 @@ struct PoolRecipe {
     registry: pool::PoolRegistry,
     key: String,
     target: usize,
+    protocol: u64,
     spec: LaunchSpec,
     budget: Duration,
 }
@@ -866,6 +955,7 @@ fn spare_spawner(
 ) -> std::sync::Arc<dyn Fn() -> Result<pool::Spare, NodeError> + Send + Sync> {
     let spec = recipe.spec.clone();
     let budget = recipe.budget;
+    let protocol = recipe.protocol;
     let node = node.to_string();
     let services = services.clone();
     std::sync::Arc::new(move || {
@@ -878,8 +968,10 @@ fn spare_spawner(
             Some(a) => std::sync::Arc::clone(a),
             None => services.arena().map_err(resource)?,
         };
-        let launch = ProcessLauncher { spec: spec.clone() }.prepare(arena.path())?;
-        let mut process = WorkerProcess::spawn(&launch, &node, 0, &services.logs)
+        let offer = (protocol >= 2).then(|| process::Offer::new(0));
+        let env = offer.as_ref().map(process::Offer::env).unwrap_or_default();
+        let launch = ProcessLauncher { spec: spec.clone() }.prepare(arena.path(), &env)?;
+        let mut process = WorkerProcess::spawn(&launch, &node, 0, &services.logs, offer)
             .map_err(|e| NodeError::new(NodeErrorKind::StartFailed, e.to_string()))?;
         let cancel = mvf_engine::CancellationToken::new();
         let pid = process.pid();
@@ -937,12 +1029,15 @@ impl NodeHandle for WorkerNode {
                     false => None,
                 };
                 let arena = self.arena()?;
-                let spec = self.launcher.prepare(arena.path())?;
+                let offer = (self.protocol >= 2).then(|| process::Offer::new(self.generation));
+                let env = offer.as_ref().map(process::Offer::env).unwrap_or_default();
+                let spec = self.launcher.prepare(arena.path(), &env)?;
                 let process = WorkerProcess::spawn(
                     &spec,
                     &self.node_id,
                     self.generation,
                     &self.services.logs,
+                    offer,
                 )
                 .map_err(|e| {
                     NodeError::new(
@@ -967,7 +1062,7 @@ impl NodeHandle for WorkerNode {
                         self.process.as_mut().map(WorkerProcess::kill);
                         return Err(NodeError::new(
                             NodeErrorKind::Protocol,
-                            format!("worker speaks protocol {protocol}; this host speaks 1"),
+                            format!("worker speaks protocol {protocol}; this host speaks 1 and 2"),
                         ));
                     }
                 }
@@ -1011,7 +1106,11 @@ impl NodeHandle for WorkerNode {
             }
         }
         self.log(format!(
-            "ready pid={pid} capability={:?} in {} ms",
+            "ready pid={pid} protocol={} capability={:?} in {} ms",
+            self.process
+                .as_ref()
+                .map(WorkerProcess::protocol)
+                .unwrap_or(0),
             self.capability,
             started.elapsed().as_millis()
         ));
@@ -1070,14 +1169,17 @@ impl NodeHandle for WorkerNode {
             MediaType::Json => "application/json",
             _ => "application/octet-stream",
         };
-        let line = protocol::execute(
+        let line = protocol::HostMessage::Execute {
             id,
-            &frame.meta.source,
-            frame.meta.sequence,
-            content_type,
-            input.offset(),
-            out.as_ref().map(|r| (r.offset(), r.capacity())),
-        );
+            input: Some((
+                frame.meta.source.clone(),
+                frame.meta.sequence,
+                content_type.to_string(),
+                input.offset(),
+            )),
+            out: out.as_ref().map(|r| (r.offset(), r.capacity())),
+            deadline_us: budget_us(ctx.deadline),
+        };
         let reply = match self.process.as_mut() {
             Some(p) => p.send(&line).and_then(|_| {
                 p.wait_for(ctx.deadline, Some(ctx.cancel), |m| match m {
@@ -1186,7 +1288,11 @@ impl NodeHandle for WorkerNode {
         let slot = arena.reserve().map_err(resource)?;
         let id = self.next_id;
         self.next_id += 1;
-        let line = protocol::checkpoint(id, slot.offset(), slot.capacity());
+        let line = protocol::HostMessage::Checkpoint {
+            id,
+            offset: slot.offset(),
+            capacity: slot.capacity(),
+        };
         let deadline = Some(Instant::now() + Duration::from_secs(10));
         let reply = match self.process.as_mut() {
             Some(p) => p.send(&line).and_then(|_| {
@@ -1270,7 +1376,10 @@ impl NodeHandle for WorkerNode {
             .map_err(resource)?;
         let id = self.next_id;
         self.next_id += 1;
-        let line = protocol::restore(id, lease.offset());
+        let line = protocol::HostMessage::Restore {
+            id,
+            offset: lease.offset(),
+        };
         let deadline = Some(Instant::now() + Duration::from_secs(10));
         let reply = match self.process.as_mut() {
             Some(p) => p.send(&line).and_then(|_| {

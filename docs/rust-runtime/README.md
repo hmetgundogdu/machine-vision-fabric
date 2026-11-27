@@ -2,7 +2,7 @@
 
 Research branch `research/rust-runtime`. Implements the ordered backlog of
 [#10](https://github.com/hmetgundogdu/machine-vision-fabric/issues/10): Gate A (#11–#16) and Gate B
-(#17–#20), then the follow-ups #24–#28 (stage 11: #24; stages 12–13: #25), the Network Fabric #23 (stages 16–17), the Display Fabric #30 (stages 18–19) and the Storage Fabric #31 (stage 20). The shipping .NET engine is **unchanged** and remains the behavioural reference.
+(#17–#20), then the follow-ups #24–#28 (stage 11: #24; stages 12–13: #25), the Network Fabric #23 (stages 16–17), the Display Fabric #30 (stages 18–19), the Storage Fabric #31 (stage 20) and worker protocol v2 #32 (stage 21). The shipping .NET engine is **unchanged** and remains the behavioural reference.
 
 ## Layout decision
 
@@ -25,6 +25,7 @@ mechanical change once the .NET host retires.
 | `mvf-compute` | #19 | wgpu compute backend (Metal/Vulkan/DX12): WGSL kernels, device-resident payloads, same-device zero-copy hand-off. |
 | `mvf-display` | #30 | Display Fabric core, no window library: session probe (interactive / service / headless), shared-memory surface v1 (latest frame, CRC-verified, input ring), per-user surface registry. |
 | `mvf-display-host` | #30 | Optional `mvf-display-host` for the user's session (winit + softbuffer), `mvf-cube` (Rust 3D renderer node), `mvf-native-window` (native-UI PoC). Nothing else links it. |
+| `mvf-ipc` | #32 | Worker protocol v2: binary framing and bodies (host and Rust children), the fixture child, benchmarks against v1 and fault injection. |
 | `mvf-storage` | #31 | Storage Fabric: provisioning of persistent, shared, host-bind and digest-pinned artifact volumes and scratch; path safety; retention, sweep and accounting. The OS does the I/O. |
 | `mvf-cli` | #12– | `mvf-rs` native CLI: `contract`, `validate`, `run`, `host`, `image`, `volume`. |
 
@@ -61,6 +62,7 @@ demo. Windows: `pwsh rust/scripts/gate-a.ps1`. Baseline against the .NET engine:
 - [adr-0003-network-fabric.md](adr-0003-network-fabric.md) — per-node network policy, enforcement matrix, listener handover (#23)
 - [adr-0004-display-fabric.md](adr-0004-display-fabric.md) — presentation profiles, session matrix, managed surfaces, display host (#30)
 - [adr-0005-storage-fabric.md](adr-0005-storage-fabric.md) — volumes, bindings, enforcement matrix, artifacts and lifecycle (#31)
+- [adr-0006-worker-ipc-v2.md](adr-0006-worker-ipc-v2.md) — control protocol v2: transport/schema evidence and decision (#32)
 - [p0-thresholds.md](p0-thresholds.md) — go/no-go thresholds fixed before the final runs
 - [competitive-landscape.md](competitive-landscape.md) — closest alternatives, pinned versions
 
