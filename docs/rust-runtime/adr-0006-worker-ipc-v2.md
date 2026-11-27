@@ -50,6 +50,18 @@ transformer, 50,000 8×8 frames, in µs per frame and the child's CPU per frame:
 On the multi-CPU VM the cost of waking the other side on another vCPU dominates and varies with
 where the scheduler places the child. Pinned to one CPU, the SDKs' own costs show.
 
+**Windows, CI runner (reader-thread receive):**
+
+| Node | v1 → v2 (µs/frame) | Change |
+|---|---|---|
+| C++ | 89.0 → 65.9 | −26 % |
+| .NET | 87.6 → 58.2 | −34 % |
+| Rust fixture | 73.1 → 70.3 | −4 % |
+
+The anonymous-pipe round trip with its reader-thread hop costs about 60–70 µs there, whatever the
+framing. A direct Windows receive path, overlapped I/O on a named pipe, is the next lever. It is
+not built.
+
 ## Decision
 
 1. **Transport: keep the inherited stdio pipes.**
