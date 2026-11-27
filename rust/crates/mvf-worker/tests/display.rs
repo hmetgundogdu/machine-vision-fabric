@@ -247,7 +247,7 @@ fn the_window_follows_live_replacement_and_rollback() {
         ..HostServices::default()
     };
     let text = format!(
-        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: replace }}\nspec:\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ width: 8, height: 8, channels: 1, frames: 260, intervalMs: 8 }} }}\n    - {{ id: show, contract: {v1} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: show.frame }}\n      - {{ from: show.status, to: sink.json }}\n"
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: replace }}\nspec:\n  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ width: 8, height: 8, channels: 1, frames: 460, intervalMs: 10 }} }}\n    - {{ id: show, contract: {v1} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: show.frame }}\n      - {{ from: show.status, to: sink.json }}\n"
     );
     let resolver = HostResolver::new(&base);
     let graph = build_graph(&text, &resolver).expect("graph");
@@ -278,7 +278,8 @@ fn the_window_follows_live_replacement_and_rollback() {
     };
     let mut driver = Driver {
         control: engine.control(),
-        steps: vec![(60, request(&v2, 20)), (140, request(&v3, 200))],
+        // 210 cycles of 10 ms between the steps: room for a cold Python start on a slow runner.
+        steps: vec![(40, request(&v2, 20)), (250, request(&v3, 200))],
     };
     let (report, shown) = std::thread::scope(|scope| {
         let run = scope.spawn(|| engine.run(&RunOptions::default(), &mut driver));
@@ -325,7 +326,7 @@ fn the_window_follows_live_replacement_and_rollback() {
     let values = statuses(&s);
     assert_eq!(
         values.len(),
-        260,
+        460,
         "rollback re-ran the failed cycle: none lost, none doubled"
     );
     assert!(

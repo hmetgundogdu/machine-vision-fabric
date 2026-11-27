@@ -260,7 +260,7 @@ fn a_model_is_swapped_live_and_a_failed_candidate_rolls_back_to_its_pinned_file(
         )
     };
     let text = format!(
-        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: swap }}\nspec:\n  volumes:\n{}{}{}  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ frames: 150, intervalMs: 4 }} }}\n    - {{ id: score, module: t.scorer, storage: {{ model: model-v1 }} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: score.frame }}\n      - {{ from: score.out, to: sink.json }}\n",
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: {{ name: swap }}\nspec:\n  volumes:\n{}{}{}  nodes:\n    - {{ id: cam, builtin: synthetic-source, config: {{ frames: 560, intervalMs: 10 }} }}\n    - {{ id: score, module: t.scorer, storage: {{ model: model-v1 }} }}\n    - {{ id: sink, builtin: record }}\n  edges:\n    data:\n      - {{ from: cam.frame, to: score.frame }}\n      - {{ from: score.out, to: sink.json }}\n",
         volume("v1", "model-v1"),
         volume("v2", "model-v2"),
         volume("v3", "bad")
@@ -295,9 +295,11 @@ fn a_model_is_swapped_live_and_a_failed_candidate_rolls_back_to_its_pinned_file(
     let mut driver = Driver {
         control: e.control(),
         steps: vec![
-            (30, request("model-v2", 10)),
-            (70, request("model-v3", 100)),
-            (110, request("nope", 10)),
+            // A step that meets a replacement still in progress is rejected, so the steps are 230+
+            // cycles of 10 ms apart: room for a cold Python start on a slow CI runner (1.4 s seen).
+            (20, request("model-v2", 10)),
+            (250, request("model-v3", 200)),
+            (500, request("nope", 10)),
         ],
     };
     let r = e.run(&RunOptions::default(), &mut driver);
@@ -323,7 +325,7 @@ fn a_model_is_swapped_live_and_a_failed_candidate_rolls_back_to_its_pinned_file(
         .collect();
     assert_eq!(
         order.len(),
-        150,
+        560,
         "the rolled-back cycle was re-run: nothing lost or doubled"
     );
     order.dedup();

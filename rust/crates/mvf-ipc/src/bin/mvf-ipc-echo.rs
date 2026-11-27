@@ -87,7 +87,35 @@ fn protected_stdio() -> (Box<dyn Read>, Box<dyn Write>) {
     }
 }
 
-#[cfg(not(unix))]
+/// Windows: the protocol keeps duplicates of the standard handles; the process's standard output
+/// handle then points at stderr (Rust's `println!` and `WriteFile(GetStdHandle(...))` follow it).
+#[cfg(windows)]
+fn protected_stdio() -> (Box<dyn Read>, Box<dyn Write>) {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE};
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    // SAFETY: plain handle duplication at start, before any other thread exists.
+    unsafe {
+        let dup = |h: HANDLE| -> HANDLE {
+            let mut out: HANDLE = std::ptr::null_mut();
+            let me = GetCurrentProcess();
+            DuplicateHandle(me, h, me, &mut out, 0, 0, DUPLICATE_SAME_ACCESS);
+            out
+        };
+        let input = dup(GetStdHandle(STD_INPUT_HANDLE));
+        let output = dup(GetStdHandle(STD_OUTPUT_HANDLE));
+        SetStdHandle(STD_OUTPUT_HANDLE, GetStdHandle(STD_ERROR_HANDLE));
+        (
+            Box::new(std::fs::File::from_raw_handle(input)),
+            Box::new(std::fs::File::from_raw_handle(output)),
+        )
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn protected_stdio() -> (Box<dyn Read>, Box<dyn Write>) {
     (Box::new(std::io::stdin()), Box::new(std::io::stdout()))
 }
