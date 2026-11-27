@@ -282,6 +282,10 @@ fn a_model_is_swapped_live_and_a_failed_candidate_rolls_back_to_its_pinned_file(
     struct Driver {
         control: ControlHandle,
         steps: Vec<(u64, ReplacementRequest)>,
+        /// Sent once the failed candidate has rolled back: a request that meets a replacement
+        /// still in progress is rejected as `replace.in-progress` before its storage is checked,
+        /// and a cold Python start on a slow Windows runner outlasted a fixed 250-cycle gap.
+        after_rollback: Option<ReplacementRequest>,
     }
     impl Observer for Driver {
         fn cycle_completed(&mut self, cycle: u64) {
@@ -291,16 +295,26 @@ fn a_model_is_swapped_live_and_a_failed_candidate_rolls_back_to_its_pinned_file(
                 }
             }
         }
+        fn events(&mut self, events: &mvf_engine::EngineEvents<'_>) {
+            if events
+                .replacements
+                .iter()
+                .any(|e| e.kind == mvf_engine::ReplacementEventKind::RolledBack)
+                && let Some(r) = self.after_rollback.take()
+            {
+                self.control.replace(r);
+            }
+        }
     }
     let mut driver = Driver {
         control: e.control(),
         steps: vec![
-            // A step that meets a replacement still in progress is rejected, so the steps are 230+
+            // A step that meets a replacement still in progress is rejected, so the steps are 230
             // cycles of 10 ms apart: room for a cold Python start on a slow CI runner (1.4 s seen).
             (20, request("model-v2", 10)),
             (250, request("model-v3", 200)),
-            (500, request("nope", 10)),
         ],
+        after_rollback: Some(request("nope", 10)),
     };
     let r = e.run(&RunOptions::default(), &mut driver);
     assert_eq!(
