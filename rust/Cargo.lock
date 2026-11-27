@@ -997,6 +997,7 @@ dependencies = [
  "mvf-contract",
  "mvf-engine",
  "mvf-graph",
+ "mvf-management",
  "mvf-oci",
  "mvf-storage",
  "mvf-worker",
@@ -1108,6 +1109,19 @@ dependencies = [
  "mvf-worker",
  "serde_json",
  "thiserror 2.0.21",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mvf-management"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "mvf-contract",
+ "mvf-engine",
+ "mvf-graph",
+ "serde",
+ "serde_json",
  "windows-sys 0.61.2",
 ]
 

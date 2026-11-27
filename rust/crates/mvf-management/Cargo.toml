@@ -1,0 +1,28 @@
+[package]
+name = "mvf-management"
+description = "MVF runtime management (#33): a bounded, sequenced observation feed of a running engine, served on an authenticated local endpoint (Unix socket / Windows named pipe), and its client."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+mvf-contract = { path = "../mvf-contract" }
+mvf-engine = { path = "../mvf-engine" }
+mvf-graph = { path = "../mvf-graph" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+libc = "0.2.191"

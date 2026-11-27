@@ -22,8 +22,8 @@ pub use backend::{BackendRegistry, ExecutionBackend, InProcessBackend, Instantia
 pub use bindings::{Bindings, ValueSource};
 pub use builtins::{Record, RecordedValue, Recorder};
 pub use executor::{
-    BuildError, DataPlaneReport, EndReason, Engine, NodeOutcome, NodeStats, NullObserver, Observer,
-    RunOptions, RunReport, SkipReason,
+    BuildError, DataPlaneReport, EndReason, Engine, EngineEvents, NodeOutcome, NodeStats,
+    NullObserver, Observer, RunOptions, RunReport, SkipReason,
 };
 pub use live::{IterationReport, LiveEvent, LiveEventKind};
 pub use node::*;

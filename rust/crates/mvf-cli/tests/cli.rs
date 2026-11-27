@@ -353,3 +353,79 @@ fn volumes_survive_runs_and_go_only_on_an_explicit_delete() {
         serde_json::from_slice(&volume(&["list", "--json"]).stdout).expect("json");
     assert_eq!(after, serde_json::json!([]));
 }
+
+/// `run --manage` registers a local endpoint; `manage list`, `status` and `watch` find and follow
+/// it (#33 part 1).
+#[test]
+fn a_managed_run_is_listed_watched_and_reports_its_final_status() {
+    let dir = std::env::temp_dir().join(format!("mvf-cli-manage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let pipeline = dir.join("pipeline.yaml");
+    std::fs::write(
+        &pipeline,
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: { name: watched }\nspec:\n  nodes:\n    - { id: cam, builtin: synthetic-source, config: { width: 8, height: 8, frames: 400, intervalMs: 5 } }\n    - { id: sink, builtin: record }\n  edges:\n    data:\n      - { from: cam.frame, to: sink.frame }\n",
+    )
+    .expect("pipeline");
+    let runtime = dir.join("run");
+    let mut run = mvf()
+        .args(["run", "--manage"])
+        .arg(&pipeline)
+        .env("MVF_RUNTIME_DIR", &runtime)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run");
+    // Wait for the registration.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let listed = loop {
+        let out = mvf()
+            .args(["manage", "list", "--json"])
+            .env("MVF_RUNTIME_DIR", &runtime)
+            .output()
+            .expect("list");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        if v.as_array().is_some_and(|a| !a.is_empty()) {
+            break v;
+        }
+        assert!(std::time::Instant::now() < deadline, "never registered");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(listed[0]["pipeline"], "watched");
+    assert_eq!(listed[0]["pid"], run.id());
+    let watch = mvf()
+        .args(["manage", "watch", "--until-stopped", "--json"])
+        .env("MVF_RUNTIME_DIR", &runtime)
+        .output()
+        .expect("watch");
+    assert!(
+        watch.status.success(),
+        "{}",
+        String::from_utf8_lossy(&watch.stderr)
+    );
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&watch.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    assert_eq!(lines[0]["op"], "snapshot");
+    assert_eq!(lines[0]["snapshot"]["topology"]["pipeline"], "watched");
+    assert!(lines.iter().any(|l| l["entry"]["kind"] == "delta"));
+    let last = lines.last().expect("last");
+    assert_eq!(last["entry"]["status"], "stopped");
+    assert_eq!(last["entry"]["end"]["reason"], "source-exhausted");
+    let status = run.wait().expect("wait");
+    assert!(status.success());
+    // The endpoint and its registration are gone with the run.
+    let out = mvf()
+        .args(["manage", "list", "--json"])
+        .env("MVF_RUNTIME_DIR", &runtime)
+        .output()
+        .expect("list");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "[]");
+    let out = mvf()
+        .args(["manage", "status"])
+        .env("MVF_RUNTIME_DIR", &runtime)
+        .output()
+        .expect("status");
+    assert!(!out.status.success(), "no runtime left to report on");
+}

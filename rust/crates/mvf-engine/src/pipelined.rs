@@ -141,6 +141,7 @@ impl Engine {
         let mut produced_since_rewind = false;
         loop {
             self.on_boundary(&options.cancel);
+            self.flush_events(observer);
             if options.cancel.is_cancelled() {
                 return EndReason::Cancelled;
             }

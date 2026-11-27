@@ -1,0 +1,268 @@
+//! `mvf-rs manage …` (#33 part 1): observe a running runtime over its local management endpoint
+//! (`mvf-rs run --manage`). Read-only in this version: nothing here changes what the engine does.
+
+use std::process::ExitCode;
+use std::time::{Duration, Instant};
+
+use clap::Subcommand;
+use mvf_management::{Client, list, runtime_dir};
+use serde_json::Value;
+
+#[derive(Debug, Subcommand)]
+pub enum ManageCommand {
+    /// Runtimes registered for this user.
+    List {
+        /// JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// The runtime's current state: topology, node counters and latency, status.
+    Status {
+        /// Endpoint (socket path or pipe name); default: the only registered runtime.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// The raw snapshot as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Follow the runtime live: node deltas, events, logs, status. Reconnects and continues from
+    /// the last sequence it saw; after a gap it resynchronises from a snapshot.
+    Watch {
+        /// Endpoint; default: the only registered runtime.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Start at this sequence (default: a fresh snapshot, then everything after it).
+        #[arg(long)]
+        from: Option<u64>,
+        /// Print the protocol messages as JSON lines.
+        #[arg(long)]
+        json: bool,
+        /// Stop once the run has ended.
+        #[arg(long)]
+        until_stopped: bool,
+        /// Give up reconnecting after this many seconds without a connection (default 30).
+        #[arg(long, default_value_t = 30)]
+        reconnect_secs: u64,
+    },
+}
+
+fn fail(message: impl std::fmt::Display) -> ExitCode {
+    eprintln!("mvf-rs manage: {message}");
+    ExitCode::from(1)
+}
+
+fn endpoint(given: Option<String>) -> Result<String, ExitCode> {
+    if let Some(e) = given {
+        return Ok(e);
+    }
+    let dir = runtime_dir().map_err(fail)?;
+    let found = list(&dir);
+    match found.as_slice() {
+        [one] => Ok(one.endpoint.clone()),
+        [] => Err(fail(format!(
+            "no runtime registered in {} (start one with `mvf-rs run --manage`)",
+            dir.display()
+        ))),
+        many => Err(fail(format!(
+            "{} runtimes registered; pass --endpoint ({})",
+            many.len(),
+            many.iter()
+                .map(|i| format!("{} pid {}", i.pipeline, i.pid))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+pub fn run(command: ManageCommand) -> ExitCode {
+    match command {
+        ManageCommand::List { json } => {
+            let dir = match runtime_dir() {
+                Ok(d) => d,
+                Err(e) => return fail(e),
+            };
+            let found = list(&dir);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&found).unwrap_or_else(|_| "[]".into())
+                );
+            } else {
+                for i in &found {
+                    println!("{:<8} {:<24} {}", i.pid, i.pipeline, i.endpoint);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        ManageCommand::Status { endpoint: e, json } => {
+            let e = match endpoint(e) {
+                Ok(e) => e,
+                Err(code) => return code,
+            };
+            let snapshot = Client::connect(&e, "mvf-rs").and_then(|mut c| c.snapshot());
+            match snapshot {
+                Ok((_, s)) if json => {
+                    println!("{s}");
+                    ExitCode::SUCCESS
+                }
+                Ok((_, s)) => {
+                    print_status(&s);
+                    ExitCode::SUCCESS
+                }
+                Err(err) => fail(format!("{e}: {err}")),
+            }
+        }
+        ManageCommand::Watch {
+            endpoint: e,
+            from,
+            json,
+            until_stopped,
+            reconnect_secs,
+        } => {
+            let e = match endpoint(e) {
+                Ok(e) => e,
+                Err(code) => return code,
+            };
+            watch(
+                &e,
+                from,
+                json,
+                until_stopped,
+                Duration::from_secs(reconnect_secs),
+            )
+        }
+    }
+}
+
+fn print_status(s: &Value) {
+    println!(
+        "{} — {} at cycle {} (pid {}, API {})",
+        s["runtime"]["pipeline"].as_str().unwrap_or("?"),
+        s["status"].as_str().unwrap_or("?"),
+        s["cycle"],
+        s["runtime"]["pid"],
+        s["api"]
+    );
+    if !s["end"].is_null() {
+        println!("  ended: {}", s["end"]);
+    }
+    println!(
+        "  {:<16} {:<12} {:>4} {:>10} {:>8} {:>10} {:>10} {:>10}",
+        "node", "backend", "gen", "executed", "skipped", "p50 us", "p99 us", "max us"
+    );
+    for n in s["topology"]["nodes"].as_array().into_iter().flatten() {
+        let id = n["id"].as_str().unwrap_or("?");
+        let v = &s["nodes"][id];
+        println!(
+            "  {:<16} {:<12} {:>4} {:>10} {:>8} {:>10.1} {:>10.1} {:>10}",
+            id,
+            n["backend"].as_str().unwrap_or("-"),
+            v["generation"].as_u64().unwrap_or(0),
+            v["executed"].as_u64().unwrap_or(0),
+            v["skipped"].as_u64().unwrap_or(0),
+            v["latencyUs"]["p50"].as_f64().unwrap_or(0.0),
+            v["latencyUs"]["p99"].as_f64().unwrap_or(0.0),
+            v["latencyUs"]["max"].as_u64().unwrap_or(0),
+        );
+    }
+}
+
+fn print_message(m: &Value) {
+    match m["op"].as_str() {
+        Some("entry") => {
+            let e = &m["entry"];
+            let seq = &m["seq"];
+            match e["kind"].as_str() {
+                Some("delta") => {
+                    let rates: Vec<String> = e["nodes"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .map(|(id, v)| {
+                            format!(
+                                "{id} {:.0}/s p99 {:.0}us",
+                                v["window"]["perSecond"].as_f64().unwrap_or(0.0),
+                                v["latencyUs"]["p99"].as_f64().unwrap_or(0.0)
+                            )
+                        })
+                        .collect();
+                    println!("[{seq}] cycle {}: {}", e["cycle"], rates.join(", "));
+                }
+                Some("log") => println!(
+                    "[{seq}] {} {}: {}",
+                    e["node"].as_str().unwrap_or("?"),
+                    e["level"].as_str().unwrap_or("?"),
+                    e["message"].as_str().unwrap_or("")
+                ),
+                Some("event") => println!(
+                    "[{seq}] {} {}",
+                    e["event"].as_str().unwrap_or("?"),
+                    e["detail"]
+                ),
+                Some("status") => println!(
+                    "[{seq}] status {} {}",
+                    e["status"].as_str().unwrap_or("?"),
+                    e.get("end").unwrap_or(&Value::Null)
+                ),
+                Some("dropped") => println!(
+                    "[{seq}] {} log line(s) dropped by the telemetry budget",
+                    e["logs"]
+                ),
+                _ => println!("[{seq}] {e}"),
+            }
+        }
+        Some("gap") => println!(
+            "-- missed entries {}..{}; resynchronised from a snapshot",
+            m["from"], m["to"]
+        ),
+        Some("snapshot") => println!(
+            "-- snapshot at seq {}: {}",
+            m["seq"], m["snapshot"]["status"]
+        ),
+        _ => {}
+    }
+}
+
+fn watch(
+    endpoint: &str,
+    mut from: Option<u64>,
+    json: bool,
+    until_stopped: bool,
+    reconnect: Duration,
+) -> ExitCode {
+    let mut last_ok = Instant::now();
+    loop {
+        let sub = Client::connect(endpoint, "mvf-rs").and_then(|c| c.subscribe(from));
+        let mut sub = match sub {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return fail(e),
+            Err(e) => {
+                if last_ok.elapsed() > reconnect {
+                    return fail(format!("{endpoint}: {e}"));
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+        };
+        for m in sub.by_ref() {
+            let Ok(m) = m else { break };
+            last_ok = Instant::now();
+            if json {
+                println!("{m}");
+            } else if m["op"] != "heartbeat" {
+                print_message(&m);
+            }
+            if until_stopped && m["op"] == "entry" && m["entry"]["status"] == "stopped" {
+                return ExitCode::SUCCESS;
+            }
+        }
+        // Disconnected: continue after the last sequence seen.
+        from = sub.last_seq().map(|s| s + 1).or(from);
+        if !json {
+            eprintln!(
+                "-- disconnected; reconnecting from seq {}",
+                from.map_or("start".into(), |f| f.to_string())
+            );
+        }
+    }
+}

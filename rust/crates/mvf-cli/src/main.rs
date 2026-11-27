@@ -7,6 +7,7 @@
 //! stderr, so stdout stays machine-readable.
 
 mod image;
+mod manage;
 mod volume;
 
 use std::path::{Path, PathBuf};
@@ -107,6 +108,10 @@ enum Command {
         /// Pipelined: depth of each inter-stage queue (default 2).
         #[arg(long)]
         queue: Option<usize>,
+        /// Serve live observation on a local endpoint only this OS user can reach (#33); see
+        /// `mvf-rs manage`.
+        #[arg(long)]
+        manage: bool,
     },
     /// List the builtins and backends this host provides.
     Host,
@@ -117,6 +122,11 @@ enum Command {
         store: Option<PathBuf>,
         #[command(subcommand)]
         command: image::ImageCommand,
+    },
+    /// Observe a running `mvf-rs run --manage` (#33): list, status, watch.
+    Manage {
+        #[command(subcommand)]
+        command: manage::ManageCommand,
     },
     /// Retained volumes and pinned artifacts (#31): list, inspect, delete explicitly.
     Volume {
@@ -148,6 +158,7 @@ fn main() -> ExitCode {
             checkpoint_dir,
             mode,
             queue,
+            manage,
         } => {
             if require_gpu && gpu_context().is_none() {
                 return fail(
@@ -183,8 +194,10 @@ fn main() -> ExitCode {
                     rollbacks: expect_rollbacks,
                     max_cutover_us,
                 }),
+                manage,
             )
         }
+        Command::Manage { command } => manage::run(command),
         Command::Host => host(),
         Command::Image { store, command } => {
             image::run(&store.unwrap_or_else(image::default_store), command)
@@ -658,11 +671,33 @@ fn run(
     json: bool,
     updates: Option<&Path>,
     expect: Option<Expectations>,
+    manage: bool,
 ) -> ExitCode {
+    let feed = manage.then(|| {
+        mvf_management::Feed::new(
+            mvf_management::RuntimeInfo {
+                pipeline: String::new(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                mode: if options.pipelined {
+                    "pipelined"
+                } else {
+                    "serial"
+                }
+                .into(),
+            },
+            mvf_management::FeedConfig::default(),
+        )
+    });
+    let log_feed = feed.clone();
     let services = services_for(
         args,
         HostServices {
-            logs: Logs::streaming(move |e| print_log(e, json)),
+            logs: Logs::streaming(move |e| {
+                print_log(e, json);
+                if let Some(f) = &log_feed {
+                    f.log(e);
+                }
+            }),
             ..HostServices::with_recorder(Recorder::streaming(move |r| print_record(r, json)))
         },
     );
@@ -690,7 +725,41 @@ fn run(
         cycle_ms: Vec::new(),
     };
     options.cancel = cancel;
-    let report = engine.run(&options, &mut driver);
+    // Management (#33): the endpoint opens before the run and closes after the final status.
+    let mut managed = match &feed {
+        Some(feed) => {
+            let backends: Vec<(String, String)> = engine
+                .stats()
+                .into_iter()
+                .map(|s| (s.id, s.backend))
+                .collect();
+            feed.set_topology(&mvf_management::Topology::of(engine.graph(), &backends));
+            match mvf_management::Server::start(
+                feed.clone(),
+                mvf_management::ServerOptions::default(),
+            ) {
+                Ok(server) => {
+                    eprintln!("  management endpoint: {}", server.endpoint());
+                    let tap = mvf_management::Tap::new(
+                        feed.clone(),
+                        engine.graph().nodes.iter().map(|n| n.id.clone()),
+                    );
+                    Some((server, tap))
+                }
+                Err(e) => return fail(2, format!("--manage: {e}")),
+            }
+        }
+        None => None,
+    };
+    let report = match &mut managed {
+        Some((_, tap)) => {
+            let report = engine.run(&options, &mut mvf_management::Tee::new(&mut driver, tap));
+            tap.finish(&report);
+            report
+        }
+        None => engine.run(&options, &mut driver),
+    };
+    drop(managed);
     print_report(&report, json);
     print_metrics(&report, &mut driver.cycle_ms, json);
     if let Some(expect) = expect

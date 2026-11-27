@@ -72,6 +72,23 @@ pub trait Observer {
     fn cycle_completed(&mut self, cycle: u64) {
         let _ = cycle;
     }
+    /// Engine events recorded since the last call, in order: live replacement, recovery (restart,
+    /// skip, drop, checkpoint) and live edits. Delivered at cycle boundaries and when the run ends,
+    /// so an observer (a management feed, #33) sees them while the run goes on.
+    fn events(&mut self, events: &EngineEvents<'_>) {
+        let _ = events;
+    }
+}
+
+/// New engine events (see [`Observer::events`]).
+#[derive(Debug, Clone, Copy)]
+pub struct EngineEvents<'a> {
+    /// Live replacement events.
+    pub replacements: &'a [ReplacementEvent],
+    /// Failure-policy, backpressure and checkpoint events.
+    pub recoveries: &'a [RecoveryEvent],
+    /// Live edits and pause/resume.
+    pub live: &'a [LiveEvent],
 }
 
 /// An observer that ignores everything.
@@ -275,6 +292,8 @@ pub struct Engine {
     pub(crate) paused: Option<Option<Instant>>,
     /// (startup ms, cycle loop ms) of the last run.
     timings: (f64, f64),
+    /// How many replacement, recovery and live events observers have been given.
+    observed: [usize; 3],
 }
 
 impl std::fmt::Debug for Engine {
@@ -399,6 +418,7 @@ impl Engine {
             iteration,
             paused: None,
             timings: (0.0, 0.0),
+            observed: [0; 3],
         })
     }
 
@@ -509,7 +529,29 @@ impl Engine {
             self.clear_checkpoints();
         }
         self.shutdown(&options.cancel);
+        self.flush_events(observer);
         self.report(end, started_at)
+    }
+
+    /// Gives `observer` the replacement, recovery and live events recorded since the last call.
+    pub(crate) fn flush_events(&mut self, observer: &mut dyn Observer) {
+        let [r, c, l] = self.observed;
+        if r == self.replacement_log.len()
+            && c == self.recovery_log.len()
+            && l == self.live_log.len()
+        {
+            return;
+        }
+        observer.events(&EngineEvents {
+            replacements: &self.replacement_log[r.min(self.replacement_log.len())..],
+            recoveries: &self.recovery_log[c.min(self.recovery_log.len())..],
+            live: &self.live_log[l.min(self.live_log.len())..],
+        });
+        self.observed = [
+            self.replacement_log.len(),
+            self.recovery_log.len(),
+            self.live_log.len(),
+        ];
     }
 
     pub(crate) fn report(&self, end: EndReason, started_at: Instant) -> RunReport {
@@ -543,6 +585,7 @@ impl Engine {
         let mut produced_since_rewind = false;
         loop {
             boundary(self);
+            self.flush_events(observer);
             if options.cancel.is_cancelled() {
                 return EndReason::Cancelled;
             }
@@ -569,6 +612,7 @@ impl Engine {
             self.next_cycle += 1;
             self.maybe_checkpoint(cycle);
             observer.cycle_completed(cycle);
+            self.flush_events(observer);
             if let Some(l) = loop_spec
                 && l.mode == mvf_graph::LoopMode::Count
                 && let Some(count) = l.count

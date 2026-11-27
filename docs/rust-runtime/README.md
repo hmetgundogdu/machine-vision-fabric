@@ -2,7 +2,7 @@
 
 Research branch `research/rust-runtime`. Implements the ordered backlog of
 [#10](https://github.com/hmetgundogdu/machine-vision-fabric/issues/10): Gate A (#11–#16) and Gate B
-(#17–#20), then the follow-ups #24–#28 (stage 11: #24; stages 12–13: #25), the Network Fabric #23 (stages 16–17), the Display Fabric #30 (stages 18–19), the Storage Fabric #31 (stage 20) and worker protocol v2 #32 (stage 21; stage 22: the C++ and .NET SDKs; stage 23: direct receive on Windows). The shipping .NET engine is **unchanged** and remains the behavioural reference.
+(#17–#20), then the follow-ups #24–#28 (stage 11: #24; stages 12–13: #25), the Network Fabric #23 (stages 16–17), the Display Fabric #30 (stages 18–19), the Storage Fabric #31 (stage 20) and worker protocol v2 #32 (stage 21; stage 22: the C++ and .NET SDKs; stage 23: direct receive on Windows), and runtime management #33 (stage 24: local observation). The shipping .NET engine is **unchanged** and remains the behavioural reference.
 
 ## Layout decision
 
@@ -63,6 +63,7 @@ demo. Windows: `pwsh rust/scripts/gate-a.ps1`. Baseline against the .NET engine:
 - [adr-0004-display-fabric.md](adr-0004-display-fabric.md) — presentation profiles, session matrix, managed surfaces, display host (#30)
 - [adr-0005-storage-fabric.md](adr-0005-storage-fabric.md) — volumes, bindings, enforcement matrix, artifacts and lifecycle (#31)
 - [adr-0006-worker-ipc-v2.md](adr-0006-worker-ipc-v2.md) — control protocol v2: transport/schema evidence and decision (#32)
+- [adr-0007-runtime-management.md](adr-0007-runtime-management.md) — runtime management: local read-only feed, remote through a separate relay (#33)
 - [p0-thresholds.md](p0-thresholds.md) — go/no-go thresholds fixed before the final runs
 - [competitive-landscape.md](competitive-landscape.md) — closest alternatives, pinned versions
 

@@ -3,6 +3,8 @@
 Language-agnostic contract between the engine (parent) and an out-of-process module
 (child), spoken over the child's **stdio** — local only, **no network**. Presentation (windows,
 input) is a separate shared-memory format: [`display-surface.md`](display-surface.md) (#30).
+Observing a running runtime (management, #33) is another separate protocol:
+[`management-v1.md`](management-v1.md).
 **v2** (#32) replaces these JSON lines with binary frames on the same pipes when both sides speak
 it: [`worker-v2.md`](worker-v2.md). This document remains the v1 reference and the fallback. One JSON object
 per line (newline-delimited). Targets: Python, Node.js, .NET.
