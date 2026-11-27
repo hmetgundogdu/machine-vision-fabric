@@ -30,4 +30,4 @@ pub use model::{API, Histogram, Topology};
 pub use preview::{PreviewConfig, PreviewHub};
 pub use server::{Server, ServerOptions};
 pub use sys::{Conn, connect as connect_raw};
-pub use upload::{UploadOptions, Uploads, upload_dir};
+pub use upload::{UploadOptions, Uploads, upload_dir, upload_dir_signed};

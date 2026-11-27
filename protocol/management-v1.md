@@ -146,7 +146,7 @@ Errors are `{"op":"error","code":…,"message":…}`. The codes:
 | `configure` | `node`, `field`, `value` | live `reconfigured` or `reopened` |
 | `replace` | `node` and one of `builtin`, `module` or `contract` (inside the package); `config`, `probationCycles`, `storage` | replacement `promoted` |
 | `rollback` / `commit` | `node` | replacement `rolled-back` / `committed` |
-| `stage` | `package`, `files: {path: digest}` | the package is staged (no engine event); the reply carries `staged.contract` for `replace` |
+| `stage` | `package`, `files: {path: digest}`, `signature: {key, sig}` when signers are trusted | the package is staged (no engine event); the reply carries `staged.contract` for `replace` and `staged.signedBy` |
 
 - **Validation:** every command except `stop` becomes one update-plan step and is validated
   exactly as in `mvf-rs run --updates`. The engine applies it at a cycle boundary. A contract path
@@ -235,8 +235,22 @@ A prepared node package (a directory with `node.yaml` and its files) goes to
   `rollback` to undo it.
 - **Audit:** completed and rejected files are audited (`upload`), and so are `stage`, `replace`
   and `rollback`.
-- **Not verified:** there is no signature check on packages yet. Integrity rests on the digests
-  the operator declares, and trust on who may upload.
+- **Signatures** (when the runtime is started with `--trust-signer KEY`, repeatable):
+  - `stage` requires `signature: {"key": "ed25519:<hex>", "sig": "<base64>"}`, made by a trusted
+    key over the package name and every file's digest:
+
+    ```text
+    mvf-package-signature-v1
+    package <name>
+    file <path> sha256:<hex>      (one line per file, sorted by path)
+    ```
+
+  - Refusal codes: `unsigned`, `untrusted-signer`, and `bad-signature` (the files or the name
+    differ from what was signed, or the signature is malformed).
+  - The signature is kept as `signature.json` beside the staged package's `manifest.json`.
+  - Without trusted signers, packages stage unsigned: trust then rests on who may upload.
+  - `mvf-remote sign keygen` and `mvf-remote sign package` make keys and signatures;
+    `--signature FILE` on `upload` sends one.
 
 ## Remote: the relay
 

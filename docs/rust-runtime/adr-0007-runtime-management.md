@@ -1,14 +1,14 @@
 # ADR-0007 — Runtime management: a read-only local feed first, remote access through a separate relay
 
 - **Status:** Accepted for the research branch (#33). All three parts are implemented: part 1
-  (local observation), part 2 (commands, roles, audit, the TLS relay) and part 3 (previews and
-  package upload). Package signatures and measurements on edge hardware are not done (see Plan).
-  Not a migration decision.
+  (local observation), part 2 (commands, roles, audit, the TLS relay) and part 3 (previews,
+  package upload and package signatures). Measurements on edge hardware are not done (see
+  Plan). Not a migration decision.
 - **Date:** 2026-11-27
 - **Issues:** #33, part of #10. Related: #32 (worker IPC, which management never exposes), #23
   (node networking), #30, #31. Separate from #21 (Event Fabric).
 - **Evidence:** [stage 24](stages/24.md) (part 1), [stage 25](stages/25.md) (part 2),
-  [stage 26](stages/26.md) (part 3),
+  [stage 26](stages/26.md) (part 3), [stage 27](stages/27.md) (package signatures),
   `crates/mvf-management/tests/{manage,commands}.rs`, `crates/mvf-remote/tests/remote.rs`,
   `crates/mvf-cli/tests/cli.rs`. Spec: [`protocol/management-v1.md`](../../protocol/management-v1.md).
 
@@ -114,10 +114,19 @@ deploy prepared artifacts, replace and roll back nodes, and see previews. The co
    - **Activation:** an ordinary `replace` naming the staged contract, so it gets the same
      validation, probation and `rollback` as any replacement. Upload never activates anything by
      itself.
-   - **Not done: signatures.** Integrity rests on the digests the operator declares, and trust
-     on who may upload (operators only, audited). A signature policy, for example ed25519 over
-     the manifest checked against trusted keys in the runtime, is the next step if packages come
-     from a build system rather than from the operator.
+   - **Signatures (built, [stage 27](stages/27.md)).** With `--trust-signer` keys configured,
+     `stage` requires an Ed25519 signature by one of them over a versioned line format: the
+     package name and every file's SHA-256, sorted. A signature over other files or another
+     name, an untrusted key and a missing signature are all refused. The signature is kept
+     beside the manifest. Without trusted keys, packages stage unsigned, and trust rests on who
+     may upload.
+     - **Two implementations on purpose.** The runtime verifies with `ed25519-dalek` (pure Rust,
+       so the runtime still has no C crypto, and the Windows cross-check covers it).
+       `mvf-remote sign` signs with `ring`, which the relay already has. The tests check that
+       the two agree.
+     - **Rejected:** signatures embedded in the package (they would change the files they
+       sign); a CA chain for signers (an access list of keys is enough for a fleet the operator
+       configures, as with `access.json`).
 
 ## Measured (part 1; 200,000 cycles of 4 in-process nodes, median of 3 runs)
 
@@ -177,7 +186,9 @@ Part 3 (release builds):
     - path traversal (confined names);
     - an oversized package (caps);
     - a package changed after staging (immutable);
-    - an upload by anyone but an operator.
+    - an upload by anyone but an operator;
+    - with trusted signers, a package nobody trusted signed, or one changed after signing,
+      even when uploaded by an operator.
 - **Does not protect against:**
   - a process of the same user: it is the operator, as with the worker protocol (ADR-0006);
   - an administrator or root;
@@ -192,8 +203,7 @@ Part 3 (release builds):
 
 - **Part 2** is done ([stage 25](stages/25.md)). `start` is not a command: a runtime that is not
   running has no endpoint, and starting one is the job of the host's service manager.
-- **Part 3** is done ([stage 26](stages/26.md)), except:
-  - package signatures;
+- **Part 3** is done ([stage 26](stages/26.md); signatures in [stage 27](stages/27.md)), except:
   - previews from the pipelined executor (serial only);
   - edge-hardware measurements (BLOCKED).
 - **Part 3, as originally planned:**

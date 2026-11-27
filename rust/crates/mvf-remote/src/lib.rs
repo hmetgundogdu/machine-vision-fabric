@@ -15,6 +15,7 @@ pub mod access;
 pub mod client;
 pub mod pki;
 pub mod relay;
+pub mod sign;
 pub mod tls;
 
 pub use access::{AccessList, ClientEntry, Refusal};

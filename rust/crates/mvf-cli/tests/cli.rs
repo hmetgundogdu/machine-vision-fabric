@@ -609,3 +609,134 @@ fn a_managed_run_serves_previews_and_activates_an_uploaded_package() {
         700_000
     );
 }
+
+/// `--trust-signer`: an unsigned package is refused, a signed one stages; the flag needs
+/// `--allow-uploads` (#33).
+#[test]
+fn a_runtime_that_trusts_a_signer_stages_only_its_packages() {
+    use ed25519_dalek::{Signer, SigningKey};
+    let dir = std::env::temp_dir().join(format!("mvf-cli-signed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("pkg")).expect("dir");
+    let pipeline = dir.join("pipeline.yaml");
+    std::fs::write(
+        &pipeline,
+        "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: { name: signed }\nspec:\n  nodes:\n    - { id: cam, builtin: synthetic-source, config: { width: 8, height: 8, frames: 1000000, intervalMs: 5 } }\n    - { id: sink, builtin: record }\n  edges:\n    data:\n      - { from: cam.frame, to: sink.frame }\n",
+    )
+    .expect("pipeline");
+    std::fs::write(dir.join("pkg/node.yaml"), "x").expect("file");
+    let key = SigningKey::from_bytes(&[9; 32]);
+    let signer = mvf_management_key(key.verifying_key().as_bytes());
+    std::fs::write(dir.join("signer.pub"), format!("{signer}\n")).expect("pub");
+    // The flag alone is refused.
+    let out = mvf()
+        .args(["run", "--manage", "--trust-signer"])
+        .arg(dir.join("signer.pub"))
+        .arg(&pipeline)
+        .output()
+        .expect("run");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let runtime = dir.join("run");
+    let mut run = mvf()
+        .args(["run", "--manage", "--allow-uploads", "--trust-signer"])
+        .arg(dir.join("signer.pub"))
+        .arg(&pipeline)
+        .env("MVF_RUNTIME_DIR", &runtime)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("run");
+    let manage = |args: &[&str]| {
+        mvf()
+            .arg("manage")
+            .args(args)
+            .env("MVF_RUNTIME_DIR", &runtime)
+            .output()
+            .expect("manage")
+    };
+    let pkg = dir.join("pkg");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let unsigned = loop {
+        let out = manage(&[
+            "upload",
+            "--package",
+            "p-unsigned",
+            pkg.to_str().expect("path"),
+        ]);
+        if !out.stdout.is_empty() {
+            break out;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    let r: serde_json::Value = serde_json::from_slice(&unsigned.stdout).expect("reply");
+    assert_eq!(
+        (unsigned.status.success(), r["code"].as_str()),
+        (false, Some("unsigned")),
+        "{r}"
+    );
+    // Sign exactly what will be uploaded: the package name and every file's digest.
+    // The package's only file is `node.yaml` = "x": its SHA-256.
+    let digest = "sha256:2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881";
+    let message = format!("mvf-package-signature-v1\npackage p-signed\nfile node.yaml {digest}\n");
+    let sig = key.sign(message.as_bytes());
+    let b64 = {
+        const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let bytes = sig.to_bytes();
+        let mut s = String::new();
+        for c in bytes.chunks(3) {
+            let n = (u32::from(c[0]) << 16)
+                | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+                | u32::from(*c.get(2).unwrap_or(&0));
+            s.push(A[(n >> 18) as usize & 63] as char);
+            s.push(A[(n >> 12) as usize & 63] as char);
+            s.push(if c.len() > 1 {
+                A[(n >> 6) as usize & 63] as char
+            } else {
+                '='
+            });
+            s.push(if c.len() > 2 {
+                A[n as usize & 63] as char
+            } else {
+                '='
+            });
+        }
+        s
+    };
+    std::fs::write(
+        dir.join("p.sig.json"),
+        serde_json::json!({"key": signer, "sig": b64}).to_string(),
+    )
+    .expect("sig");
+    let signed = manage(&[
+        "upload",
+        "--package",
+        "p-signed",
+        "--signature",
+        dir.join("p.sig.json").to_str().expect("path"),
+        pkg.to_str().expect("path"),
+    ]);
+    let r: serde_json::Value = serde_json::from_slice(&signed.stdout).expect("reply");
+    assert!(signed.status.success(), "{r}");
+    assert_eq!(r["staged"]["signedBy"], signer.as_str());
+    assert!(
+        manage(&["command", "stop", "--id", "signed-stop"])
+            .status
+            .success()
+    );
+    assert!(run.wait().expect("wait").success());
+}
+
+fn mvf_management_key(public: &[u8]) -> String {
+    let hex: String = public.iter().map(|b| format!("{b:02x}")).collect();
+    format!("ed25519:{hex}")
+}

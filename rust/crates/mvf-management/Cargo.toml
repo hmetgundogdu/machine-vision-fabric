@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 mvf-contract = { path = "../mvf-contract" }
 mvf-engine = { path = "../mvf-engine" }
 mvf-graph = { path = "../mvf-graph" }

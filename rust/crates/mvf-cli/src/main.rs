@@ -123,6 +123,10 @@ enum Command {
         /// `<pipeline dir>/.mvf/staged` (activated with the `replace` command).
         #[arg(long)]
         allow_uploads: bool,
+        /// With --allow-uploads: stage only packages signed by this key (`ed25519:<hex>`, or a
+        /// `signer.pub` file; repeatable). Without it, packages are trusted for who uploaded them.
+        #[arg(long = "trust-signer")]
+        trust_signer: Vec<String>,
     },
     /// List the builtins and backends this host provides.
     Host,
@@ -173,6 +177,7 @@ fn main() -> ExitCode {
             audit,
             preview,
             allow_uploads,
+            trust_signer,
         } => {
             if require_gpu && gpu_context().is_none() {
                 return fail(
@@ -212,6 +217,7 @@ fn main() -> ExitCode {
                     audit,
                     preview,
                     uploads: allow_uploads,
+                    trusted: trust_signer,
                 }),
             )
         }
@@ -689,6 +695,7 @@ struct ManageOptions {
     audit: Option<PathBuf>,
     preview: Vec<String>,
     uploads: bool,
+    trusted: Vec<String>,
 }
 
 fn run(
@@ -764,7 +771,26 @@ fn run(
                 audit: None,
                 preview: Vec::new(),
                 uploads: false,
+                trusted: Vec::new(),
             });
+            let mut trusted = Vec::new();
+            for t in &m.trusted {
+                let id = if t.starts_with("ed25519:") {
+                    t.clone()
+                } else {
+                    match std::fs::read_to_string(t) {
+                        Ok(s) => s.trim().to_string(),
+                        Err(e) => return fail(2, format!("--trust-signer {t}: {e}")),
+                    }
+                };
+                if let Err(e) = mvf_management::upload::parse_key(&id) {
+                    return fail(2, format!("--trust-signer {t}: {e}"));
+                }
+                trusted.push(id);
+            }
+            if !trusted.is_empty() && !m.uploads {
+                return fail(2, "--trust-signer needs --allow-uploads");
+            }
             let package = services
                 .package_dir
                 .clone()
@@ -799,8 +825,9 @@ fn run(
                 mvf_management::ServerOptions {
                     control: Some(control),
                     audit: Some(audit.clone()),
-                    uploads: m.uploads.then(|| {
-                        mvf_management::UploadOptions::new(
+                    uploads: m.uploads.then(|| mvf_management::UploadOptions {
+                        trusted: trusted.clone(),
+                        ..mvf_management::UploadOptions::new(
                             package.join(".mvf/staged"),
                             ".mvf/staged",
                         )
@@ -818,7 +845,11 @@ fn run(
                         } else {
                             m.preview.join(", ")
                         },
-                        if m.uploads { "allowed" } else { "off" }
+                        match (m.uploads, trusted.len()) {
+                            (false, _) => "off".to_string(),
+                            (true, 0) => "allowed, unsigned".to_string(),
+                            (true, n) => format!("signed by {n} trusted signer(s) only"),
+                        }
                     );
                     let tap = mvf_management::Tap::new(
                         feed.clone(),

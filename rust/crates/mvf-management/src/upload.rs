@@ -18,6 +18,10 @@
 //!   hidden), and file size, package size and file count are capped.
 //! - **Immutable once staged.** Staging the same package again with the same manifest is a no-op;
 //!   a different manifest under the same name is refused. A new version gets a new name.
+//! - **Signed, when the runtime trusts signers.** With `trusted` keys configured, `stage` requires
+//!   an Ed25519 signature by one of them over [`signing_bytes`]: the package name and every
+//!   file's digest. A package changed after signing, signed for another name, unsigned, or signed
+//!   by another key is refused. The signature is kept as `signature.json` beside the manifest.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -39,6 +43,9 @@ pub struct UploadOptions {
     pub max_package: u64,
     /// Most files per package (default 64).
     pub max_files: usize,
+    /// Signers whose packages may be staged (`ed25519:<hex public key>`). Empty: no signature
+    /// required, and trust rests on who may upload.
+    pub trusted: Vec<String>,
 }
 
 impl UploadOptions {
@@ -50,6 +57,7 @@ impl UploadOptions {
             max_file: 256 << 20,
             max_package: 1 << 30,
             max_files: 64,
+            trusted: Vec::new(),
         }
     }
 }
@@ -93,6 +101,55 @@ pub fn file_digest(path: &Path) -> std::io::Result<String> {
     Ok(format!("sha256:{hex}"))
 }
 
+/// The bytes a package signature covers: a versioned line format, one line per file, sorted by
+/// path. Names cannot contain spaces or newlines, so it is unambiguous.
+pub fn signing_bytes(package: &str, files: &serde_json::Map<String, Value>) -> Vec<u8> {
+    let mut out = format!("mvf-package-signature-v1\npackage {package}\n");
+    let mut paths: Vec<&String> = files.keys().collect();
+    paths.sort();
+    for p in paths {
+        out.push_str(&format!(
+            "file {p} {}\n",
+            files[p].as_str().unwrap_or_default()
+        ));
+    }
+    out.into_bytes()
+}
+
+/// `ed25519:<hex>` for a 32-byte public key.
+pub fn key_id(public: &[u8]) -> String {
+    let hex: String = public.iter().map(|b| format!("{b:02x}")).collect();
+    format!("ed25519:{hex}")
+}
+
+/// The public key in `ed25519:<64 hex digits>`.
+pub fn parse_key(id: &str) -> Result<[u8; 32], String> {
+    let hex = id
+        .trim()
+        .strip_prefix("ed25519:")
+        .filter(|h| h.len() == 64)
+        .ok_or_else(|| format!("{id:?} is not ed25519:<64 hex digits>"))?;
+    let mut key = [0u8; 32];
+    for (i, b) in key.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).map_err(|e| e.to_string())?;
+    }
+    Ok(key)
+}
+
+/// Every file of `dir` with its digest, as `stage` and a signer list them.
+pub fn manifest_of(dir: &Path) -> std::io::Result<serde_json::Map<String, Value>> {
+    let mut files = serde_json::Map::new();
+    for path in walk(dir) {
+        let rel = path
+            .strip_prefix(dir)
+            .map_err(std::io::Error::other)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.insert(rel, json!(file_digest(&path)?));
+    }
+    Ok(files)
+}
+
 /// `sha256:<hex>` of bytes.
 pub fn digest(bytes: &[u8]) -> String {
     let hex: String = Sha256::digest(bytes)
@@ -109,6 +166,9 @@ fn io(e: std::io::Error) -> Refused {
 impl Uploads {
     /// Uploads into `options.staging`, created if needed.
     pub fn new(options: UploadOptions) -> std::io::Result<Self> {
+        for t in &options.trusted {
+            parse_key(t).map_err(std::io::Error::other)?;
+        }
         std::fs::create_dir_all(options.staging.join(".partial"))?;
         Ok(Self {
             options,
@@ -397,13 +457,66 @@ impl Uploads {
                 ));
             }
         }
+        // The files are exactly what the manifest says; now, whether a trusted signer said so.
+        let signer = self.verify(package, files, &args["signature"])?;
         std::fs::write(
             dir.join("manifest.json"),
             serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
         )
         .map_err(io)?;
+        if signer.is_some() {
+            std::fs::write(dir.join("signature.json"), args["signature"].to_string())
+                .map_err(io)?;
+        }
         std::fs::rename(&dir, &staged).map_err(io)?;
         Ok(self.staged(package, &staged, false))
+    }
+
+    /// Checks the signature policy: `Ok(Some(signer))` when a trusted signer signed exactly this
+    /// manifest, `Ok(None)` when no signers are trusted.
+    fn verify(
+        &self,
+        package: &str,
+        files: &serde_json::Map<String, Value>,
+        signature: &Value,
+    ) -> Result<Option<String>, Refused> {
+        use ed25519_dalek::{Signature, VerifyingKey};
+        if self.options.trusted.is_empty() {
+            return Ok(None);
+        }
+        let (Some(key), Some(sig)) = (signature["key"].as_str(), signature["sig"].as_str()) else {
+            return Err((
+                "unsigned",
+                "this runtime stages signed packages only: give signature {key, sig}".into(),
+            ));
+        };
+        if !self.options.trusted.iter().any(|t| t.trim() == key) {
+            return Err((
+                "untrusted-signer",
+                format!("{key} is not a trusted signer here"),
+            ));
+        }
+        let public = parse_key(key).map_err(|e| ("bad-signature", e))?;
+        let verifying =
+            VerifyingKey::from_bytes(&public).map_err(|e| ("bad-signature", e.to_string()))?;
+        let bytes: [u8; 64] = crate::preview::unbase64(sig)
+            .and_then(|b| b.try_into().ok())
+            .ok_or((
+                "bad-signature",
+                "sig is not 64 base64-encoded bytes".to_string(),
+            ))?;
+        verifying
+            .verify_strict(
+                &signing_bytes(package, files),
+                &Signature::from_bytes(&bytes),
+            )
+            .map_err(|_| {
+                (
+                    "bad-signature",
+                    format!("the signature by {key} does not cover this package and these files"),
+                )
+            })?;
+        Ok(Some(key.to_string()))
     }
 
     fn staged(&self, package: &str, dir: &Path, already: bool) -> Value {
@@ -411,7 +524,11 @@ impl Uploads {
             .join("node.yaml")
             .is_file()
             .then(|| format!("{}/{package}/node.yaml", self.options.relative));
-        json!({"package": package, "contract": contract, "alreadyStaged": already})
+        let signed_by: Option<String> = std::fs::read(dir.join("signature.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|v| v["key"].as_str().map(str::to_string));
+        json!({"package": package, "contract": contract, "alreadyStaged": already, "signedBy": signed_by})
     }
 }
 
@@ -442,6 +559,17 @@ pub fn upload_dir(
     package: &str,
     dir: &Path,
     chunk: usize,
+) -> std::io::Result<Value> {
+    upload_dir_signed(request, package, dir, chunk, None)
+}
+
+/// [`upload_dir`] with a signature for the stage step (`{key, sig}`, from `mvf-remote sign`).
+pub fn upload_dir_signed(
+    request: &mut dyn FnMut(&Value) -> std::io::Result<Value>,
+    package: &str,
+    dir: &Path,
+    chunk: usize,
+    signature: Option<&Value>,
 ) -> std::io::Result<Value> {
     let mut files = serde_json::Map::new();
     for path in walk(dir) {
@@ -476,7 +604,11 @@ pub fn upload_dir(
         }
         files.insert(rel, json!(d));
     }
+    let mut args = json!({"package": package, "files": files});
+    if let Some(sig) = signature {
+        args["signature"] = json!({"key": sig["key"], "sig": sig["sig"]});
+    }
     request(
-        &json!({"op": "command", "id": format!("stage-{package}"), "command": "stage", "args": {"package": package, "files": files}}),
+        &json!({"op": "command", "id": format!("stage-{package}"), "command": "stage", "args": args}),
     )
 }

@@ -81,7 +81,36 @@ enum PkiCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum SignCommand {
+    /// Create a signing key: `signer.pk8` (private, 0600) and `signer.pub` (what runtimes trust).
+    Keygen {
+        /// Directory for the key.
+        #[arg(long)]
+        dir: PathBuf,
+    },
+    /// Sign a package directory under a package name.
+    Package {
+        /// The private key (`signer.pk8`).
+        #[arg(long)]
+        key: PathBuf,
+        /// The package name it will be staged as.
+        #[arg(long)]
+        package: String,
+        /// Where to write the signature.
+        #[arg(long)]
+        out: PathBuf,
+        /// The package directory.
+        dir: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum Command {
+    /// Package signing keys and signatures (for runtimes started with `--trust-signer`).
+    Sign {
+        #[command(subcommand)]
+        command: SignCommand,
+    },
     /// Certificates and the access list.
     Pki {
         #[command(subcommand)]
@@ -143,6 +172,9 @@ enum Command {
         /// Package name (immutable once staged).
         #[arg(long)]
         package: String,
+        /// A signature from `mvf-remote sign package` (required by runtimes that trust signers).
+        #[arg(long)]
+        signature: Option<PathBuf>,
         /// The package directory.
         dir: PathBuf,
     },
@@ -356,13 +388,62 @@ fn main() -> ExitCode {
                 };
             }
         }
-        Command::Upload { id, package, dir } => {
+        Command::Sign { command } => match command {
+            SignCommand::Keygen { dir } => match mvf_remote::sign::keygen(&dir) {
+                Ok(id) => {
+                    println!("{id}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            },
+            SignCommand::Package {
+                key,
+                package,
+                out,
+                dir,
+            } => match mvf_remote::sign::sign(&key, &package, &dir)
+                .and_then(|s| std::fs::write(&out, s.to_string()).map(|_| s))
+            {
+                Ok(s) => {
+                    println!(
+                        "signed {package} ({} files) by {}",
+                        s["files"].as_object().map_or(0, |f| f.len()),
+                        s["key"].as_str().unwrap_or("?")
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            },
+        },
+        Command::Upload {
+            id,
+            package,
+            signature,
+            dir,
+        } => {
+            let signature = match signature
+                .map(|p| {
+                    std::fs::read(&p).and_then(|b| {
+                        serde_json::from_slice::<Value>(&b).map_err(std::io::Error::other)
+                    })
+                })
+                .transpose()
+            {
+                Ok(s) => s,
+                Err(e) => return fail(format!("--signature: {e}")),
+            };
             let mut c = match connect(&id) {
                 Ok(c) => c,
                 Err(e) => return fail(e),
             };
             let mut request = |v: &Value| c.request(v);
-            match mvf_management::upload_dir(&mut request, &package, &dir, 512 * 1024) {
+            match mvf_management::upload_dir_signed(
+                &mut request,
+                &package,
+                &dir,
+                512 * 1024,
+                signature.as_ref(),
+            ) {
                 Ok(r) => {
                     println!("{r}");
                     if r["status"] == "applied" {

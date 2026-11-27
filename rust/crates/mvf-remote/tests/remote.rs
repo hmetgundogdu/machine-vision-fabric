@@ -767,3 +767,159 @@ fn previews_and_uploads_go_through_the_relay_by_role() {
             .any(|a| a["event"] == "forbidden" && a["principal"] == "bob" && a["op"] == "preview")
     );
 }
+
+/// A package signed by `mvf-remote sign` (ring) is verified by the runtime (ed25519-dalek), through
+/// the relay; an unsigned one is refused when the runtime trusts signers.
+#[test]
+fn a_package_signed_by_mvf_remote_is_verified_by_the_runtime_through_the_relay() {
+    let pki = pki_dir("signed");
+    let keys = temp("signed-keys");
+    let bin = env!("CARGO_BIN_EXE_mvf-remote");
+    let out = std::process::Command::new(bin)
+        .args(["sign", "keygen", "--dir"])
+        .arg(&keys)
+        .output()
+        .expect("keygen");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let signer = std::fs::read_to_string(keys.join("signer.pub"))
+        .expect("pub")
+        .trim()
+        .to_string();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), signer);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(keys.join("signer.pk8"))
+            .expect("pk8")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+    let src = temp("signed-pkg");
+    std::fs::write(
+        src.join("node.yaml"),
+        std::fs::read_to_string(
+            repo().join("rust/crates/mvf-engine/src/contracts/passthrough.yaml"),
+        )
+        .expect("contract")
+        .replace("version: 1.0.0", "version: 4.0.0"),
+    )
+    .expect("node.yaml");
+    let sig_file = keys.join("pass-v4.sig.json");
+    let out = std::process::Command::new(bin)
+        .args(["sign", "package", "--package", "pass-v4", "--key"])
+        .arg(keys.join("signer.pk8"))
+        .arg("--out")
+        .arg(&sig_file)
+        .arg(&src)
+        .output()
+        .expect("sign");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let signature: Value =
+        serde_json::from_slice(&std::fs::read(&sig_file).expect("sig")).expect("json");
+
+    let base = temp("signed-base");
+    let text = "apiVersion: mvf.dev/v1alpha1\nkind: Pipeline\nmetadata: { name: signed }\nspec:\n  nodes:\n    - { id: cam, builtin: synthetic-source, config: { width: 8, height: 8, frames: 1000000, intervalMs: 5 } }\n    - { id: pass, builtin: passthrough }\n    - { id: sink, builtin: record }\n  edges:\n    data:\n      - { from: cam.frame, to: pass.frame }\n      - { from: pass.frame, to: sink.frame }\n";
+    let feed = Feed::new(
+        RuntimeInfo {
+            pipeline: "signed".into(),
+            version: "test".into(),
+            mode: "serial".into(),
+        },
+        FeedConfig::default(),
+    );
+    let resolver = HostResolver::new(&base).with_module_root(repo().join("modules"));
+    let graph = build_graph(text, &resolver).expect("graph");
+    let engine =
+        Engine::build(graph, &default_backends(), &HostServices::default()).expect("build");
+    feed.set_topology(&Topology::of(engine.graph(), &[]));
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let server = Server::start(
+        feed.clone(),
+        ServerOptions {
+            dir: Some(base.join("run")),
+            control: Some(Control {
+                handle: engine.control(),
+                cancel: cancel.clone(),
+                resolver: Arc::new(resolver),
+            }),
+            audit: Some(base.join("audit.jsonl")),
+            uploads: Some(mvf_management::UploadOptions {
+                trusted: vec![signer.clone()],
+                ..mvf_management::UploadOptions::new(base.join(".mvf/staged"), ".mvf/staged")
+            }),
+            ..ServerOptions::default()
+        },
+    )
+    .expect("server");
+    let mut rt = Runtime {
+        engine,
+        feed,
+        server,
+        cancel,
+        audit: base.join("audit.jsonl"),
+    };
+    let relay = relay_for(&pki, &rt);
+    let at = addr(&relay);
+    run_while(&mut rt, || {
+        let mut alice = RemoteClient::connect(&at, tls_for(&pki, "alice"), "test").expect("alice");
+        let mut request = |v: &Value| alice.request(v);
+        // Unsigned: refused by the policy, nothing staged.
+        let unsigned = mvf_management::upload_dir(&mut request, "pass-unsigned", &src, 512 * 1024)
+            .expect("upload");
+        assert_eq!(
+            (unsigned["status"].as_str(), unsigned["code"].as_str()),
+            (Some("refused"), Some("unsigned")),
+            "{unsigned}"
+        );
+        // Signed by the trusted key: staged, then activated.
+        let staged = mvf_management::upload_dir_signed(
+            &mut request,
+            "pass-v4",
+            &src,
+            512 * 1024,
+            Some(&signature),
+        )
+        .expect("upload");
+        assert_eq!(
+            (
+                staged["status"].as_str(),
+                staged["staged"]["signedBy"].as_str()
+            ),
+            (Some("applied"), Some(signer.as_str())),
+            "{staged}"
+        );
+        let contract = staged["staged"]["contract"]
+            .as_str()
+            .expect("contract")
+            .to_string();
+        let r = request(&json!({"op": "command", "id": "act4", "command": "replace", "args": {"node": "pass", "contract": contract}})).expect("replace");
+        assert_eq!(
+            (r["status"].as_str(), r["event"]["toVersion"].as_str()),
+            (Some("applied"), Some("mvf.passthrough@4.0.0")),
+            "{r}"
+        );
+        stop.cancel();
+    });
+    let records = lines(&rt.audit);
+    assert!(
+        records.iter().any(|a| a["command"] == "stage"
+            && a["status"] == "refused"
+            && a["code"] == "unsigned")
+    );
+    assert!(
+        records.iter().any(|a| a["command"] == "stage"
+            && a["status"] == "applied"
+            && a["principal"] == "alice")
+    );
+}

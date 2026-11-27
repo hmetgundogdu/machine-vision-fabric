@@ -75,6 +75,10 @@ pub enum ManageCommand {
         /// Package name (immutable once staged: use a new name per version).
         #[arg(long)]
         package: String,
+        /// A signature from `mvf-remote sign package` (required by a runtime that trusts
+        /// signers).
+        #[arg(long)]
+        signature: Option<std::path::PathBuf>,
         /// The package directory.
         dir: std::path::PathBuf,
     },
@@ -267,8 +271,20 @@ pub fn run(command: ManageCommand) -> ExitCode {
         ManageCommand::Upload {
             endpoint: e,
             package,
+            signature,
             dir,
         } => {
+            let signature = match signature
+                .map(|p| {
+                    std::fs::read(&p).and_then(|b| {
+                        serde_json::from_slice::<Value>(&b).map_err(std::io::Error::other)
+                    })
+                })
+                .transpose()
+            {
+                Ok(s) => s,
+                Err(err) => return fail(format!("--signature: {err}")),
+            };
             let e = match endpoint(e) {
                 Ok(e) => e,
                 Err(code) => return code,
@@ -278,7 +294,13 @@ pub fn run(command: ManageCommand) -> ExitCode {
                 Err(err) => return fail(format!("{e}: {err}")),
             };
             let mut request = |v: &Value| c.request(v);
-            match mvf_management::upload_dir(&mut request, &package, &dir, 512 * 1024) {
+            match mvf_management::upload_dir_signed(
+                &mut request,
+                &package,
+                &dir,
+                512 * 1024,
+                signature.as_ref(),
+            ) {
                 Ok(r) if r["status"] == "applied" => {
                     println!("{r}");
                     ExitCode::SUCCESS
