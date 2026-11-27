@@ -92,6 +92,8 @@ struct State {
 pub struct Activity {
     ids: Vec<String>,
     running: Vec<std::sync::atomic::AtomicU32>,
+    /// Set by [`Tap::finish`] before the final clear: the sampler publishes nothing after it.
+    done: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug)]
@@ -182,6 +184,9 @@ impl Feed {
                     let (Some(feed), Some(act)) = (feed.upgrade(), act.upgrade()) else {
                         return;
                     };
+                    if act.done.load(Ordering::SeqCst) {
+                        return;
+                    }
                     let now: Vec<u32> = act
                         .running
                         .iter()
@@ -198,7 +203,7 @@ impl Feed {
                         .map(|(id, (n, _))| (id.clone(), *n))
                         .collect();
                     if !changes.is_empty() {
-                        feed.publish_activity(&changes);
+                        feed.publish_activity(&changes, Some(&act.done));
                     }
                     last = now;
                 }
@@ -216,13 +221,21 @@ impl Feed {
             .map(|(id, _)| (id.clone(), 0))
             .collect();
         if !busy.is_empty() {
-            self.publish_activity(&busy);
+            self.publish_activity(&busy, None);
         }
     }
 
-    /// Publishes changed activity counts (a feed thread, never the engine's).
-    fn publish_activity(&self, changes: &[(String, u32)]) {
+    /// Publishes changed activity counts (a feed thread, never the engine's). A sample taken
+    /// before the run ended is dropped if the end got here first (`done`, checked under the lock).
+    fn publish_activity(
+        &self,
+        changes: &[(String, u32)],
+        done: Option<&std::sync::atomic::AtomicBool>,
+    ) {
         let mut s = self.lock();
+        if done.is_some_and(|d| d.load(Ordering::SeqCst)) {
+            return;
+        }
         let mut map = serde_json::Map::new();
         for (id, n) in changes {
             s.state.activity.insert(id.clone(), *n);
@@ -516,6 +529,7 @@ impl Tap {
                 .iter()
                 .map(|_| std::sync::atomic::AtomicU32::new(0))
                 .collect(),
+            done: std::sync::atomic::AtomicBool::new(false),
         });
         feed.watch(&activity);
         Self {
@@ -606,6 +620,7 @@ impl Tap {
     pub fn finish(&mut self, report: &RunReport) {
         let window_s = self.window_started.elapsed().as_secs_f64();
         // Nothing runs any more; say so before the final status, whatever was sampled last.
+        self.activity.done.store(true, Ordering::SeqCst);
         for a in &self.activity.running {
             a.store(0, Ordering::Relaxed);
         }
