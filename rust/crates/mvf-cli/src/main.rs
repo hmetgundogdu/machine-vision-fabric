@@ -7,6 +7,7 @@
 //! stderr, so stdout stays machine-readable.
 
 mod image;
+mod import;
 mod manage;
 mod volume;
 
@@ -25,7 +26,7 @@ use mvf_worker::WorkerBackend;
 #[command(
     name = "mvf-rs",
     version,
-    about = "MVF Rust runtime (research build, issue #10)"
+    about = "MVF runtime (Rust): validate, run, import and manage MVF pipelines"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -63,6 +64,22 @@ enum Command {
     Validate {
         #[command(flatten)]
         args: PipelineArgs,
+    },
+    /// Convert a legacy .NET pipeline package (`pipeline.json`) into `pipeline.yaml` next to it,
+    /// then validate it on this host (#34).
+    Import {
+        /// The legacy package directory, or its `pipeline.json`.
+        legacy: PathBuf,
+        /// Where to write the Rust pipeline (default: `pipeline.yaml` in the package directory).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Module root searched for `<dir>/node.yaml` (repeatable). Default: the nearest `modules/`
+        /// directory above the package, plus `MVF_MODULE_PATH`.
+        #[arg(long = "modules")]
+        modules: Vec<PathBuf>,
+        /// Overwrite an existing output file.
+        #[arg(long)]
+        force: bool,
     },
     /// Run a pipeline until a limit, source exhaustion, failure or Ctrl+C.
     Run {
@@ -158,6 +175,12 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Contract { file } => contract(&file),
         Command::Validate { args } => validate(&args),
+        Command::Import {
+            legacy,
+            out,
+            modules,
+            force,
+        } => import_legacy(&legacy, out, modules, force),
         Command::Run {
             args,
             max_cycles,
@@ -401,6 +424,74 @@ enum Mode {
     Serial,
     /// Stage-parallel with bounded inter-stage queues.
     Pipelined,
+}
+
+fn import_legacy(
+    legacy: &Path,
+    out: Option<PathBuf>,
+    modules: Vec<PathBuf>,
+    force: bool,
+) -> ExitCode {
+    let source = if legacy.is_dir() {
+        legacy.join("pipeline.json")
+    } else {
+        legacy.to_path_buf()
+    };
+    let text = match std::fs::read_to_string(&source) {
+        Ok(t) => t,
+        Err(e) => return fail(2, format!("{}: {e}", source.display())),
+    };
+    let doc: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(d) => d,
+        Err(e) => return fail(2, format!("{}: {e}", source.display())),
+    };
+    let out = out.unwrap_or_else(|| {
+        source
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("pipeline.yaml")
+    });
+    if out.exists() && !force {
+        return fail(
+            2,
+            format!("{} exists (pass --force to overwrite)", out.display()),
+        );
+    }
+    let args = PipelineArgs {
+        pipeline: out.clone(),
+        modules,
+        arena_slot_size: None,
+        arena_slots: None,
+        bindings: None,
+    };
+    let (converted, report, header) = match import::convert(&doc, &resolver(&args)) {
+        Ok(c) => c,
+        Err(e) => return fail(2, format!("{}: {e}", source.display())),
+    };
+    if let Err(e) = std::fs::write(&out, import::yaml(&converted, &source, &header)) {
+        return fail(2, format!("{}: {e}", out.display()));
+    }
+    println!("wrote {} (from {})", out.display(), source.display());
+    for (from, to) in &report.renamed {
+        println!("  id      {from} -> {to}");
+    }
+    for (node, module, builtin) in &report.builtins {
+        println!("  builtin {node}: {module} -> {builtin}");
+    }
+    for note in &report.notes {
+        println!("  note    {note}");
+    }
+    for (node, module, hint) in &report.unresolved {
+        println!("  MISSING {node}: module `{module}` has no contract here: {hint}");
+    }
+    if !report.unresolved.is_empty() {
+        eprintln!(
+            "{} module(s) cannot run under mvf-rs yet; the pipeline was written but does not validate",
+            report.unresolved.len()
+        );
+        return ExitCode::from(1);
+    }
+    validate(&args)
 }
 
 fn validate(args: &PipelineArgs) -> ExitCode {

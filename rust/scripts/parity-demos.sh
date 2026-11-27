@@ -7,6 +7,8 @@
 #   rust/scripts/parity-demos.sh                 # 24 cycles per demo
 #   CYCLES=40 SKIP_BUILD=1 rust/scripts/parity-demos.sh
 #   RUST_MODE=pipelined rust/scripts/parity-demos.sh   # the Rust twins stage-parallel
+#   RUST_SOURCE=import rust/scripts/parity-demos.sh    # convert each legacy package with
+#                                                     # `mvf-rs import` instead of using the twin (#34)
 #
 # value-demo: the .NET CLI exposes no selection output, so its dataset is compared like the others
 # and the Rust selections are checked against what the .NET reference tests assert
@@ -15,6 +17,8 @@ set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 CYCLES=${CYCLES:-24}
 RUST_MODE=${RUST_MODE:-serial}
+RUST_SOURCE=${RUST_SOURCE:-twin}
+export RUST_SOURCE
 DEMOS=${DEMOS:-"inspection-demo loop-demo value-demo"}
 WORK=${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/mvf-parity.XXXXXX")}
 export MVF_BINDING_CAMERA_SERIAL=DEF456
@@ -49,12 +53,24 @@ PY
     --no-tui --no-prompt --max-cycles "$CYCLES" --integrations-root "$REPO/modules" 2>&1)
   echo "$out" | grep -q 'Succeeded:True' || { echo ".NET $demo failed:"; echo "$out" | tail -5; exit 1; }
 
-  # Rust: the twin, laid out so its relative frame folder resolves inside the work dir.
-  rm -rf "$WORK/rust/rust/examples/$demo"
-  mkdir -p "$WORK/rust/rust/examples/$demo"
-  sed -E 's/frameIntervalMs: [0-9]+/frameIntervalMs: 0/' "$REPO/rust/examples/$demo/pipeline.yaml" \
-    > "$WORK/rust/rust/examples/$demo/pipeline.yaml"
-  "$MVF_RS" run "$WORK/rust/rust/examples/$demo/pipeline.yaml" --modules "$REPO/modules" \
+  if [[ "$RUST_SOURCE" == "import" ]]; then
+    # Rust: the legacy package itself (pacing off, as for .NET), converted by `mvf-rs import`.
+    rm -rf "$WORK/rust/packages/$demo"
+    cp -R "$WORK/dotnet/$demo" "$WORK/rust/packages/$demo"
+    rm -rf "$WORK/rust/packages/$demo/out" "$WORK/rust/packages/$demo/.mvf"
+    "$MVF_RS" import "$WORK/rust/packages/$demo" --modules "$REPO/modules" --force \
+      > "$WORK/rust/$demo.import" 2>&1 || true
+    grep -q '^wrote ' "$WORK/rust/$demo.import" || { echo "import $demo failed:"; tail -5 "$WORK/rust/$demo.import"; exit 1; }
+    RUST_PIPELINE="$WORK/rust/packages/$demo/pipeline.yaml"
+  else
+    # Rust: the twin, laid out so its relative frame folder resolves inside the work dir.
+    rm -rf "$WORK/rust/rust/examples/$demo"
+    mkdir -p "$WORK/rust/rust/examples/$demo"
+    sed -E 's/frameIntervalMs: [0-9]+/frameIntervalMs: 0/' "$REPO/rust/examples/$demo/pipeline.yaml" \
+      > "$WORK/rust/rust/examples/$demo/pipeline.yaml"
+    RUST_PIPELINE="$WORK/rust/rust/examples/$demo/pipeline.yaml"
+  fi
+  "$MVF_RS" run "$RUST_PIPELINE" --modules "$REPO/modules" \
     --max-cycles "$CYCLES" --mode "$RUST_MODE" --json > "$WORK/rust/$demo.jsonl" 2> "$WORK/rust/$demo.err" \
     || { echo "Rust $demo failed:"; tail -5 "$WORK/rust/$demo.err"; exit 1; }
 done
@@ -85,7 +101,9 @@ ok = True
 print(f"{'demo':<16} {'.NET files':>10} {'Rust files':>10}  result")
 for demo in demos:
     dn, dm = collect(os.path.join(work, "dotnet", demo, "out"))
-    rn, rm = collect(os.path.join(work, "rust", "rust", "examples", demo, "out"))
+    imported = os.environ.get("RUST_SOURCE") == "import"
+    rust_dir = ("packages",) if imported else ("rust", "examples")
+    rn, rm = collect(os.path.join(work, "rust", *rust_dir, demo, "out"))
     same = dn == rn and dm == rm and len(dn) > 0
     detail = ""
     if not same:
@@ -98,10 +116,13 @@ for demo in demos:
     print(f"{demo:<16} {len(dn):>10} {len(rn):>10}  {'IDENTICAL' if same else 'DIFFERENT'}{detail}")
     lines = [json.loads(l) for l in open(os.path.join(work, "rust", f"{demo}.jsonl")) if l.startswith("{")]
     report = next(l["report"] for l in lines if "report" in l)
-    if report["end"] != {"reason": "cycle-limit", "limit": cycles}:
+    # A demo without a loop ends when its folder runs dry, on both runtimes (same file sets above).
+    if report["end"] != {"reason": "cycle-limit", "limit": cycles} and report["end"].get("reason") != "source-exhausted":
         ok = False
         print(f"  Rust run ended with {report['end']}")
-    if demo == "value-demo":
+    if demo == "value-demo" and imported:
+        print("  selections: not checked (the twin's recording sinks are not in the legacy package)")
+    elif demo == "value-demo":
         records = [l["record"] for l in lines if "record" in l]
         chosen = {json.dumps(r["value"]["value"], sort_keys=True) for r in records if r["node"] == "chosen"}
         narrowed = {json.dumps(r["value"]["value"], sort_keys=True) for r in records if r["node"] == "narrowed"}
@@ -114,6 +135,6 @@ for demo in demos:
               f"pick-protocol={'[ABC123, DEF456]' if narrowed == want_many else narrowed} "
               f"every cycle={n_one == cycles} -> {'MATCH' if sel and n_one == cycles else 'MISMATCH'}")
         ok = ok and sel and n_one == cycles
-print("PARITY", "PASS" if ok else "FAIL", f"({cycles} cycles per demo, Rust mode {os.environ.get('RUST_MODE', 'serial')}, work dir {work})")
+print("PARITY", "PASS" if ok else "FAIL", f"({cycles} cycles per demo, Rust mode {os.environ.get('RUST_MODE', 'serial')}, Rust pipelines from {os.environ.get('RUST_SOURCE', 'twin')}, work dir {work})")
 sys.exit(0 if ok else 1)
 PY

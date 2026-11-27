@@ -1,8 +1,14 @@
-# Rust runtime research (issue #10)
+# Rust runtime (issue #10)
+
+> **v1.1.0: first usable release.** `mvf-rs` ships in the release beside the unchanged legacy
+> .NET CLI. To move a legacy `pipeline.json` package, see the
+> [migration guide](migration-guide.md) (`mvf-rs import`). The retirement inventory and gate
+> (#34) are in [legacy-retirement.md](legacy-retirement.md), and the import evidence is in
+> [stage 29](stages/29.md).
 
 Research branch `research/rust-runtime`. Implements the ordered backlog of
 [#10](https://github.com/hmetgundogdu/machine-vision-fabric/issues/10): Gate A (#11–#16) and Gate B
-(#17–#20), then the follow-ups #24–#28 (stage 11: #24; stages 12–13: #25), the Network Fabric #23 (stages 16–17), the Display Fabric #30 (stages 18–19), the Storage Fabric #31 (stage 20) and worker protocol v2 #32 (stage 21; stage 22: the C++ and .NET SDKs; stage 23: direct receive on Windows), and runtime management #33 (stage 24: local observation; stage 25: commands and the mutual-TLS relay; stage 26: previews and package upload; stage 27: package signatures; stage 28: previews in the pipelined executor). The shipping .NET engine is **unchanged** and remains the behavioural reference.
+(#17–#20), then the follow-ups #24–#28 (stage 11: #24; stages 12–13: #25), the Network Fabric #23 (stages 16–17), the Display Fabric #30 (stages 18–19), the Storage Fabric #31 (stage 20) and worker protocol v2 #32 (stage 21; stage 22: the C++ and .NET SDKs; stage 23: direct receive on Windows), and runtime management #33 (stage 24: local observation; stage 25: commands and the mutual-TLS relay; stage 26: previews and package upload; stage 27: package signatures; stage 28: previews in the pipelined executor), and the legacy import with the first release (#34, stage 29). The shipping .NET engine is **unchanged** and remains the behavioural reference.
 
 ## Layout decision
 
@@ -27,7 +33,7 @@ mechanical change once the .NET host retires.
 | `mvf-display-host` | #30 | Optional `mvf-display-host` for the user's session (winit + softbuffer), `mvf-cube` (Rust 3D renderer node), `mvf-native-window` (native-UI PoC). Nothing else links it. |
 | `mvf-ipc` | #32 | Worker protocol v2: binary framing and bodies (host and Rust children), the fixture child, benchmarks against v1 and fault injection. |
 | `mvf-storage` | #31 | Storage Fabric: provisioning of persistent, shared, host-bind and digest-pinned artifact volumes and scratch; path safety; retention, sweep and accounting. The OS does the I/O. |
-| `mvf-cli` | #12– | `mvf-rs` native CLI: `contract`, `validate`, `run`, `host`, `image`, `volume`. |
+| `mvf-cli` | #12– | `mvf-rs` native CLI: `contract`, `validate`, `run`, `import` (legacy `pipeline.json`, #34), `host`, `image`, `manage`, `volume`. |
 
 ## Commands
 

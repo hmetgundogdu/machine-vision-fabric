@@ -109,9 +109,50 @@ jobs:
           name: cli-${{ matrix.label }}
           path: mvf-cli-${{ matrix.label }}*
 
+  # The Rust runtime (#10, #34): mvf-rs (validate, run, import, manage), the mvf-remote relay and
+  # signer, and the mvf-display-host. No .NET or Docker needed to run them.
+  rust-runtime:
+    name: Rust runtime (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  label: linux-x64 }
+          - { os: macos-latest,   label: osx-arm64 }
+          - { os: windows-latest, label: win-x64 }
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: The tag must match the workspace version
+        shell: bash
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          have=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "$want" = "$have" ] || { echo "tag $GITHUB_REF_NAME, but rust/Cargo.toml says $have"; exit 1; }
+      - name: Build (release)
+        run: cargo build --release --locked -p mvf-cli -p mvf-remote -p mvf-display-host
+      - name: Package
+        shell: pwsh
+        run: |
+          $ext = if ($IsWindows) { ".exe" } else { "" }
+          $stage = "stage/mvf-rs-${{ github.ref_name }}-${{ matrix.label }}"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          foreach ($b in "mvf-rs", "mvf-remote", "mvf-display-host") { Copy-Item "target/release/$b$ext" $stage }
+          Copy-Item ../LICENSE $stage
+          Compress-Archive -Path $stage -DestinationPath "../mvf-rs-${{ github.ref_name }}-${{ matrix.label }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-${{ matrix.label }}
+          path: mvf-rs-${{ github.ref_name }}-${{ matrix.label }}.zip
+
   release:
     name: Publish GitHub Release
-    needs: [dotnet-sdk-nuget, python-sdk-wheel, cpp-sdk, cli]
+    needs: [dotnet-sdk-nuget, python-sdk-wheel, cpp-sdk, cli, rust-runtime]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

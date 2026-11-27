@@ -65,7 +65,23 @@ machine-vision-fabric/
 
 ## Install
 
-### Download the CLI (no .NET required)
+### The Rust runtime: `mvf-rs` (v1.1.0+)
+
+New pipelines should use the Rust runtime. Download `mvf-rs-<version>-<os>.zip` from the
+[latest release](https://github.com/hmetgundogdu/machine-vision-fabric/releases/latest). It holds
+`mvf-rs`, `mvf-remote` and `mvf-display-host`, and needs no .NET or Docker.
+
+Legacy `pipeline.json` packages convert in place with `mvf-rs import`; see the
+[migration guide](docs/rust-runtime/migration-guide.md). The .NET CLI below is unchanged and stays
+the rollback path until the retirement gate in #34.
+
+```bash
+unzip mvf-rs-v1.1.0-linux-x64.zip && cd mvf-rs-v1.1.0-linux-x64
+./mvf-rs import ../packages/loop-demo          # writes packages/loop-demo/pipeline.yaml and validates it
+./mvf-rs run ../packages/loop-demo/pipeline.yaml --max-cycles 50
+```
+
+### Download the legacy .NET CLI (no .NET required)
 
 Grab a single self-contained executable for your OS from the
 [latest release](https://github.com/hmetgundogdu/machine-vision-fabric/releases/latest):

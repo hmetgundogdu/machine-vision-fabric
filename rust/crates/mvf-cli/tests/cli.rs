@@ -820,3 +820,146 @@ fn a_pipelined_managed_run_serves_previews_of_a_mid_graph_node() {
     );
     assert!(run.wait().expect("wait").success());
 }
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("dir");
+    for entry in std::fs::read_dir(from).expect("read").flatten() {
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            if entry.file_name() != "out" && entry.file_name() != ".mvf" {
+                copy_dir(&entry.path(), &target);
+            }
+        } else {
+            std::fs::copy(entry.path(), &target).expect("copy");
+        }
+    }
+}
+
+/// `mvf-rs import` (#34): a legacy .NET package becomes a valid Rust pipeline next to it, the
+/// converted pipeline runs, and what cannot be carried over is refused or named.
+#[test]
+fn import_converts_a_legacy_package_and_names_what_it_cannot_carry_over() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let modules = repo.join("modules");
+    let root = std::env::temp_dir().join(format!("mvf-cli-import-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for demo in [
+        "inspection-demo",
+        "loop-demo",
+        "multilang-demo",
+        "py-invert-demo",
+    ] {
+        copy_dir(
+            &repo.join("packages").join(demo),
+            &root.join("packages").join(demo),
+        );
+    }
+    let import = |args: &[&std::ffi::OsStr]| {
+        mvf()
+            .arg("import")
+            .args(args)
+            .arg("--modules")
+            .arg(&modules)
+            .output()
+            .expect("import")
+    };
+    let text = |o: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        )
+    };
+
+    // A 13-node package: ids renamed, modules mapped to builtins, Python modules kept, valid.
+    let inspection = root.join("packages/inspection-demo");
+    let out = import(&[inspection.as_os_str()]);
+    assert!(out.status.success(), "{}", text(&out));
+    let said = text(&out);
+    for line in [
+        "id      saveInverted -> save-inverted",
+        "builtin cam: mvf.folder-source -> folder-source",
+        "13 nodes, 12 data edges, 0 control edges — valid",
+        "py.brightness-classifier@1.0.0",
+    ] {
+        assert!(said.contains(line), "missing `{line}` in:\n{said}");
+    }
+    let yaml = std::fs::read_to_string(inspection.join("pipeline.yaml")).expect("pipeline.yaml");
+    assert!(
+        yaml.contains("onError: { sources: \"fail\", nodes: \"skip\" }"),
+        "{yaml}"
+    );
+    assert!(
+        yaml.contains("# save-inverted: "),
+        "display names kept as comments"
+    );
+    // Not overwritten without --force.
+    let again = import(&[inspection.as_os_str()]);
+    assert_eq!(again.status.code(), Some(2), "{}", text(&again));
+    assert!(text(&again).contains("--force"));
+
+    // The converted loop demo runs (folder source rewound by the loop, frames written).
+    let looped = root.join("packages/loop-demo");
+    assert!(import(&[looped.as_os_str()]).status.success());
+    let run = mvf()
+        .args(["run", "--max-cycles", "6", "--json"])
+        .arg(looped.join("pipeline.yaml"))
+        .arg("--modules")
+        .arg(&modules)
+        .env("MVF_BINDING_CAM_INTERVAL", "0")
+        .output()
+        .expect("run");
+    assert!(run.status.success(), "{}", text(&run));
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("\"cycle-limit\""),
+        "{}",
+        text(&run)
+    );
+    assert!(
+        looped.join("out").is_dir(),
+        "the dataset writer wrote frames"
+    );
+
+    // A .NET in-process camera has no contract here: written, named, exit 1.
+    let cognex = root.join("packages/py-invert-demo");
+    let out = import(&[cognex.as_os_str()]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        text(&out).contains("MISSING camera1: module `mvf.realworld-cognex-camera`"),
+        "{}",
+        text(&out)
+    );
+
+    // Refused outright, nothing written.
+    for (doc, expect) in [
+        (
+            r#"{"name":"x","nodes":[{"id":"a","module":"mvf.folder-source","lifecycle":"resident"}],"edges":[]}"#,
+            "field `lifecycle`",
+        ),
+        (
+            r#"{"name":"x","nodes":[{"id":"a","module":"mvf.folder-source"},{"id":"b","module":"mvf.dataset-writer"}],"edges":[{"from":"a","to":"b"}]}"#,
+            "must close into a `loop`",
+        ),
+        (
+            r#"{"name":"x","nodes":[{"id":"saveOk","module":"mvf.dataset-writer"},{"id":"save-ok","module":"mvf.dataset-writer"}],"edges":[]}"#,
+            "already uses",
+        ),
+        (
+            r#"{"name":"x","nodes":[{"id":"a","primitive":"while"}],"edges":[]}"#,
+            "unknown primitive",
+        ),
+    ] {
+        let dir = root.join("bad");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(dir.join("pipeline.json"), doc).expect("json");
+        let out = import(&[dir.as_os_str()]);
+        assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+        assert!(
+            text(&out).contains(expect),
+            "missing `{expect}` in {}",
+            text(&out)
+        );
+        assert!(!dir.join("pipeline.yaml").exists());
+    }
+}
